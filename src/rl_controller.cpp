@@ -9,6 +9,7 @@
 #include <vector>
 
 #include <eigen3/Eigen/Dense>
+#include <ament_index_cpp/get_package_share_directory.hpp>
 #include <rclcpp/logging.hpp>
 #include <rclcpp/node.hpp>
 #include <rmcs_executor/component.hpp>
@@ -151,10 +152,14 @@ public:
         prepare_pos_.assign(position_pd_joints_.size(), 0.0);
 
         // ---- 加载策略 ----
+        // rl_model_path 支持相对路径：相对本包 share 目录解析
+        // （如 "models/policy.onnx" → <install>/share/rmcs_rl/models/policy.onnx），
+        // 随 sync-remote 同步，开发/运行环境一致。
         inference_ready_ = false;
-        if (!rl_model_path_.empty()) {
+        const std::string resolved_model_path = resolve_model_path_(rl_model_path_);
+        if (!resolved_model_path.empty()) {
             inference_ready_ = inference_.load(OnnxRuntimeInference::Config{
-                .model_path = rl_model_path_,
+                .model_path = resolved_model_path,
                 .input_name = "obs",
                 .output_name = "actions",
                 .input_size = rl_obs_size_,
@@ -162,13 +167,14 @@ public:
             });
             if (inference_ready_) {
                 RCLCPP_INFO(
-                    get_logger(), "RL policy loaded: %s ([1,%zu] -> [1,%zu], %.1f Hz, %zu joints)",
-                    rl_model_path_.c_str(), rl_obs_size_, rl_action_size_, rl_inference_frequency_,
-                    dof);
+                    get_logger(),
+                    "RL policy loaded: %s ([1,%zu] -> [1,%zu], %.1f Hz, %zu joints)",
+                    resolved_model_path.c_str(), rl_obs_size_, rl_action_size_,
+                    rl_inference_frequency_, dof);
             } else {
                 RCLCPP_ERROR(
                     get_logger(), "Failed to load RL policy '%s'; RL state unavailable",
-                    rl_model_path_.c_str());
+                    resolved_model_path.c_str());
             }
         } else {
             RCLCPP_ERROR(get_logger(), "rl_model_path not set; RL state unavailable");
@@ -218,6 +224,17 @@ private:
             return value;
         RCLCPP_WARN(get_logger(), "Parameter '%s' not set, using default", name.c_str());
         return default_value;
+    }
+
+    /// 相对路径 → 本包 share 目录下；绝对路径原样返回；空返回空。
+    static std::string resolve_model_path_(const std::string& path) {
+        if (path.empty() || path.front() == '/')
+            return path;
+        try {
+            return ament_index_cpp::get_package_share_directory("rmcs_rl") + "/" + path;
+        } catch (const std::exception&) {
+            return path;
+        }
     }
 
     // ---- 命令 ----

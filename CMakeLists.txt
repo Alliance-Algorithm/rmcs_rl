@@ -58,4 +58,7 @@ target_link_libraries(${PROJECT_NAME} ${ONNXRUNTIME_ROOT_DIR}/lib/libonnxruntime
 
 pluginlib_export_plugin_description_file(rmcs_executor plugins.xml)
 
+# 策略模型随包安装（install/ 内，随 sync-remote 同步到运行机）
+install(DIRECTORY models DESTINATION share/${PROJECT_NAME})
+
 ament_auto_package()

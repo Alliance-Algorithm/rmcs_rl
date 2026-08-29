@@ -1,6 +1,10 @@
 # 策略模型
 
-把训练导出的 `policy.onnx` 放到本目录（或任意路径，YAML `rl_model_path` 指向即可）。
+把训练导出的策略命名为 `policy.onnx` 放到本目录。
+
+本目录随包安装进 `install/share/rmcs_rl/models/`，`sync-remote` 同步时自动带到运行机；
+YAML 配置 `rl_model_path: "models/policy.onnx"`（相对路径，相对本包 share 目录解析）。
+也支持任意绝对路径（`rl_model_path` 指向即可，此时需自行分发模型文件）。
 
 ## 合同（必须严格满足）
 

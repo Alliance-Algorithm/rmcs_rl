@@ -64,8 +64,15 @@ build-rmcs
 
 ### 放置策略模型
 
-将训练导出的 `policy.onnx` 放到任意路径（如 `models/` 或 `/opt/rmcs/policies/`），
+将训练导出的 `policy.onnx` 放到本包 `models/` 目录（命名 `policy.onnx`）。
+模型随包安装进 `install/`，`sync-remote` 时自动同步到运行机——无需单独 scp。
 合同要求见 [models/README.md](models/README.md)。
+
+YAML 中 `rl_model_path` 写相对路径（相对本包 share 目录，开发/运行环境一致）：
+
+```yaml
+rl_model_path: "models/policy.onnx"
+```
 
 ### 配置
 
@@ -138,22 +145,22 @@ rmcs_rl/
 - `libonnxruntime.so.1`：构建时由 CMake 自动下载官方预编译包（进 `build/`）；
   运行侧（mini PC / 运行容器）需另行安装
 
-### 运行侧安装（开发容器 → 运行机）
-
-开发容器中构建后，`sync-remote` 只同步 `rmcs_ws/install`，**不包含 onnxruntime**
-（它在 `build/` 中）。在运行机上执行一键安装：
+### 部署流程（开发容器 → 运行机）
 
 ```sh
-# 方式一：从开发容器直接推到运行机执行（默认 ssh 别名 remote）
-bash tool/install_rl_deps.sh remote
+# 1. 开发容器内：模型放入 models/，构建
+cp policy.onnx src/rmcs_rl/models/policy.onnx
+build-rmcs
 
-# 方式二：在运行机/运行容器内直接安装
-bash tool/install_rl_deps.sh local
+# 2. 同步安装树到运行机（unison，含模型与配置；onnxruntime 不在其中）
+sync-remote
+
+# 3. 运行机一键安装 onnxruntime（仅首次/换版本时）
+bash tool/install_rl_deps.sh remote
 ```
 
-脚本自动检测架构（AMD/Intel CPU → `linux-x64`；ARM64 → `linux-aarch64`），
-下载官方 ONNX Runtime 1.20.0 预编译包并做 SHA256 校验，安装到 `/usr/local/lib` 并 `ldconfig`，
-幂等（已装则跳过）。
+> 之后更新模型/代码只需重复 1+2（模型随 install/ 同步，无需单独 scp）；
+> 仅当更换 onnxruntime 版本时才需重跑第 3 步。
 
 ## 相关
 
