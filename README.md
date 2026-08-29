@@ -8,10 +8,9 @@ RMCS（RoboMaster Control System）的**通用强化学习（RL）策略部署�
 
 ## 设计原则
 
-- **与机器人解耦**：策略合同（观测/动作格式）与参数（关节描述、PD 分组、缩放系数）全部通过
-  YAML 配置，换机器人只需改配置与模型，无需修改代码。
+- **与机器人解耦**：策略合同（观测/动作格式）与参数（关节描述、PD 分组、缩放系数）全部通过YAML 配置。
 - **与训练对齐**：观测构建与低层控制（PD）与训练环境保持同构，保证 sim-to-real 一致性。
-- **可选集成**：本包不依赖 `rmcs_core`，以独立子模块形式引用——需要就引用，不需要就不构建。
+- **可选集成**：本包不依赖 `rmcs_core`，以独立子模块形式引用。
 
 ## 工作方式
 
@@ -46,17 +45,24 @@ RlController
 
 ## 快速开始
 
-### 1. 引用本包（可选子模块）
+### 项目构建
 
-```bash
+先保证 `rmcs_executor` 正确构建，然后引用本包并构建：
+
+```sh
+# 进入工作空间的 src/ 目录下，引用本包（可选子模块，与 rmcs_auto_aim_v2 一致）
 cd <RMCS 仓库>
 git submodule add <本仓库 URL> rmcs_ws/src/rmcs_rl
 git submodule update --init --recursive
+
+# 构建依赖（RMCS 标准构建脚本，等同 colcon build）
+build-rmcs
 ```
 
-不需要时直接删除目录即可（`rmcs_core` 不依赖本包，colcon 自动跳过）。
+> 首次配置本包时，CMake 会自动下载官方 ONNX Runtime 预编译包（约 6MB，SHA256 校验）。
+> 不需要本包时直接删除目录即可（`rmcs_core` 不依赖本包，构建自动跳过）。
 
-### 2. 放置策略模型
+### 放置策略模型
 
 将训练导出的 `policy.onnx` 放到任意路径（如 `models/` 或 `/opt/rmcs/policies/`），
 合同要求见 [models/README.md](models/README.md)。
@@ -100,14 +106,12 @@ rl_controller:
 | `obs_*_scale`、`clip_*` | 观测缩放与裁剪 |
 | `auto_enter_rl`、`prepare_*` | FSM 行为 |
 
-> 所有数值必须与对应机器人的训练配置一致；换机器人 = 换模型 + 换上述配置。
+### 4. 运行
 
-### 4. 构建与运行
+构建完成后（见"项目构建"），启动 RMCS：
 
-```bash
-source /opt/ros/jazzy/setup.bash
-cd <RMCS>/rmcs_ws
-colcon build --packages-select rmcs_rl   # 首次配置时自动下载 onnxruntime
+```sh
+launch-rmcs
 ```
 
 启动后可通过 `ros2 topic echo` 查看 `{joint_base_path}/rl/observation`、
