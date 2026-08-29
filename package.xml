@@ -1,7 +1,7 @@
 <?xml version="1.0"?>
 <?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
 <package format="3">
-  <name>rmcs_wheel_leg_rl</name>
+  <name>rmcs_rl</name>
   <version>0.1.0</version>
   <description>RMCS wheel-leg infantry RL policy deployment (ONNX Runtime CPU inference on the mini PC)</description>
   <maintainer email="alliance@njust.edu.cn">alliance</maintainer>
