@@ -1,9 +1,10 @@
 #include <algorithm>
-#include <array>
 #include <chrono>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <memory>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -16,71 +17,80 @@
 
 namespace rmcs::rl {
 
-/// 轮腿步兵 RL 控制器（推理段在 mini PC / RMCS 上位机）
+/// 通用 RL 策略部署控制器（机器人无关）
 ///
-/// 策略合同与 legged_gym 训练环境 `infantry_v4` 逐项对齐：
-///   - DOF 序 [rf0, rf1, r_wheel, lf0, lf1, l_wheel]（训练 URDF 关节序）
-///   - 观测 28 维：cmd3 | height_cmd(×5) | ang_vel3(×0.5) | gravity3 | joint_pos6(×1, 轮置零)
-///     | joint_vel6(×0.1) | last_actions6
-///   - 动作 6 维：腿位置目标 = leg_action_scale×a + default_dof_pos；轮速度目标 = wheel_velocity_scale×a
-///   - PD：腿位置 PD（Kp/Kd），轮速度 PD（Kp/Kd），输出力矩
-///   - 推理频率默认 50Hz（训练控制频率 sim dt 0.005 × decimation 4），PD 按执行频率每周期跑
+/// 策略合同（训练导出模型必须满足，tensor 名 "obs"/"actions"，float32）：
+///   obs    = cmd3 | height_cmd(×obs_height_scale) | ang_vel3(×obs_ang_vel_scale)
+///            | gravity3(×obs_gravity_scale)
+///            | joint_pos(N)(×obs_dof_pos_scale，velocity_pd 关节位置观测置零)
+///            | joint_vel(N)(×obs_dof_vel_scale) | last_actions(N)
+///   actions = N 维，与 joint_names 序一一对应（N = 关节数）
 ///
-/// FSM：INIT(0) / IDLE(1) / PREPARE(2) / RL(3)，经 /wheel_leg/command/state 切换；
-/// 任意异常 failSafe 强制回 IDLE；RMCS reset（/wheel_leg/reset_count 变化）清空全部状态。
-class WheelLegRLController
+/// 低层控制（与训练环境同构）：
+///   position_pd_joints：pos_target = position_action_scale×a + default_dof_pos，位置 PD → 力矩
+///   velocity_pd_joints：vel_target = velocity_action_scale×a，速度 PD → 力矩
+/// 默认参数对应 legged_gym `infantry_v4`（6 关节轮腿）训练合同。
+///
+/// FSM：INIT(0) / IDLE(1) / PREPARE(2) / RL(3)，经 {joint_base_path}/command/state 切换；
+/// 异常 failSafe 强制回 IDLE；RMCS reset（{joint_base_path}/reset_count 变化）清空全部状态。
+class RlController
     : public rmcs_executor::Component
     , public rclcpp::Node {
-
-    enum JointIndex : std::size_t {
-        kRf0 = 0,
-        kRf1 = 1,
-        kRWheel = 2,
-        kLf0 = 3,
-        kLf1 = 4,
-        kLWheel = 5,
-    };
-
-    static constexpr std::size_t kDofCount = 6;
-    static constexpr std::size_t kLegCount = 4;
-    static constexpr std::array<std::size_t, kLegCount> kLegIndices{kRf0, kRf1, kLf0, kLf1};
-    static constexpr std::array<std::size_t, 2> kWheelIndices{kRWheel, kLWheel};
-    static constexpr std::size_t kObservationSize = 28;
-    static constexpr std::size_t kActionSize = 6;
-
-    static constexpr std::array<const char*, kDofCount> kJointNames{
-        "rf0", "rf1", "r_wheel", "lf0", "lf1", "l_wheel"};
 
     enum class State : std::uint8_t { kInit = 0, kIdle = 1, kPrepare = 2, kRl = 3 };
 
 public:
-    explicit WheelLegRLController()
+    explicit RlController()
         : Node(
               get_component_name(),
               rclcpp::NodeOptions{}.automatically_declare_parameters_from_overrides(true)) {
 
-        // ---- 策略合同参数 ----
-        default_dof_pos_ = param_or("default_dof_pos", std::vector<double>{-0.5, -0.35, 0.0, 0.5, 0.35, 0.0});
-        dof_pos_limits_lower_ =
-            param_or("dof_pos_limits_lower", std::vector<double>{-100.0, -0.9, -100.0, -100.0, -0.65, -100.0});
-        dof_pos_limits_upper_ =
-            param_or("dof_pos_limits_upper", std::vector<double>{100.0, 0.65, 100.0, 100.0, 0.9, 100.0});
-        leg_action_scale_ = param_or("leg_action_scale", 0.5);
-        wheel_velocity_scale_ = param_or("wheel_velocity_scale", 10.0);
-        max_wheel_vel_ = param_or("max_wheel_vel", 100.0);
-        max_wheel_torque_ = param_or("max_wheel_torque", 6.0);
-        leg_kp_ = param_or("leg_kp", 200.0);
-        leg_kd_ = param_or("leg_kd", 4.0);
-        wheel_kp_ = param_or("wheel_kp", 20.0);
-        wheel_kd_ = param_or("wheel_kd", 0.5);
-        leg_torque_max_ = param_or("leg_torque_max", 35.0);
+        // ---- 机器人描述（通用参数化）----
+        joint_names_ = param_or(
+            "joint_names",
+            std::vector<std::string>{"rf0", "rf1", "r_wheel", "lf0", "lf1", "l_wheel"});
+        joint_base_path_ = param_or<std::string>("joint_base_path", "/wheel_leg");
+        position_pd_joints_ = param_or(
+            "position_pd_joints", std::vector<std::int64_t>{0, 1, 3, 4});
+        velocity_pd_joints_ = param_or(
+            "velocity_pd_joints", std::vector<std::int64_t>{2, 5});
 
-        // ---- 观测缩放（与训练 normalization.obs_scales 一致）----
+        const std::size_t dof = joint_names_.size();
+        if (dof == 0 || dof > 32)
+            throw std::invalid_argument("joint_names must contain 1..32 joints");
+        for (const auto idx : position_pd_joints_)
+            if (idx < 0 || static_cast<std::size_t>(idx) >= dof)
+                throw std::invalid_argument("position_pd_joints out of range");
+        for (const auto idx : velocity_pd_joints_)
+            if (idx < 0 || static_cast<std::size_t>(idx) >= dof)
+                throw std::invalid_argument("velocity_pd_joints out of range");
+
+        dof_ = dof;
+        const std::size_t default_obs_size = 10 + 3 * dof;
+        const std::size_t default_action_size = dof;
+
+        // ---- 策略合同参数 ----
+        rl_obs_size_ = static_cast<std::size_t>(param_or("rl_obs_size", static_cast<std::int64_t>(default_obs_size)));
+        rl_action_size_ = static_cast<std::size_t>(param_or("rl_action_size", static_cast<std::int64_t>(default_action_size)));
+        default_dof_pos_ = param_or("default_dof_pos", std::vector<double>(dof, 0.0));
+        dof_pos_limits_lower_ = param_or("dof_pos_limits_lower", std::vector<double>(dof, -100.0));
+        dof_pos_limits_upper_ = param_or("dof_pos_limits_upper", std::vector<double>(dof, 100.0));
+        position_action_scale_ = param_or("position_action_scale", 0.5);
+        velocity_action_scale_ = param_or("velocity_action_scale", 10.0);
+        max_velocity_ = param_or("max_velocity", 100.0);
+        position_kp_ = param_or("position_kp", 200.0);
+        position_kd_ = param_or("position_kd", 4.0);
+        velocity_kp_ = param_or("velocity_kp", 20.0);
+        velocity_kd_ = param_or("velocity_kd", 0.5);
+        position_torque_max_ = param_or("position_torque_max", 35.0);
+        velocity_torque_max_ = param_or("velocity_torque_max", 6.0);
+
+        // ---- 观测缩放（训练 normalization 对齐）----
+        obs_height_scale_ = param_or("obs_height_scale", 5.0);
         obs_ang_vel_scale_ = param_or("obs_ang_vel_scale", 0.5);
         obs_gravity_scale_ = param_or("obs_gravity_scale", 1.0);
         obs_dof_pos_scale_ = param_or("obs_dof_pos_scale", 1.0);
         obs_dof_vel_scale_ = param_or("obs_dof_vel_scale", 0.1);
-        obs_height_scale_ = param_or("obs_height_scale", 5.0);
         clip_observations_ = param_or("clip_observations", 100.0);
         clip_actions_ = param_or("clip_actions", 100.0);
 
@@ -96,7 +106,7 @@ public:
         // ---- FSM / PREPARE ----
         auto_enter_rl_ = param_or("auto_enter_rl", false);
         prepare_dof_pos_ = param_or(
-            "prepare_dof_pos", std::vector<double>{-0.5, -0.35, 0.5, 0.35}); // 默认站立位（腿序 rf0,rf1,lf0,lf1）
+            "prepare_dof_pos", std::vector<double>{-0.5, -0.35, 0.5, 0.35}); // 对应 position_pd_joints 序
         prepare_kp_ = param_or("prepare_kp", 80.0);
         prepare_kd_ = param_or("prepare_kd", 2.0);
         prepare_max_velocity_ = param_or("prepare_max_velocity", 1.0);
@@ -107,29 +117,38 @@ public:
         rl_inference_frequency_ = param_or("rl_inference_frequency", 50.0);
         rl_publish_network_io_ = param_or("rl_publish_network_io", false);
 
-        // ---- 注册接口（构造体内直接可见）----
-        for (std::size_t i = 0; i < kDofCount; ++i) {
-            const std::string base = std::string("/wheel_leg/") + kJointNames[i];
+        // ---- 接口（按 joint_names 动态注册）----
+        joint_angle_input_ = std::make_unique<rmcs_executor::Component::InputInterface<double>[]>(dof);
+        joint_velocity_input_ = std::make_unique<rmcs_executor::Component::InputInterface<double>[]>(dof);
+        joint_control_torque_output_ = std::make_unique<rmcs_executor::Component::OutputInterface<double>[]>(dof);
+        for (std::size_t i = 0; i < dof; ++i) {
+            const std::string base = joint_base_path_ + "/" + joint_names_[i];
             register_input(base + "/angle", joint_angle_input_[i]);
             register_input(base + "/velocity", joint_velocity_input_[i]);
             register_output(base + "/control_torque", joint_control_torque_output_[i], 0.0);
         }
 
-        register_input("/wheel_leg/imu/quaternion", imu_quaternion_);
-        register_input("/wheel_leg/imu/angular_velocity", imu_angular_velocity_);
+        register_input(joint_base_path_ + "/imu/quaternion", imu_quaternion_);
+        register_input(joint_base_path_ + "/imu/angular_velocity", imu_angular_velocity_);
 
-        register_input("/wheel_leg/command/vx", command_vx_, false);
-        register_input("/wheel_leg/command/yaw_rate", command_yaw_rate_, false);
-        register_input("/wheel_leg/command/height", command_height_, false);
-        register_input("/wheel_leg/command/state", command_state_, false);
-        register_input("/wheel_leg/reset_count", reset_count_, false);
+        register_input(joint_base_path_ + "/command/vx", command_vx_, false);
+        register_input(joint_base_path_ + "/command/yaw_rate", command_yaw_rate_, false);
+        register_input(joint_base_path_ + "/command/height", command_height_, false);
+        register_input(joint_base_path_ + "/command/state", command_state_, false);
+        register_input(joint_base_path_ + "/reset_count", reset_count_, false);
 
         if (rl_publish_network_io_) {
             register_output(
-                "/wheel_leg/rl/observation", rl_observation_output_, std::array<double, kObservationSize>{});
-            register_output("/wheel_leg/rl/action", rl_action_output_, std::array<double, kActionSize>{});
+                joint_base_path_ + "/rl/observation", rl_observation_output_, std::vector<double>{});
+            register_output(
+                joint_base_path_ + "/rl/action", rl_action_output_, std::vector<double>{});
         }
-        register_output("/wheel_leg/rl/state", rl_state_output_, 0);
+        register_output(joint_base_path_ + "/rl/state", rl_state_output_, 0);
+
+        // ---- 运行时缓冲 ----
+        action_.assign(rl_action_size_, 0.0);
+        last_actions_.assign(rl_action_size_, 0.0);
+        prepare_pos_.assign(position_pd_joints_.size(), 0.0);
 
         // ---- 加载策略 ----
         inference_ready_ = false;
@@ -138,13 +157,14 @@ public:
                 .model_path = rl_model_path_,
                 .input_name = "obs",
                 .output_name = "actions",
-                .input_size = kObservationSize,
-                .output_size = kActionSize,
+                .input_size = rl_obs_size_,
+                .output_size = rl_action_size_,
             });
             if (inference_ready_) {
                 RCLCPP_INFO(
-                    get_logger(), "RL policy loaded: %s ([1,%zu] -> [1,%zu], %.1f Hz)",
-                    rl_model_path_.c_str(), kObservationSize, kActionSize, rl_inference_frequency_);
+                    get_logger(), "RL policy loaded: %s ([1,%zu] -> [1,%zu], %.1f Hz, %zu joints)",
+                    rl_model_path_.c_str(), rl_obs_size_, rl_action_size_, rl_inference_frequency_,
+                    dof);
             } else {
                 RCLCPP_ERROR(
                     get_logger(), "Failed to load RL policy '%s'; RL state unavailable",
@@ -251,42 +271,54 @@ private:
         state_ = target;
         reset_policy_runtime_();
         if (target == State::kPrepare) {
-            for (std::size_t k = 0; k < kLegCount; ++k) {
-                prepare_pos_[k] = read_joint_angle_(kLegIndices[k]);
-            }
+            for (std::size_t k = 0; k < position_pd_joints_.size(); ++k)
+                prepare_pos_[k] = read_joint_angle_(static_cast<std::size_t>(position_pd_joints_[k]));
             prepare_reached_ = false;
         }
         RCLCPP_INFO(get_logger(), "Entering state %d", static_cast<int>(target));
     }
 
     // ---- 观测 ----
-    bool build_observation_(std::array<double, kObservationSize>& obs) {
-        // 0-2 指令（缩放 1.0，已在 read_commands_ 限幅）
-        obs[0] = vx_;
-        obs[1] = 0.0; // 横向速度指令恒 0（训练 lin_vel_y = 0）
-        obs[2] = yaw_rate_;
+    bool is_velocity_pd_joint_(std::size_t joint_index) const {
+        return std::find(
+                   velocity_pd_joints_.begin(), velocity_pd_joints_.end(),
+                   static_cast<std::int64_t>(joint_index))
+            != velocity_pd_joints_.end();
+    }
+
+    bool build_observation_(std::vector<double>& obs) {
+        obs.assign(rl_obs_size_, 0.0);
+        std::size_t k = 0;
+        // 0-2 指令（缩放 1.0，已限幅）
+        obs[k++] = vx_;
+        obs[k++] = 0.0; // 横向速度指令恒 0（训练 lin_vel_y = 0）
+        obs[k++] = yaw_rate_;
         // 3 目标高度
-        obs[3] = height_ * obs_height_scale_;
+        obs[k++] = height_ * obs_height_scale_;
         // 4-6 机体角速度（机体系，IMU 陀螺）
         const Eigen::Vector3d ang_vel = *imu_angular_velocity_;
         for (std::size_t i = 0; i < 3; ++i)
-            obs[4 + i] = ang_vel[i] * obs_ang_vel_scale_;
-        // 7-9 重力投影（世界 [0,0,-1] 旋转到机体系；quat 为世界→机体，wxyz）
+            obs[k++] = ang_vel[i] * obs_ang_vel_scale_;
+        // 7-9 重力投影（世界 [0,0,-1] 旋转到机体系；quat 世界→机体，wxyz）
         const Eigen::Vector3d gravity = *imu_quaternion_ * Eigen::Vector3d(0.0, 0.0, -1.0);
         for (std::size_t i = 0; i < 3; ++i)
-            obs[7 + i] = gravity[i] * obs_gravity_scale_;
-        // 10-15 关节位置偏差（轮位置观测置零，与训练 mute_wheel_pos_obs 一致）
-        for (std::size_t i = 0; i < kDofCount; ++i) {
-            const bool wheel = (i == kRWheel || i == kLWheel);
-            obs[10 + i] = wheel ? 0.0 : (read_joint_angle_(i) - default_dof_pos_[i]) * obs_dof_pos_scale_;
+            obs[k++] = gravity[i] * obs_gravity_scale_;
+        // 10.. 关节位置偏差（velocity_pd 关节位置观测置零，与训练 mute 一致）
+        for (std::size_t i = 0; i < dof_; ++i) {
+            obs[k++] = is_velocity_pd_joint_(i)
+                ? 0.0
+                : (read_joint_angle_(i) - default_dof_pos_[i]) * obs_dof_pos_scale_;
         }
-        // 16-21 关节速度
-        for (std::size_t i = 0; i < kDofCount; ++i)
-            obs[16 + i] = read_joint_velocity_(i) * obs_dof_vel_scale_;
-        // 22-27 上一帧动作（原始动作，与训练 obs 一致）
-        for (std::size_t i = 0; i < kActionSize; ++i)
-            obs[22 + i] = last_actions_[i];
-        // 裁剪 + 有限性检查
+        // 关节速度
+        for (std::size_t i = 0; i < dof_; ++i)
+            obs[k++] = read_joint_velocity_(i) * obs_dof_vel_scale_;
+        // 上一帧动作（原始动作，与训练 obs 一致）
+        for (std::size_t i = 0; i < rl_action_size_; ++i)
+            obs[k++] = last_actions_[i];
+
+        if (k != rl_obs_size_)
+            return false; // 观测尺寸与模型合同不符
+
         for (double& value : obs)
             value = std::clamp(value, -clip_observations_, clip_observations_);
         return std::all_of(obs.begin(), obs.end(), [](double v) { return std::isfinite(v); });
@@ -312,24 +344,22 @@ private:
             fail_safe_("policy session is not ready");
             return;
         }
-        std::array<double, kObservationSize> obs;
+        std::vector<double> obs;
         if (!build_observation_(obs)) {
-            fail_safe_("policy observation is not a finite 28D vector");
+            fail_safe_("policy observation size/validity mismatch");
             return;
         }
         if (rl_publish_network_io_)
             (*rl_observation_output_) = obs;
 
         if (should_infer_()) {
-            std::array<float, kObservationSize> obs_f;
-            for (std::size_t i = 0; i < kObservationSize; ++i)
-                obs_f[i] = static_cast<float>(obs[i]);
-            std::array<float, kActionSize> act_f;
+            std::vector<float> obs_f(obs.begin(), obs.end());
+            std::vector<float> act_f(rl_action_size_, 0.0F);
             if (!inference_.run(obs_f, act_f)) {
                 fail_safe_("ONNX Runtime rejected the policy input");
                 return;
             }
-            for (std::size_t i = 0; i < kActionSize; ++i)
+            for (std::size_t i = 0; i < rl_action_size_; ++i)
                 action_[i] = std::clamp(static_cast<double>(act_f[i]), -clip_actions_, clip_actions_);
             last_actions_ = action_;
             if (rl_publish_network_io_)
@@ -339,35 +369,37 @@ private:
         apply_pd_();
     }
 
-    // ---- PD（与训练 _compute_torques 一致：腿位置 PD + 轮速度 PD，输出力矩）----
+    // ---- PD（与训练 _compute_torques 一致：位置组 PD + 速度组 PD，输出力矩）----
     void apply_pd_() {
-        std::array<double, kDofCount> torques{};
+        std::vector<double> torques(dof_, 0.0);
 
-        for (const std::size_t leg : kLegIndices) {
+        for (const auto idx : position_pd_joints_) {
+            const std::size_t i = static_cast<std::size_t>(idx);
             const double target = std::clamp(
-                leg_action_scale_ * action_[leg] + default_dof_pos_[leg],
-                dof_pos_limits_lower_[leg], dof_pos_limits_upper_[leg]);
-            const double tau = leg_kp_ * (target - read_joint_angle_(leg))
-                               - leg_kd_ * read_joint_velocity_(leg);
-            torques[leg] = std::clamp(tau, -leg_torque_max_, leg_torque_max_);
+                position_action_scale_ * action_[i] + default_dof_pos_[i],
+                dof_pos_limits_lower_[i], dof_pos_limits_upper_[i]);
+            const double tau = position_kp_ * (target - read_joint_angle_(i))
+                               - position_kd_ * read_joint_velocity_(i);
+            torques[i] = std::clamp(tau, -position_torque_max_, position_torque_max_);
         }
-        for (const std::size_t wheel : kWheelIndices) {
+        for (const auto idx : velocity_pd_joints_) {
+            const std::size_t i = static_cast<std::size_t>(idx);
             const double vel_target = std::clamp(
-                wheel_velocity_scale_ * action_[wheel], -max_wheel_vel_, max_wheel_vel_);
-            const double tau = wheel_kp_ * (vel_target - read_joint_velocity_(wheel))
-                               - wheel_kd_ * read_joint_velocity_(wheel);
-            torques[wheel] = std::clamp(tau, -max_wheel_torque_, max_wheel_torque_);
+                velocity_action_scale_ * action_[i], -max_velocity_, max_velocity_);
+            const double tau = velocity_kp_ * (vel_target - read_joint_velocity_(i))
+                               - velocity_kd_ * read_joint_velocity_(i);
+            torques[i] = std::clamp(tau, -velocity_torque_max_, velocity_torque_max_);
         }
 
         write_outputs_(torques);
     }
 
-    // ---- PREPARE：插值到站立预备位 ----
+    // ---- PREPARE：position_pd 关节插值到预备位 ----
     void prepare_step_(double dt) {
-        std::array<double, kDofCount> torques{};
+        std::vector<double> torques(dof_, 0.0);
         bool reached = true;
-        for (std::size_t k = 0; k < kLegCount; ++k) {
-            const std::size_t idx = kLegIndices[k];
+        for (std::size_t k = 0; k < position_pd_joints_.size(); ++k) {
+            const std::size_t i = static_cast<std::size_t>(position_pd_joints_[k]);
             const double target = prepare_dof_pos_[k];
             const double step = prepare_max_velocity_ * dt;
             const double diff = target - prepare_pos_[k];
@@ -377,11 +409,10 @@ private:
             } else {
                 prepare_pos_[k] = target;
             }
-            const double tau = prepare_kp_ * (prepare_pos_[k] - read_joint_angle_(idx))
-                               - prepare_kd_ * read_joint_velocity_(idx);
-            torques[idx] = std::clamp(tau, -leg_torque_max_, leg_torque_max_);
-            // 插值目标已到但关节实际未跟上（外力/摩擦）也算未到达
-            if (std::abs(prepare_pos_[k] - read_joint_angle_(idx)) > prepare_reach_threshold_)
+            const double tau = prepare_kp_ * (prepare_pos_[k] - read_joint_angle_(i))
+                               - prepare_kd_ * read_joint_velocity_(i);
+            torques[i] = std::clamp(tau, -position_torque_max_, position_torque_max_);
+            if (std::abs(prepare_pos_[k] - read_joint_angle_(i)) > prepare_reach_threshold_)
                 reached = false;
         }
         prepare_reached_ = reached;
@@ -389,16 +420,14 @@ private:
     }
 
     // ---- 输出 ----
-    void write_outputs_(const std::array<double, kDofCount>& torques) {
-        for (std::size_t i = 0; i < kDofCount; ++i) {
+    void write_outputs_(const std::vector<double>& torques) {
+        for (std::size_t i = 0; i < dof_; ++i) {
             const double value = std::isfinite(torques[i]) ? torques[i] : 0.0;
             *joint_control_torque_output_[i] = value;
         }
     }
 
-    void write_zero_outputs_() {
-        write_outputs_(std::array<double, kDofCount>{});
-    }
+    void write_zero_outputs_() { write_outputs_(std::vector<double>(dof_, 0.0)); }
 
     // ---- 安全 ----
     void fail_safe_(const std::string& reason) {
@@ -412,9 +441,9 @@ private:
     }
 
     void reset_policy_runtime_() {
-        last_actions_.fill(0.0);
-        action_.fill(0.0);
-        prepare_pos_.fill(0.0);
+        std::fill(last_actions_.begin(), last_actions_.end(), 0.0);
+        std::fill(action_.begin(), action_.end(), 0.0);
+        std::fill(prepare_pos_.begin(), prepare_pos_.end(), 0.0);
         prepare_reached_ = false;
         last_inference_time_initialized_ = false;
     }
@@ -438,24 +467,32 @@ private:
     }
 
     // ---- 参数 ----
+    std::vector<std::string> joint_names_;
+    std::string joint_base_path_ = "/wheel_leg";
+    std::vector<std::int64_t> position_pd_joints_;
+    std::vector<std::int64_t> velocity_pd_joints_;
+    std::size_t dof_ = 0;
+
     std::vector<double> default_dof_pos_;
     std::vector<double> dof_pos_limits_lower_;
     std::vector<double> dof_pos_limits_upper_;
-    double leg_action_scale_ = 0.5;
-    double wheel_velocity_scale_ = 10.0;
-    double max_wheel_vel_ = 100.0;
-    double max_wheel_torque_ = 6.0;
-    double leg_kp_ = 200.0;
-    double leg_kd_ = 4.0;
-    double wheel_kp_ = 20.0;
-    double wheel_kd_ = 0.5;
-    double leg_torque_max_ = 35.0;
+    double position_action_scale_ = 0.5;
+    double velocity_action_scale_ = 10.0;
+    double max_velocity_ = 100.0;
+    double position_kp_ = 200.0;
+    double position_kd_ = 4.0;
+    double velocity_kp_ = 20.0;
+    double velocity_kd_ = 0.5;
+    double position_torque_max_ = 35.0;
+    double velocity_torque_max_ = 6.0;
 
+    std::size_t rl_obs_size_ = 28;
+    std::size_t rl_action_size_ = 6;
+    double obs_height_scale_ = 5.0;
     double obs_ang_vel_scale_ = 0.5;
     double obs_gravity_scale_ = 1.0;
     double obs_dof_pos_scale_ = 1.0;
     double obs_dof_vel_scale_ = 0.1;
-    double obs_height_scale_ = 5.0;
     double clip_observations_ = 100.0;
     double clip_actions_ = 100.0;
 
@@ -483,9 +520,9 @@ private:
     double vx_ = 0.0;
     double yaw_rate_ = 0.0;
     double height_ = 0.22;
-    std::array<double, kActionSize> action_{};
-    std::array<double, kActionSize> last_actions_{};
-    std::array<double, kLegCount> prepare_pos_{};
+    std::vector<double> action_;
+    std::vector<double> last_actions_;
+    std::vector<double> prepare_pos_;
     bool prepare_reached_ = false;
     bool inference_ready_ = false;
 
@@ -497,10 +534,9 @@ private:
     OnnxRuntimeInference inference_;
 
     // ---- 接口 ----
-    std::array<rmcs_executor::Component::InputInterface<double>, kDofCount> joint_angle_input_;
-    std::array<rmcs_executor::Component::InputInterface<double>, kDofCount> joint_velocity_input_;
-    std::array<rmcs_executor::Component::OutputInterface<double>, kDofCount>
-        joint_control_torque_output_;
+    std::unique_ptr<rmcs_executor::Component::InputInterface<double>[]> joint_angle_input_;
+    std::unique_ptr<rmcs_executor::Component::InputInterface<double>[]> joint_velocity_input_;
+    std::unique_ptr<rmcs_executor::Component::OutputInterface<double>[]> joint_control_torque_output_;
 
     rmcs_executor::Component::InputInterface<Eigen::Quaterniond> imu_quaternion_;
     rmcs_executor::Component::InputInterface<Eigen::Vector3d> imu_angular_velocity_;
@@ -511,9 +547,8 @@ private:
     rmcs_executor::Component::InputInterface<int> command_state_;
     rmcs_executor::Component::InputInterface<std::size_t> reset_count_;
 
-    rmcs_executor::Component::OutputInterface<std::array<double, kObservationSize>>
-        rl_observation_output_;
-    rmcs_executor::Component::OutputInterface<std::array<double, kActionSize>> rl_action_output_;
+    rmcs_executor::Component::OutputInterface<std::vector<double>> rl_observation_output_;
+    rmcs_executor::Component::OutputInterface<std::vector<double>> rl_action_output_;
     rmcs_executor::Component::OutputInterface<int> rl_state_output_;
 };
 
@@ -521,4 +556,4 @@ private:
 
 #include <pluginlib/class_list_macros.hpp>
 
-PLUGINLIB_EXPORT_CLASS(rmcs::rl::WheelLegRLController, rmcs_executor::Component)
+PLUGINLIB_EXPORT_CLASS(rmcs::rl::RlController, rmcs_executor::Component)

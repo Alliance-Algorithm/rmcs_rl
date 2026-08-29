@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.24)
-project(rmcs_wheel_leg_rl)
+project(rmcs_rl)
 
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 set(CMAKE_CXX_STANDARD 23)

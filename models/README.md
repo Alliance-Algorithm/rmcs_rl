@@ -28,4 +28,4 @@ torch.onnx.export(actor, dummy, 'policy.onnx',
 "
 ```
 
-> 名称/类型/shape 不匹配时，`WheelLegRLController` 拒绝进入 RL 状态并安全退出。
+> 名称/类型/shape 不匹配时，`RlController` 拒绝进入 RL 状态并安全退出。
