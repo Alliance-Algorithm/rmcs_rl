@@ -108,8 +108,8 @@ install_local() {
 
 安装完成：$(ldconfig -p | grep -o 'libonnxruntime\.so\.[0-9.]*' | sort -u | tr '\n' ' ')
 
-下一步：
-  bash <RMCS>/deploy/check_env.sh    # 确认 "libonnxruntime.so.1 已入加载路径"
+验证：
+  ldconfig -p | grep onnxruntime    # 应显示 libonnxruntime.so.1 => /usr/local/lib/...
 EOF
 }
 
