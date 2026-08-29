@@ -125,6 +125,8 @@ rmcs_rl/
 │   ├── rl_controller.cpp          # 主组件（观测/推理/PD/FSM）
 │   └── onnxruntime_inference.hpp  # ONNX Runtime 封装（合同校验）
 ├── models/                        # 策略模型与合同说明
+├── tool/
+│   └── install_rl_deps.sh         # 运行侧 ONNX Runtime 一键安装（local / remote）
 ├── package.xml
 ├── CMakeLists.txt                 # onnxruntime 自动下载（官方预编译包）
 └── plugins.xml
@@ -133,8 +135,25 @@ rmcs_rl/
 ## 运行期依赖
 
 - `rmcs_executor`、`rclcpp`（ROS2 Jazzy）
-- `libonnxruntime.so.1`（构建时由 CMake 自动下载官方预编译包；运行期需在加载路径中，
-  例如安装到 `/usr/local/lib` 并 `ldconfig`）
+- `libonnxruntime.so.1`：构建时由 CMake 自动下载官方预编译包（进 `build/`）；
+  运行侧（mini PC / 运行容器）需另行安装
+
+### 运行侧安装（开发容器 → 运行机）
+
+开发容器中构建后，`sync-remote` 只同步 `rmcs_ws/install`，**不包含 onnxruntime**
+（它在 `build/` 中）。在运行机上执行一键安装：
+
+```sh
+# 方式一：从开发容器直接推到运行机执行（默认 ssh 别名 remote）
+bash tool/install_rl_deps.sh remote
+
+# 方式二：在运行机/运行容器内直接安装
+bash tool/install_rl_deps.sh local
+```
+
+脚本自动检测架构（AMD/Intel CPU → `linux-x64`；ARM64 → `linux-aarch64`），
+下载官方 ONNX Runtime 1.20.0 预编译包并做 SHA256 校验，安装到 `/usr/local/lib` 并 `ldconfig`，
+幂等（已装则跳过）。
 
 ## 相关
 
