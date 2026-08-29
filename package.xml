@@ -1,0 +1,23 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>rmcs_wheel_leg_rl</name>
+  <version>0.1.0</version>
+  <description>RMCS wheel-leg infantry RL policy deployment (ONNX Runtime CPU inference on the mini PC)</description>
+  <maintainer email="alliance@njust.edu.cn">alliance</maintainer>
+  <license>MIT</license>
+
+  <buildtool_depend>ament_cmake</buildtool_depend>
+
+  <!-- 仅依赖 rmcs_executor 与 rclcpp，不依赖 rmcs_core：
+       需要就作为子模块引用，不需要就不 clone（colcon 自动跳过） -->
+  <depend>rclcpp</depend>
+  <depend>rmcs_executor</depend>
+
+  <test_depend>ament_lint_auto</test_depend>
+  <test_depend>ament_lint_common</test_depend>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>
