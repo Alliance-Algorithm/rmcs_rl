@@ -67,7 +67,7 @@ build-rmcs
 将训练导出的 `policy.onnx` 放到任意路径（如 `models/` 或 `/opt/rmcs/policies/`），
 合同要求见 [models/README.md](models/README.md)。
 
-### 3. 配置
+### 配置
 
 在 `rmcs_bringup/config/<robot>.yaml` 中注册组件并填写参数：
 
@@ -106,7 +106,7 @@ rl_controller:
 | `obs_*_scale`、`clip_*` | 观测缩放与裁剪 |
 | `auto_enter_rl`、`prepare_*` | FSM 行为 |
 
-### 4. 运行
+### 运行
 
 构建完成后（见"项目构建"），启动 RMCS：
 
