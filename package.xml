@@ -3,7 +3,7 @@
 <package format="3">
   <name>rmcs_rl</name>
   <version>0.1.0</version>
-  <description>RMCS wheel-leg infantry RL policy deployment (ONNX Runtime CPU inference on the mini PC)</description>
+  <description>RMCS generic RL policy deployment (ONNX Runtime CPU inference on the mini PC)</description>
   <maintainer email="alliance@njust.edu.cn">alliance</maintainer>
   <license>MIT</license>
 
@@ -13,6 +13,7 @@
        需要就作为子模块引用，不需要就不 clone（colcon 自动跳过） -->
   <depend>rclcpp</depend>
   <depend>rmcs_executor</depend>
+  <depend>ament_index_cpp</depend>
 
   <test_depend>ament_lint_auto</test_depend>
   <test_depend>ament_lint_common</test_depend>
