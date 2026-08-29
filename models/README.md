@@ -4,28 +4,51 @@
 
 ## 合同（必须严格满足）
 
-| 项 | 值 |
+| 项 | 要求 |
 |---|---|
-| 输入 | 单 tensor `obs`，float32，`[1, 28]` |
-| 输出 | 单 tensor `actions`，float32，`[1, 6]` |
-| DOF 序 | `[rf0, rf1, r_wheel, lf0, lf1, l_wheel]` |
-| 观测 | cmd3 \| height_cmd(×5) \| ang_vel3(×0.5) \| gravity3 \| joint_pos6(×1, 轮置零) \| joint_vel6(×0.1) \| last_actions6 |
-| 动作 | 腿位置目标 = 0.5×a + default_dof_pos；轮速度目标 = 10×a |
+| 输入 | 单 tensor，名 `obs`，float32，shape `[1, obs_size]` |
+| 输出 | 单 tensor，名 `actions`，float32，shape `[1, action_size]` |
+| 尺寸 | 默认 `obs_size = 10 + 3N`、`action_size = N`（N = 关节数），可用 YAML `rl_obs_size` / `rl_action_size` 覆盖 |
 
-参考：训练环境 `legged_gym/envs/infantry_v4`（Isaac Gym Preview 4 + legged_gym + rsl_rl）。
-导出示例（训练后）：
+## 观测布局（默认合同）
 
-```bash
-# 在训练侧将 policy.pt 导出为 ONNX（actor 部分，输入 obs、输出 actions）
-python -c "
-import torch
-from rsl_rl.runners import OnPolicyRunner
-...  # 按实际训练代码加载 actor_critic 后：
-dummy = torch.zeros(1, 28)
-torch.onnx.export(actor, dummy, 'policy.onnx',
-                  input_names=['obs'], output_names=['actions'],
-                  dynamic_axes={'obs': {0: 1}, 'actions': {0: 1}})
-"
+```
+obs = cmd3 | height_cmd | ang_vel3 | gravity3 | joint_pos(N) | joint_vel(N) | last_actions(N)
 ```
 
-> 名称/类型/shape 不匹配时，`RlController` 拒绝进入 RL 状态并安全退出。
+| 段 | 含义 | 缩放 |
+|---|---|---|
+| `cmd3` | 前进速度、横向速度、偏航角速度指令 | ×1.0（已限幅） |
+| `height_cmd` | 目标高度 | `obs_height_scale` |
+| `ang_vel3` | 机体角速度（机体系，IMU） | `obs_ang_vel_scale` |
+| `gravity3` | 重力在世界系 `[0,0,-1]` 到机体系的投影（四元数旋转） | `obs_gravity_scale` |
+| `joint_pos(N)` | 各关节当前角度 − 默认中位；**速度 PD 组关节置零** | `obs_dof_pos_scale` |
+| `joint_vel(N)` | 各关节当前角速度 | `obs_dof_vel_scale` |
+| `last_actions(N)` | 上一帧策略动作 | ×1.0 |
+
+关节序与 `joint_names` 一致（训练 DOF 序）。
+
+## 动作语义（默认合同）
+
+- **位置 PD 组**：`pos_target = position_action_scale × a + default_dof_pos`
+- **速度 PD 组**：`vel_target = velocity_action_scale × a`
+
+再经 PD（`position_kp/kd`、`velocity_kp/kd`）转为力矩并限幅（`position_torque_max`、
+`velocity_torque_max`）。所有系数均与训练环境一致（见 YAML 配置）。
+
+> 具体缩放与默认值以对应机器人的训练配置为准，通过 YAML 传入，代码不写死。
+
+## 导出示例（训练后）
+
+```python
+# 在训练侧将策略（actor）导出为 ONNX，输入 obs、输出 actions
+import torch
+
+# ... 按实际训练代码加载 actor 后：
+dummy = torch.zeros(1, obs_size)
+torch.onnx.export(actor, dummy, "policy.onnx",
+                  input_names=["obs"], output_names=["actions"],
+                  dynamic_axes={"obs": {0: 1}, "actions": {0: 1}})
+```
+
+> 名称/类型/shape 与合同不符时，`RlController` 拒绝进入 RL 状态并安全退出。
