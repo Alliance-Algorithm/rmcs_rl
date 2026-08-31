@@ -1,3 +1,5 @@
 <library path="rmcs_rl">
   <class type="rmcs::rl::RlController" base_class_type="rmcs_executor::Component" />
+  <class type="rmcs::rl::RlDebugCommand" base_class_type="rmcs_executor::Component" />
+  <class type="rmcs::rl::RlFakePlant" base_class_type="rmcs_executor::Component" />
 </library>

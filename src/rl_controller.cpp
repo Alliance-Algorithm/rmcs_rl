@@ -51,10 +51,22 @@ public:
             "joint_names",
             std::vector<std::string>{"rf0", "rf1", "r_wheel", "lf0", "lf1", "l_wheel"});
         joint_base_path_ = param_or<std::string>("joint_base_path", "/wheel_leg");
+        // PD 组默认均为空（全部关节零力矩的安全默认）；wheel-leg 等部署显式配置。
         position_pd_joints_ = param_or(
-            "position_pd_joints", std::vector<std::int64_t>{0, 1, 3, 4});
+            "position_pd_joints", std::vector<std::int64_t>{});
         velocity_pd_joints_ = param_or(
-            "velocity_pd_joints", std::vector<std::int64_t>{2, 5});
+            "velocity_pd_joints", std::vector<std::int64_t>{});
+
+        // 关节接口后缀可分组覆盖：部分机器人（如变形底盘）的关节反馈以
+        // physical_angle/physical_velocity 命名（训练坐标系），而轮子保持 angle/velocity。
+        position_group_angle_suffix_ =
+            param_or<std::string>("position_group_angle_suffix", "/angle");
+        position_group_velocity_suffix_ =
+            param_or<std::string>("position_group_velocity_suffix", "/velocity");
+        velocity_group_angle_suffix_ =
+            param_or<std::string>("velocity_group_angle_suffix", "/angle");
+        velocity_group_velocity_suffix_ =
+            param_or<std::string>("velocity_group_velocity_suffix", "/velocity");
 
         const std::size_t dof = joint_names_.size();
         if (dof == 0 || dof > 32)
@@ -124,8 +136,20 @@ public:
         joint_control_torque_output_ = std::make_unique<rmcs_executor::Component::OutputInterface<double>[]>(dof);
         for (std::size_t i = 0; i < dof; ++i) {
             const std::string base = joint_base_path_ + "/" + joint_names_[i];
-            register_input(base + "/angle", joint_angle_input_[i]);
-            register_input(base + "/velocity", joint_velocity_input_[i]);
+            const bool is_position_joint = std::find(
+                position_pd_joints_.begin(), position_pd_joints_.end(),
+                static_cast<std::int64_t>(i))
+                != position_pd_joints_.end();
+            register_input(
+                base
+                    + (is_position_joint ? position_group_angle_suffix_
+                                         : velocity_group_angle_suffix_),
+                joint_angle_input_[i]);
+            register_input(
+                base
+                    + (is_position_joint ? position_group_velocity_suffix_
+                                         : velocity_group_velocity_suffix_),
+                joint_velocity_input_[i]);
             register_output(base + "/control_torque", joint_control_torque_output_[i], 0.0);
         }
 
@@ -220,8 +244,13 @@ private:
     template <typename T>
     T param_or(const std::string& name, const T& default_value) {
         T value;
-        if (get_parameter(name, value))
-            return value;
+        try {
+            if (get_parameter(name, value))
+                return value;
+        } catch (const rclcpp::exceptions::InvalidParameterValueException&) {
+            // rcl 参数文件中的空列表会以 PARAMETER_NOT_SET 落盘，get_parameter 抛异常；
+            // 视为未设置，回落默认值。
+        }
         RCLCPP_WARN(get_logger(), "Parameter '%s' not set, using default", name.c_str());
         return default_value;
     }
@@ -265,7 +294,10 @@ private:
             const int raw = *command_state_;
             State target;
             if (resolve_state_command_(raw, target)) {
-                if (target == State::kRl && !(state_ == State::kPrepare && prepare_reached_)) {
+                // 仅在"未在 RL 且未从 PREPARE 准备完成"时拒绝；
+                // 已在 RL 状态重复收到 3 视为无操作，不警告。
+                if (target == State::kRl && state_ != State::kRl
+                    && !(state_ == State::kPrepare && prepare_reached_)) {
                     RCLCPP_WARN_THROTTLE(
                         get_logger(), *get_clock(), 1000,
                         "Refusing RL: robot must be prepared first (PREPARE -> RL)");
@@ -488,6 +520,10 @@ private:
     std::string joint_base_path_ = "/wheel_leg";
     std::vector<std::int64_t> position_pd_joints_;
     std::vector<std::int64_t> velocity_pd_joints_;
+    std::string position_group_angle_suffix_ = "/angle";
+    std::string position_group_velocity_suffix_ = "/velocity";
+    std::string velocity_group_angle_suffix_ = "/angle";
+    std::string velocity_group_velocity_suffix_ = "/velocity";
     std::size_t dof_ = 0;
 
     std::vector<double> default_dof_pos_;
