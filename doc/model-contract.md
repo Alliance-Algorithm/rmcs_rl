@@ -1,10 +1,10 @@
-# 策略模型
+# 策略模型合同
 
-把训练导出的策略命名为 `policy.onnx` 放到本目录。
+模型文件统一放在本包 `models/` 目录，随包安装进 `install/share/rmcs_rl/models/`，
+`sync-remote` 同步时自动带到运行机。
 
-本目录随包安装进 `install/share/rmcs_rl/models/`，`sync-remote` 同步时自动带到运行机；
-YAML 配置 `rl_model_path: "models/policy.onnx"`（相对路径，相对本包 share 目录解析）。
-也支持任意绝对路径（`rl_model_path` 指向即可，此时需自行分发模型文件）。
+YAML 配置 `rl_model_path: "models/policy.onnx"` 使用相对路径时，相对于本包 share 目录解析；
+也支持任意绝对路径（此时需自行分发模型文件）。
 
 ## 合同（必须严格满足）
 
@@ -12,12 +12,14 @@ YAML 配置 `rl_model_path: "models/policy.onnx"`（相对路径，相对本包 
 |---|---|
 | 输入 | 单 tensor，名 `obs`，float32，shape `[1, obs_size]` |
 | 输出 | 单 tensor，名 `actions`，float32，shape `[1, action_size]` |
-| 尺寸 | 默认 `obs_size = 10 + 3N`、`action_size = N`（N = 关节数），可用 YAML `rl_obs_size` / `rl_action_size` 覆盖 |
+| 尺寸 | `obs_size` / `action_size` 由 YAML `rl_obs_size` / `rl_action_size` **必填显式给出**（无默认公式、不按车型推导），且必须与模型 shape 一致；未配置即启动报错 |
 
-## 观测布局（默认合同）
+## 观测布局（rmcs_rl 控制器构建）
+
+`RlController` 按下述固定布局构建观测（N = 关节数 = `joint_names` 长度）：
 
 ```
-obs = cmd3 | height_cmd | ang_vel3 | gravity3 | joint_pos(N) | joint_vel(N) | last_actions(N)
+obs = cmd3 | height_cmd | ang_vel3 | gravity3 | joint_pos(N) | joint_vel(N) | last_actions(rl_action_size)
 ```
 
 | 段 | 含义 | 缩放 |
@@ -28,11 +30,17 @@ obs = cmd3 | height_cmd | ang_vel3 | gravity3 | joint_pos(N) | joint_vel(N) | la
 | `gravity3` | 重力在世界系 `[0,0,-1]` 到机体系的投影（四元数旋转） | `obs_gravity_scale` |
 | `joint_pos(N)` | 各关节当前角度 − 默认中位；**速度 PD 组关节置零** | `obs_dof_pos_scale` |
 | `joint_vel(N)` | 各关节当前角速度 | `obs_dof_vel_scale` |
-| `last_actions(N)` | 上一帧策略动作 | ×1.0 |
+| `last_actions(rl_action_size)` | 上一帧策略动作 | ×1.0 |
 
 关节序与 `joint_names` 一致（训练 DOF 序）。
 
-## 动作语义（默认合同）
+> 布局长度是固定的：配置的 `rl_obs_size` 必须等于 `10 + 2N + rl_action_size`，
+> 否则控制器构造期直接报错（该长度与维度是同一事实，不是某车型的私有公式）。
+> 常见的"action = 每关节一个动作"情形即 `rl_action_size = N`，此时
+> `obs_size = 10 + 3N`；但尺寸一律显式配置，代码不据此推导。
+> 若未来车型需要不同观测结构（如动作历史堆叠），需同步修改控制器与本文档。
+
+## 动作语义（rmcs_rl 控制器实现）
 
 - **位置 PD 组**：`pos_target = position_action_scale × a + default_dof_pos`
 - **速度 PD 组**：`vel_target = velocity_action_scale × a`
@@ -56,3 +64,12 @@ torch.onnx.export(actor, dummy, "policy.onnx",
 ```
 
 > 名称/类型/shape 与合同不符时，`RlController` 拒绝进入 RL 状态并安全退出。
+
+## 仓库内模型
+
+| 文件 | 说明 |
+|---|---|
+| `models/policy.onnx` | 默认部署策略或离线合成策略（按当前分支用途） |
+| `models/policy_drive.onnx` | 高度指令响应验证策略（drive-style） |
+
+仓库内模型用于离线/台架验证，真机部署时应替换为训练导出的正式策略。

@@ -13,24 +13,14 @@
 #include <vector>
 
 namespace rmcs::rl {
-
-/// 极简 ONNX Runtime 推理封装（CPU，单线程）
-///
-/// 策略合同（与训练导出严格一致）：
-///   单输入：float32[1, N]，tensor 名默认 "obs"
-///   单输出：float32[1, M]，tensor 名默认 "actions"
-/// 名称/类型/shape 不匹配时 load() 返回 false（安全退出，不提供旧合同兼容）。
-///
-/// 参考：wheelbipe_ros2_sim2sim 的 ONNXRuntimeInference（MIT license），
-/// 精简为单头文件、同步调用，适配 rmcs_executor 1000Hz 组件环。
 class OnnxRuntimeInference {
 public:
     struct Config {
         std::string model_path;
         std::string input_name = "obs";
         std::string output_name = "actions";
-        std::size_t input_size = 28;
-        std::size_t output_size = 6;
+        std::size_t input_size = 0;
+        std::size_t output_size = 0;
     };
 
     OnnxRuntimeInference() = default;
@@ -118,13 +108,13 @@ public:
     }
 
 private:
-    Ort::Env env_{ORT_LOGGING_LEVEL_WARNING, "rmcs_wheel_leg"};
+    Ort::Env env_{ORT_LOGGING_LEVEL_WARNING, "rmcs_rl"};
     Ort::SessionOptions session_options_;
     Ort::AllocatorWithDefaultOptions allocator_;
     Ort::MemoryInfo memory_info_{nullptr};
     std::unique_ptr<Ort::Session> session_;
-    std::vector<int64_t> input_shape_{1, 28};
-    std::vector<int64_t> output_shape_{1, 6};
+    std::vector<int64_t> input_shape_;
+    std::vector<int64_t> output_shape_;
     Config config_;
 };
 
