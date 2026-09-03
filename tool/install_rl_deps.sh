@@ -1,18 +1,3 @@
-#!/usr/bin/env bash
-# ============================================================================
-# install_rl_deps.sh — RL 运行依赖一键安装（ONNX Runtime CPU 推理库）
-#
-# 用途：rmcs_rl 的 librmcs_rl.so 运行期需要 libonnxruntime.so.1。
-#       onnxruntime 只随构建进入 build/ 目录，不会随 `sync-remote`
-#       （unison 同步 rmcs_ws/install）分发到运行机，因此运行侧需单独安装本依赖。
-#
-# 模式（与 rmcs_auto_aim_v2/tool/install-server.sh 一致）：
-#   bash install_rl_deps.sh local            # 本机安装（mini PC / 运行容器内）
-#   bash install_rl_deps.sh remote [host]    # 从开发容器打包脚本 scp 到运行机执行（默认 host: remote）
-#
-# 架构：AMD/Intel CPU（x86_64）→ onnxruntime-linux-x64；
-#       ARM64（aarch64）→ onnxruntime-linux-aarch64。官方预编译包 + SHA256 校验。
-# ============================================================================
 set -euo pipefail
 
 SCRIPT_DIR="$(dirname "$(realpath "$0")")"

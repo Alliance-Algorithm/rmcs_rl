@@ -4,6 +4,8 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <numbers>
+#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -13,27 +15,13 @@
 #include <rclcpp/logging.hpp>
 #include <rclcpp/node.hpp>
 #include <rmcs_executor/component.hpp>
+#include <std_msgs/msg/float64_multi_array.hpp>
+#include <std_msgs/msg/int32.hpp>
 
 #include "onnxruntime_inference.hpp"
 
 namespace rmcs::rl {
 
-/// 通用 RL 策略部署控制器（机器人无关）
-///
-/// 策略合同（训练导出模型必须满足，tensor 名 "obs"/"actions"，float32）：
-///   obs    = cmd3 | height_cmd(×obs_height_scale) | ang_vel3(×obs_ang_vel_scale)
-///            | gravity3(×obs_gravity_scale)
-///            | joint_pos(N)(×obs_dof_pos_scale，velocity_pd 关节位置观测置零)
-///            | joint_vel(N)(×obs_dof_vel_scale) | last_actions(N)
-///   actions = N 维，与 joint_names 序一一对应（N = 关节数）
-///
-/// 低层控制（与训练环境同构）：
-///   position_pd_joints：pos_target = position_action_scale×a + default_dof_pos，位置 PD → 力矩
-///   velocity_pd_joints：vel_target = velocity_action_scale×a，速度 PD → 力矩
-/// 默认参数对应 legged_gym `infantry_v4`（6 关节轮腿）训练合同。
-///
-/// FSM：INIT(0) / IDLE(1) / PREPARE(2) / RL(3)，经 {joint_base_path}/command/state 切换；
-/// 异常 failSafe 强制回 IDLE；RMCS reset（{joint_base_path}/reset_count 变化）清空全部状态。
 class RlController
     : public rmcs_executor::Component
     , public rclcpp::Node {
@@ -46,19 +34,21 @@ public:
               get_component_name(),
               rclcpp::NodeOptions{}.automatically_declare_parameters_from_overrides(true)) {
 
-        // ---- 机器人描述（通用参数化）----
-        joint_names_ = param_or(
-            "joint_names",
-            std::vector<std::string>{"rf0", "rf1", "r_wheel", "lf0", "lf1", "l_wheel"});
-        joint_base_path_ = param_or<std::string>("joint_base_path", "/wheel_leg");
-        // PD 组默认均为空（全部关节零力矩的安全默认）；wheel-leg 等部署显式配置。
+        // ---- 机器人描述（各车 YAML 显式给出；此处仅读取并校验，无车型默认值）----
+        joint_names_ = param_or("joint_names", std::vector<std::string>{});
+        joint_base_path_ = param_or<std::string>("joint_base_path", "");
+        // PD 分组：位置组（动作 → 角度目标 → PD）与速度组（动作 → 速度目标 → PD）。
         position_pd_joints_ = param_or(
             "position_pd_joints", std::vector<std::int64_t>{});
         velocity_pd_joints_ = param_or(
             "velocity_pd_joints", std::vector<std::int64_t>{});
 
-        // 关节接口后缀可分组覆盖：部分机器人（如变形底盘）的关节反馈以
-        // physical_angle/physical_velocity 命名（训练坐标系），而轮子保持 angle/velocity。
+        if (joint_base_path_.empty())
+            throw std::invalid_argument(
+                "joint_base_path must be configured for this robot (e.g. /chassis, /wheel_leg)");
+
+        // 关节反馈接口后缀（位置组/速度组可分别覆盖）。默认遵循 RMCS 硬件约定
+        // angle/velocity；训练坐标系与硬件不一致的车型（如 physical_angle）在配置中覆盖。
         position_group_angle_suffix_ =
             param_or<std::string>("position_group_angle_suffix", "/angle");
         position_group_velocity_suffix_ =
@@ -70,32 +60,61 @@ public:
 
         const std::size_t dof = joint_names_.size();
         if (dof == 0 || dof > 32)
-            throw std::invalid_argument("joint_names must contain 1..32 joints");
+            throw std::invalid_argument(
+                "joint_names must be configured (1..32 joints, training DOF order)");
         for (const auto idx : position_pd_joints_)
             if (idx < 0 || static_cast<std::size_t>(idx) >= dof)
                 throw std::invalid_argument("position_pd_joints out of range");
         for (const auto idx : velocity_pd_joints_)
             if (idx < 0 || static_cast<std::size_t>(idx) >= dof)
                 throw std::invalid_argument("velocity_pd_joints out of range");
+        if (position_pd_joints_.empty() && velocity_pd_joints_.empty())
+            throw std::invalid_argument(
+                "position_pd_joints/velocity_pd_joints: at least one PD group must be configured");
 
         dof_ = dof;
-        const std::size_t default_obs_size = 10 + 3 * dof;
-        const std::size_t default_action_size = dof;
 
-        // ---- 策略合同参数 ----
-        rl_obs_size_ = static_cast<std::size_t>(param_or("rl_obs_size", static_cast<std::int64_t>(default_obs_size)));
-        rl_action_size_ = static_cast<std::size_t>(param_or("rl_action_size", static_cast<std::int64_t>(default_action_size)));
+        // ---- 策略合同尺寸（必填，无默认、不按车型推导）----
+        // 维度必须与模型 shape 及下方观测布局一致，否则 RL 永远不可用 → 构造期报错。
+        const auto configured_obs = require_param<std::int64_t>("rl_obs_size");
+        const auto configured_act = require_param<std::int64_t>("rl_action_size");
+        if (configured_obs <= 0 || configured_act <= 0)
+            throw std::invalid_argument("rl_obs_size / rl_action_size must be positive");
+        rl_obs_size_ = static_cast<std::size_t>(configured_obs);
+        rl_action_size_ = static_cast<std::size_t>(configured_act);
+        // PD 按“关节索引 == action 槽索引”取动作，action 维度须覆盖全部 PD 组关节
+        std::int64_t max_grouped_joint = -1;
+        for (const auto idx : position_pd_joints_)
+            max_grouped_joint = std::max(max_grouped_joint, idx);
+        for (const auto idx : velocity_pd_joints_)
+            max_grouped_joint = std::max(max_grouped_joint, idx);
+        if (configured_act < max_grouped_joint + 1)
+            throw std::invalid_argument(
+                "rl_action_size=" + std::to_string(configured_act)
+                + " too small: PD group joints need action slots up to index "
+                + std::to_string(max_grouped_joint));
+        // 观测构建按类头注释的固定布局写入 10 + 2·dof + rl_action_size 个元素；
+        // 该长度与 rl_obs_size 是同一事实，不一致即配置错误。
+        const std::size_t layout_obs_size = 10 + 2 * dof + rl_action_size_;
+        if (rl_obs_size_ != layout_obs_size)
+            throw std::invalid_argument(
+                "rl_obs_size=" + std::to_string(rl_obs_size_)
+                + " inconsistent with this controller's observation layout length "
+                  "(10 + 2*" + std::to_string(dof) + " + rl_action_size="
+                + std::to_string(layout_obs_size) + "); see doc/model-contract.md");
+        // 位置组目标中位/限位与动作换算系数（与训练 default_dof_pos、action_scale 一致，
+        // 各车 YAML 显式配置；此处默认仅占位）
         default_dof_pos_ = param_or("default_dof_pos", std::vector<double>(dof, 0.0));
         dof_pos_limits_lower_ = param_or("dof_pos_limits_lower", std::vector<double>(dof, -100.0));
         dof_pos_limits_upper_ = param_or("dof_pos_limits_upper", std::vector<double>(dof, 100.0));
-        position_action_scale_ = param_or("position_action_scale", 0.5);
+        position_action_scale_ = param_or("position_action_scale", 1.0);
         velocity_action_scale_ = param_or("velocity_action_scale", 10.0);
         max_velocity_ = param_or("max_velocity", 100.0);
         position_kp_ = param_or("position_kp", 200.0);
         position_kd_ = param_or("position_kd", 4.0);
         velocity_kp_ = param_or("velocity_kp", 20.0);
         velocity_kd_ = param_or("velocity_kd", 0.5);
-        position_torque_max_ = param_or("position_torque_max", 35.0);
+        position_torque_max_ = param_or("position_torque_max", 20.0); // 力矩限幅（训练 torque_limits/电机能力，YAML 配置）
         velocity_torque_max_ = param_or("velocity_torque_max", 6.0);
 
         // ---- 观测缩放（训练 normalization 对齐）----
@@ -107,19 +126,24 @@ public:
         clip_observations_ = param_or("clip_observations", 100.0);
         clip_actions_ = param_or("clip_actions", 100.0);
 
-        // ---- 指令范围 ----
-        motion_linear_x_min_ = param_or("motion_linear_x_min", -2.5);
-        motion_linear_x_max_ = param_or("motion_linear_x_max", 2.5);
-        motion_angular_z_min_ = param_or("motion_angular_z_min", -3.0);
-        motion_angular_z_max_ = param_or("motion_angular_z_max", 3.0);
-        command_height_min_ = param_or("command_height_min", 0.20);
-        command_height_max_ = param_or("command_height_max", 0.42);
-        default_command_height_ = param_or("default_command_height", 0.22);
+        // ---- 指令范围（vx/yaw_rate 平移指令限幅；height 为目标高度，均各车 YAML 显式配置）----
+        motion_linear_x_min_ = param_or("motion_linear_x_min", 0.0);
+        motion_linear_x_max_ = param_or("motion_linear_x_max", 0.0);
+        motion_angular_z_min_ = param_or("motion_angular_z_min", 0.0);
+        motion_angular_z_max_ = param_or("motion_angular_z_max", 0.0);
+        command_height_min_ = param_or("command_height_min", 0.0);
+        command_height_max_ = param_or("command_height_max", 10.0);
+        default_command_height_ = param_or("default_command_height", 0.0);
 
         // ---- FSM / PREPARE ----
         auto_enter_rl_ = param_or("auto_enter_rl", false);
         prepare_dof_pos_ = param_or(
-            "prepare_dof_pos", std::vector<double>{-0.5, -0.35, 0.5, 0.35}); // 对应 position_pd_joints 序
+            "prepare_dof_pos",
+            std::vector<double>(position_pd_joints_.size(), 0.0)); // 缺省 = 位置组关节全部归零（占位，各车配置）
+        if (!position_pd_joints_.empty()
+            && prepare_dof_pos_.size() != position_pd_joints_.size())
+            throw std::invalid_argument(
+                "prepare_dof_pos size must match position_pd_joints size");
         prepare_kp_ = param_or("prepare_kp", 80.0);
         prepare_kd_ = param_or("prepare_kd", 2.0);
         prepare_max_velocity_ = param_or("prepare_max_velocity", 1.0);
@@ -127,7 +151,8 @@ public:
 
         // ---- 模型与推理 ----
         rl_model_path_ = param_or<std::string>("rl_model_path", "");
-        rl_inference_frequency_ = param_or("rl_inference_frequency", 50.0);
+        // 推理频率须与训练控制频率一致（sim dt × decimation，各车 YAML 显式配置）
+        rl_inference_frequency_ = param_or("rl_inference_frequency", 100.0);
         rl_publish_network_io_ = param_or("rl_publish_network_io", false);
 
         // ---- 接口（按 joint_names 动态注册）----
@@ -167,6 +192,14 @@ public:
                 joint_base_path_ + "/rl/observation", rl_observation_output_, std::vector<double>{});
             register_output(
                 joint_base_path_ + "/rl/action", rl_action_output_, std::vector<double>{});
+            // 同一份数据再发真 ROS topic（组件接口 ↔ topic 同名不同命名空间，互不冲突），
+            // 供 ros2 topic echo / rqt_plot / PlotJuggler / ros2 bag 使用。
+            observation_publisher_ = create_publisher<std_msgs::msg::Float64MultiArray>(
+                joint_base_path_ + "/rl/observation", 1);
+            action_publisher_ = create_publisher<std_msgs::msg::Float64MultiArray>(
+                joint_base_path_ + "/rl/action", 1);
+            state_publisher_ = create_publisher<std_msgs::msg::Int32>(
+                joint_base_path_ + "/rl/state", 1);
         }
         register_output(joint_base_path_ + "/rl/state", rl_state_output_, 0);
 
@@ -237,6 +270,28 @@ public:
         }
 
         *rl_state_output_ = static_cast<int>(state_);
+
+        // 状态 topic（100Hz 节流，各 FSM 状态都发，方便观察 PREPARE→RL 时序）
+        if (rl_publish_network_io_ && should_publish_io_()) {
+            std_msgs::msg::Int32 state_msg;
+            state_msg.data = static_cast<int>(state_);
+            state_publisher_->publish(state_msg);
+        }
+
+        // 调试观测：每秒打印各关节角度（度），观察 PREPARE/RL 期间运动。
+        // WARN 级别保证 attach-remote（screen）可见。
+        if (dof_ > 0) {
+            std::ostringstream oss;
+            oss << "joint_q_deg=[";
+            for (std::size_t i = 0; i < dof_; ++i) {
+                if (i > 0)
+                    oss << ' ';
+                oss << read_joint_angle_(i) * (180.0 / std::numbers::pi);
+            }
+            oss << "] (state=" << static_cast<int>(state_) << ")";
+            RCLCPP_WARN_THROTTLE(
+                get_logger(), *get_clock(), 1000, "%s", oss.str().c_str());
+        }
     }
 
 private:
@@ -253,6 +308,22 @@ private:
         }
         RCLCPP_WARN(get_logger(), "Parameter '%s' not set, using default", name.c_str());
         return default_value;
+    }
+
+    /// 必填参数：未设置或类型不符时抛异常（用于"无默认值、必须按车显式配置"的参数，
+    /// 如合同尺寸 rl_obs_size / rl_action_size）。
+    template <typename T>
+    T require_param(const std::string& name) {
+        T value{};
+        try {
+            if (get_parameter(name, value))
+                return value;
+        } catch (const std::exception& error) {
+            throw std::invalid_argument(
+                "required parameter '" + name + "' is invalid: " + error.what());
+        }
+        throw std::invalid_argument(
+            "missing required parameter '" + name + "' (no default; configure per robot)");
     }
 
     /// 相对路径 → 本包 share 目录下；绝对路径原样返回；空返回空。
@@ -300,7 +371,11 @@ private:
                     && !(state_ == State::kPrepare && prepare_reached_)) {
                     RCLCPP_WARN_THROTTLE(
                         get_logger(), *get_clock(), 1000,
-                        "Refusing RL: robot must be prepared first (PREPARE -> RL)");
+                        "Refusing RL: state=%d prepare_reached=%d joint_q=[%.3f %.3f %.3f %.3f] "
+                        "(send 2 first, wait PREPARE done, then 3)",
+                        static_cast<int>(state_), prepare_reached_ ? 1 : 0,
+                        read_joint_angle_(0), read_joint_angle_(1), read_joint_angle_(2),
+                        read_joint_angle_(3));
                     target = state_;
                 }
                 if (target != state_)
@@ -388,6 +463,15 @@ private:
         return true;
     }
 
+    // ---- 网络 IO topic 发布节流（100Hz）----
+    bool should_publish_io_() {
+        const auto now = std::chrono::steady_clock::now();
+        if (std::chrono::duration<double, std::milli>(now - last_io_publish_time_).count() < 10.0)
+            return false;
+        last_io_publish_time_ = now;
+        return true;
+    }
+
     void rl_step_() {
         if (!inference_ready_) {
             fail_safe_("policy session is not ready");
@@ -411,8 +495,15 @@ private:
             for (std::size_t i = 0; i < rl_action_size_; ++i)
                 action_[i] = std::clamp(static_cast<double>(act_f[i]), -clip_actions_, clip_actions_);
             last_actions_ = action_;
-            if (rl_publish_network_io_)
+            if (rl_publish_network_io_) {
                 (*rl_action_output_) = action_;
+                std_msgs::msg::Float64MultiArray obs_msg;
+                obs_msg.data = obs;
+                observation_publisher_->publish(obs_msg);
+                std_msgs::msg::Float64MultiArray act_msg;
+                act_msg.data = action_;
+                action_publisher_->publish(act_msg);
+            }
         }
 
         apply_pd_();
@@ -517,7 +608,7 @@ private:
 
     // ---- 参数 ----
     std::vector<std::string> joint_names_;
-    std::string joint_base_path_ = "/wheel_leg";
+    std::string joint_base_path_;
     std::vector<std::int64_t> position_pd_joints_;
     std::vector<std::int64_t> velocity_pd_joints_;
     std::string position_group_angle_suffix_ = "/angle";
@@ -529,18 +620,18 @@ private:
     std::vector<double> default_dof_pos_;
     std::vector<double> dof_pos_limits_lower_;
     std::vector<double> dof_pos_limits_upper_;
-    double position_action_scale_ = 0.5;
+    double position_action_scale_ = 1.0;   // 动作 → 位置目标系数（各车 YAML 显式配置）
     double velocity_action_scale_ = 10.0;
     double max_velocity_ = 100.0;
     double position_kp_ = 200.0;
     double position_kd_ = 4.0;
     double velocity_kp_ = 20.0;
     double velocity_kd_ = 0.5;
-    double position_torque_max_ = 35.0;
+    double position_torque_max_ = 20.0;     // 力矩限幅（与训练 torque_limits/电机能力对齐）
     double velocity_torque_max_ = 6.0;
 
-    std::size_t rl_obs_size_ = 28;
-    std::size_t rl_action_size_ = 6;
+    std::size_t rl_obs_size_ = 0;      // 构造时从必填参数 rl_obs_size 读取
+    std::size_t rl_action_size_ = 0;   // 构造时从必填参数 rl_action_size 读取
     double obs_height_scale_ = 5.0;
     double obs_ang_vel_scale_ = 0.5;
     double obs_gravity_scale_ = 1.0;
@@ -549,30 +640,30 @@ private:
     double clip_observations_ = 100.0;
     double clip_actions_ = 100.0;
 
-    double motion_linear_x_min_ = -2.5;
-    double motion_linear_x_max_ = 2.5;
-    double motion_angular_z_min_ = -3.0;
-    double motion_angular_z_max_ = 3.0;
-    double command_height_min_ = 0.20;
-    double command_height_max_ = 0.42;
-    double default_command_height_ = 0.22;
+    double motion_linear_x_min_ = 0.0;
+    double motion_linear_x_max_ = 0.0;
+    double motion_angular_z_min_ = 0.0;
+    double motion_angular_z_max_ = 0.0;
+    double command_height_min_ = 0.0;
+    double command_height_max_ = 10.0;
+    double default_command_height_ = 0.0;
 
     bool auto_enter_rl_ = false;
-    std::vector<double> prepare_dof_pos_{0.0, 0.0, 0.0, 0.0};
+    std::vector<double> prepare_dof_pos_;
     double prepare_kp_ = 80.0;
     double prepare_kd_ = 2.0;
     double prepare_max_velocity_ = 1.0;
     double prepare_reach_threshold_ = 0.02;
 
     std::string rl_model_path_;
-    double rl_inference_frequency_ = 50.0;
+    double rl_inference_frequency_ = 100.0;
     bool rl_publish_network_io_ = false;
 
     // ---- 运行时状态 ----
     State state_ = State::kInit;
     double vx_ = 0.0;
     double yaw_rate_ = 0.0;
-    double height_ = 0.22;
+    double height_ = 0.0;
     std::vector<double> action_;
     std::vector<double> last_actions_;
     std::vector<double> prepare_pos_;
@@ -581,6 +672,7 @@ private:
 
     std::chrono::steady_clock::time_point last_update_time_{};
     std::chrono::steady_clock::time_point last_inference_time_{};
+    std::chrono::steady_clock::time_point last_io_publish_time_{};
     bool last_inference_time_initialized_ = false;
     std::size_t last_reset_count_ = 0;
 
@@ -603,6 +695,10 @@ private:
     rmcs_executor::Component::OutputInterface<std::vector<double>> rl_observation_output_;
     rmcs_executor::Component::OutputInterface<std::vector<double>> rl_action_output_;
     rmcs_executor::Component::OutputInterface<int> rl_state_output_;
+
+    rclcpp::Publisher<std_msgs::msg::Float64MultiArray>::SharedPtr observation_publisher_;
+    rclcpp::Publisher<std_msgs::msg::Float64MultiArray>::SharedPtr action_publisher_;
+    rclcpp::Publisher<std_msgs::msg::Int32>::SharedPtr state_publisher_;
 };
 
 } // namespace rmcs::rl

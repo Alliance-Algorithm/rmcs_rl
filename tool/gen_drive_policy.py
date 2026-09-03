@@ -1,21 +1,24 @@
 #!/usr/bin/env python3
 """Generate a drive-style validation policy ONNX for rmcs_rl deployment testing.
 
-Contract: input "obs" float32 [1, 22] -> output "actions" float32 [1, 4].
+This is an *example* synthetic model for one concrete contract (4 joints,
+height-command driven); for other contracts use gen_synthetic_policy.py or
+export the real trained policy. Contract must match the YAML config exactly:
+  input "obs" float32 [1, 22] -> output "actions" float32 [1, 4].
 Layout (identical to the deployment obs builder):
   obs[0:3]  = commands (vx, 0, yaw_rate)  -- reserved, unused
   obs[3]    = height_cmd * 5.0
   obs[4:7]  = ang_vel * 0.5
   obs[7:10] = projected gravity
-  obs[10:14]= leg pos deviation
-  obs[14:18]= leg vel * 0.1
+  obs[10:14]= joint pos deviation (position-PD group)
+  obs[14:18]= joint vel * 0.1
   obs[18:22]= last actions
 
 Behavior (deterministic, bounded, no state):
   a_i = clip( A * tanh(K * (height_cmd - h0)) + bias_i, -clip, clip )
-  -> 四腿随高度指令联动（每腿带固定偏置产生轻微不对称），
-     用于验证 观测 -> 策略 -> 动作 -> PD -> 力矩 -> 关节运动 的完整链路。
-  height_cmd = 0.05 (低) -> a 负饱和；0.17 (高) -> a 正饱和。
+  -> all joints follow the height command (slight per-joint bias for asymmetry),
+     exercising the full obs -> policy -> action -> PD -> torque -> joint loop.
+  The height_cmd range below is an example; align with your config.
 
 Usage:
   python3 gen_drive_policy.py -o policy_drive.onnx

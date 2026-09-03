@@ -2,46 +2,57 @@
 
 RMCS（RoboMaster Control System）的**通用强化学习（RL）策略部署包**。
 
-将训练好的 RL 策略（ONNX 模型）以标准 Component 的形式接入 RMCS 控制系统：
-在 ROS2 上位机节点内完成"观测构建 → 推理 → 动作 → 低层控制"的完整闭环，
+将训练好的 RL 策略（ONNX 模型）以标准 Component 的形式接入 RMCS：
+在 ROS 2 节点内完成“观测构建 → ONNX Runtime CPU 推理 → 动作换算 → PD → 关节力矩”，
 输出关节力矩命令交由机器人硬件组件下发。
 
-## 设计原则
+详细文档：
 
-- **与机器人解耦**：策略合同（观测/动作格式）与参数（关节描述、PD 分组、缩放系数）全部通过YAML 配置。
-- **与训练对齐**：观测构建与低层控制（PD）与训练环境保持同构，保证 sim-to-real 一致性。
-- **可选集成**：本包不依赖 `rmcs_core`，以独立子模块形式引用。
+- [架构与组件](doc/architecture.md)
+- [策略模型合同](doc/model-contract.md)
+- [构建、配置与部署](doc/deployment.md)
 
-## 工作方式
+## 通用设计（一次实现，多车复用）
 
-本包以 `rmcs::rl::RlController` 组件的形式接入 RMCS 的组件框架
-（`rmcs_executor` 接口图，按路径配对，跨包通信）：
+`rmcs_rl` 只描述 **RL 部署的结构**，不绑定任何车型（deformable / wheel-leg /
+后续新车型都只是配置实例）。核心链路：
 
 ```
-机器人硬件组件（rmcs_core 等）
-   │  关节角度/速度、IMU（四元数/角速度）
+关节/IMU 反馈（机器人硬件组件提供，接口路径可配）
+   │
    ▼
-RlController
-   ├─ 构建观测（按训练合同缩放，N 关节）
-   ├─ ONNX Runtime CPU 推理（频率可配，默认 50Hz）
-   ├─ 动作 → 目标换算 → PD（位置组 + 速度组，输出力矩）
+RlController（rmcs_executor Component）
+   ├─ 观测构建：cmd3 | height_cmd | ang_vel3 | gravity3
+   │            | joint_pos(N) | joint_vel(N) | last_actions(action_size)
+   │            （缩放系数全部 YAML 可配；velocity_pd 关节的位置观测置零）
+   ├─ ONNX Runtime CPU 推理：obs[1, obs_size] → actions[1, action_size]，
+   │            合同不符（名称/维度/类型）即拒绝进入 RL
+   ├─ 动作换算：位置组 pos_target = position_action_scale·a + default_dof_pos；
+   │            速度组 vel_target = velocity_action_scale·a
+   ├─ PD → 力矩限幅（position_kp/kd、velocity_kp/kd、torque_max）
    └─ FSM：INIT / IDLE / PREPARE / RL + failSafe + reset
    │
    ▼
-  关节力矩 → 机器人硬件组件 → 电机
+   关节力矩 → 机器人硬件组件 → 电机
 ```
 
-## 特性
+要点：
 
-- **观测构建**：与训练环境逐项对齐（指令、目标高度、角速度、重力投影、关节位置/速度、上一帧动作），
-  缩放系数全部可配
-- **推理**：ONNX Runtime（CPU），单输入 `obs` → 单输出 `actions`，模型合同严格校验，
-  不匹配即拒绝进入 RL（安全退出）
-- **低层控制**：关节分为"位置 PD 组"与"速度 PD 组"，动作分别换算为位置目标/速度目标后做 PD，
-  输出力矩并限幅——与常见轮式/足式训练合同同构
-- **状态机**：INIT(0)/IDLE(1)/PREPARE(2)/RL(3) 四态，PREPARE 负责从任意姿态插值到预备位，
-  异常（观测非有限、推理失败等）自动 failSafe 退回 IDLE；支持 RMCS 统一的 reset 语义
-- **参数化**：全部参数走 YAML（`rmcs_bringup` 配置），无硬编码机器人常量
+- **机器人差异全部收敛到 YAML**：关节名、接口前缀/后缀、PD 分组、合同尺寸、
+  缩放/增益/限位/预备位全部可配——代码不含车型常量。
+- **策略模型与部署框架解耦**：任何训练侧仓库（Isaac Lab / legged_gym / …）
+  导出符合 [doc/model-contract.md](doc/model-contract.md) 合同的 ONNX 即可部署。
+- **台架调试方便**：`RlDebugCommand` 通过 topic 直接发 `vx/yaw_rate/height/state` 指令与复位，
+  配合 `rl_publish_network_io` 输出观测/动作，不用改代码就能手动驱动 FSM 走完 PREPARE→RL。
+
+### 接入一台新车型
+
+1. 训练导出 ONNX（输入 `obs`、输出 `actions`，命名与合同一致），放入 `models/` 或任意路径；
+2. 在 `rmcs_bringup/config/<robot>.yaml` 注册 `RlController`（调试期加
+   `RlDebugCommand`），按 [doc/deployment.md](doc/deployment.md)
+   填写 `joint_names`、PD 分组、缩放与限位；
+3. `build-rmcs && launch-rmcs`：先在台架/安全环境用 `RlDebugCommand` 手动走
+   PREPARE→RL 验证，再上真机。
 
 ## 快速开始
 
@@ -50,117 +61,67 @@ RlController
 先保证 `rmcs_executor` 正确构建，然后引用本包并构建：
 
 ```sh
-# 进入工作空间的 src/ 目录下，引用本包（可选子模块，与 rmcs_auto_aim_v2 一致）
 cd <RMCS 仓库>
-git submodule add <本仓库 URL> rmcs_ws/src/rmcs_rl
+git submodule add <rmcs_rl 仓库 URL> rmcs_ws/src/rmcs_rl
 git submodule update --init --recursive
-
-# 构建依赖（RMCS 标准构建脚本，等同 colcon build）
 build-rmcs
 ```
 
-> 首次配置本包时，CMake 会自动下载官方 ONNX Runtime 预编译包（约 6MB，SHA256 校验）。
-> 不需要本包时直接删除目录即可（`rmcs_core` 不依赖本包，构建自动跳过）。
+> 首次配置时，CMake 会自动下载官方 ONNX Runtime CPU 预编译包（约 6MB，SHA256 校验）。
 
-### 放置策略模型
+### 放置模型
 
-将训练导出的 `policy.onnx` 放到本包 `models/` 目录（命名 `policy.onnx`）。
-模型随包安装进 `install/`，`sync-remote` 时自动同步到运行机——无需单独 scp。
-合同要求见 [models/README.md](models/README.md)。
+将训练导出的 `policy.onnx` 放到 `models/policy.onnx`（或通过 `rl_model_path` 指向任意路径）。
+模型随包安装到 `share/rmcs_rl/models/`，`sync-remote` 时会自动同步到运行机。
+合同见 [doc/model-contract.md](doc/model-contract.md)。
 
-YAML 中 `rl_model_path` 写相对路径（相对本包 share 目录，开发/运行环境一致）：
+### 配置与运行
 
-```yaml
-rl_model_path: "models/policy.onnx"
-```
-
-### 配置
-
-在 `rmcs_bringup/config/<robot>.yaml` 中注册组件并填写参数：
+在 `rmcs_bringup/config/<robot>.yaml` 中注册组件：
 
 ```yaml
 rmcs_executor:
   ros__parameters:
     update_rate: 1000.0
     components:
-      - <机器人硬件组件> -> <实例名>
       - rmcs::rl::RlController -> rl_controller
 
 rl_controller:
   ros__parameters:
-    rl_model_path: "/path/to/policy.onnx"
-    rl_inference_frequency: 50.0
-    joint_names: [...]            # 关节名（训练 DOF 序）
-    joint_base_path: "/<robot>/<subsystem>"   # 接口路径前缀，须与硬件组件输出一致
-    position_pd_joints: [...]     # 位置 PD 组（关节索引）
-    velocity_pd_joints: [...]     # 速度 PD 组（关节索引）
-    # ... 其余参数见代码内注释与参数表
+    rl_model_path: "models/policy.onnx"
+    # ... 其他参数见 doc/deployment.md
 ```
 
-关键参数一览：
-
-| 参数 | 含义 |
-|---|---|
-| `rl_model_path` | 策略 ONNX 路径 |
-| `rl_inference_frequency` | 推理频率（Hz） |
-| `rl_obs_size` / `rl_action_size` | 模型合同尺寸（默认 10+3N / N，N = 关节数） |
-| `joint_names` | 关节名列表（训练 DOF 序） |
-| `joint_base_path` | 关节接口路径前缀 |
-| `position_pd_joints` / `velocity_pd_joints` | 位置 PD / 速度 PD 组关节索引 |
-| `default_dof_pos` / `dof_pos_limits_*` | 位置组目标中位与限位 |
-| `position_action_scale` / `velocity_action_scale` | 动作 → 目标换算系数 |
-| `position_kp/kd`、`velocity_kp/kd` | PD 增益（与训练一致） |
-| `obs_*_scale`、`clip_*` | 观测缩放与裁剪 |
-| `auto_enter_rl`、`prepare_*` | FSM 行为 |
-
-### 运行
-
-构建完成后（见"项目构建"），启动 RMCS：
+构建后启动：
 
 ```sh
 launch-rmcs
 ```
 
-启动后可通过 `ros2 topic echo` 查看 `{joint_base_path}/rl/observation`、
-`{joint_base_path}/rl/action`、`{joint_base_path}/rl/state` 进行调试。
+详细参数、接口、运行期依赖与部署流程见 [doc/deployment.md](doc/deployment.md)。
 
-## 目录结构
+## 项目架构
 
 ```
 rmcs_rl/
-├── src/
-│   ├── rl_controller.cpp          # 主组件（观测/推理/PD/FSM）
-│   └── onnxruntime_inference.hpp  # ONNX Runtime 封装（合同校验）
-├── models/                        # 策略模型与合同说明
-├── tool/
-│   └── install_rl_deps.sh         # 运行侧 ONNX Runtime 一键安装（local / remote）
+├── README.md            # 入口说明（本页）
+├── doc/                 # 架构 / 模型合同 / 部署文档
+├── config/executor.yaml # RMCS 配置模板（复制到 rmcs_bringup/config/<robot>.yaml）
+├── models/              # 策略 ONNX（与源码分离，安装到 share/rmcs_rl/models/）
+├── src/                 # 全部实现与推理封装（组件 cpp + 单头文件推理封装）
+│   ├── rl_controller.cpp
+│   ├── rl_debug_command.cpp
+│   └── onnxruntime_inference.hpp
+├── tool/                # 运行依赖安装、模型生成与合同校验
 ├── package.xml
-├── CMakeLists.txt                 # onnxruntime 自动下载（官方预编译包）
-└── plugins.xml
+├── plugins.xml
+└── CMakeLists.txt
 ```
 
-## 运行期依赖
+组件职责：
 
-- `rmcs_executor`、`rclcpp`（ROS2 Jazzy）
-- `libonnxruntime.so.1`：构建时由 CMake 自动下载官方预编译包（进 `build/`）；
-  运行侧（mini PC / 运行容器）需另行安装
-
-### 部署流程（开发容器 → 运行机）
-
-```sh
-# 1. 开发容器内：模型放入 models/，构建
-cp policy.onnx src/rmcs_rl/models/policy.onnx
-build-rmcs
-
-# 2. 同步安装树到运行机（unison，含模型与配置；onnxruntime 不在其中）
-sync-remote
-
-# 3. 运行机一键安装 onnxruntime（仅首次/换版本时）
-bash tool/install_rl_deps.sh remote
-```
-
-> 之后更新模型/代码只需重复 1+2（模型随 install/ 同步，无需单独 scp）；
-> 仅当更换 onnxruntime 版本时才需重跑第 3 步。
+- `RlController`：核心策略部署控制器（观测构建/推理/动作换算/PD/FSM）
+- `RlDebugCommand`：调试指令源（ROS topic → command 接口）
 
 ## 相关
 

@@ -1,0 +1,89 @@
+name: CI
+
+on:
+  pull_request:
+    paths:
+      - "src/**"
+      - "models/**"
+      - "tool/**"
+      - "CMakeLists.txt"
+      - "package.xml"
+      - "plugins.xml"
+      - ".github/workflows/**"
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  RMCS_REPO: https://github.com/Alliance-Algorithm/RMCS.git
+  RMCS_REF: main
+
+jobs:
+  build-and-contract-check:
+    runs-on: ubuntu-latest
+    container:
+      image: qzhhhi/rmcs-develop
+      options: --user 0
+
+    steps:
+      - name: Checkout rmcs_rl
+        uses: actions/checkout@v4
+        with:
+          path: rmcs_rl
+
+      - name: Clone RMCS workspace
+        shell: bash
+        run: |
+          set -euo pipefail
+          git clone --depth 1 --recurse-submodules --branch "${RMCS_REF}" "${RMCS_REPO}" /tmp/RMCS
+          mkdir -p /tmp/RMCS/rmcs_ws/src/rmcs_rl
+          tar -C "${GITHUB_WORKSPACE}/rmcs_rl" --exclude=".git" -cf - . \
+            | tar -C /tmp/RMCS/rmcs_ws/src/rmcs_rl -xf -
+
+      - name: Build rmcs_rl (colcon)
+        shell: bash
+        working-directory: /tmp/RMCS/rmcs_ws
+        run: |
+          set -euo pipefail
+          set +u
+          source /opt/ros/jazzy/setup.bash
+          set -u
+          colcon build --packages-up-to rmcs_rl
+
+      - name: Check ONNX contract of shipped models
+        shell: bash
+        working-directory: /tmp/RMCS/rmcs_ws/src/rmcs_rl
+        run: |
+          set -euo pipefail
+
+          # The base image may not ship pip for the system Python.
+          if ! python3 -m pip --version >/dev/null 2>&1; then
+            echo "python3-pip is missing; installing it..."
+            apt-get update -qq
+            apt-get install -y -qq --no-install-recommends python3-pip
+          fi
+
+          python3 -m pip install --quiet --no-cache-dir \
+              --break-system-packages onnxruntime numpy \
+            || python3 -m pip install --quiet --no-cache-dir onnxruntime numpy
+
+          for model in models/*.onnx; do
+            read -r obs act <<< "$(python3 - "$model" <<'PY'
+          import sys
+          import onnxruntime as ort
+          sess = ort.InferenceSession(sys.argv[1], providers=["CPUExecutionProvider"])
+          print(sess.get_inputs()[0].shape[1], sess.get_outputs()[0].shape[1])
+          PY
+            )"
+            echo "== ${model} (obs=${obs}, act=${act}) =="
+            python3 tool/check_policy_contract.py "$model" --obs "$obs" --act "$act"
+          done
+
+          if python3 tool/check_policy_contract.py \
+              models/policy.onnx --obs 999 --act 999 >/dev/null 2>&1; then
+            echo "FAIL: contract mismatch should have been rejected"
+            exit 1
+          fi
+          echo "negative contract test OK"
