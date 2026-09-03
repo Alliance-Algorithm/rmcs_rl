@@ -1,12 +1,3 @@
-/// RL 调试指令源组件（验证/调试专用，正式控制链不应使用）
-///
-/// 订阅 ROS topic 写入 RlController 的命令接口：
-///   {command_base}/debug/command   std_msgs::msg::Float64MultiArray [vx, yaw_rate, height, state]
-///   {command_base}/debug/reset     std_msgs::msg::Bool（true 沿 → reset_count 递增）
-///
-/// 输出：
-///   {command_base}/command/{vx,yaw_rate,height,state}
-///   {command_base}/reset_count（std::size_t，变化触发 RlController 干净复位）
 #include <atomic>
 #include <cstddef>
 #include <string>
@@ -27,7 +18,11 @@ public:
         : Node{
               get_component_name(),
               rclcpp::NodeOptions{}.automatically_declare_parameters_from_overrides(true)} {
-        command_base_ = param_or<std::string>("command_base", "/wheel_leg");
+        command_base_ = param_or<std::string>("command_base", "");
+        if (command_base_.empty())
+            throw std::invalid_argument(
+                "RlDebugCommand: 'command_base' must be configured"
+                " (same prefix as RlController's joint_base_path)");
 
         register_output(command_base_ + "/command/vx", command_vx_output_, 0.0);
         register_output(command_base_ + "/command/yaw_rate", command_yaw_rate_output_, 0.0);
@@ -74,7 +69,7 @@ private:
         return default_value;
     }
 
-    std::string command_base_ = "/wheel_leg";
+    std::string command_base_;
     std::atomic<double> command_vx_{0.0};
     std::atomic<double> command_yaw_rate_{0.0};
     std::atomic<double> command_height_{0.0};
