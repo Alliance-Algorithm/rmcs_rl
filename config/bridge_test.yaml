@@ -1,0 +1,70 @@
+
+rmcs_executor:
+  ros__parameters:
+    update_rate: 1000.0
+    components:
+      - rmcs::rl::testing::SyntheticRobot -> synthetic_robot
+      - rmcs::rl::RlBridge -> rl_bridge
+      - rmcs_core::broadcaster::ValueBroadcaster -> value_broadcaster
+
+value_broadcaster:
+  ros__parameters:
+    forward_list:
+      - /test/rl/valid
+      - /test/rl/healthy
+      - /test/rl/action_age
+      - /test/rl/action/j0
+      - /test/rl/action/j1
+
+synthetic_robot:
+  ros__parameters:
+    base: "/test"
+    joint_names: [j0, j1]
+    velocity_interface_type: "direction_vector"
+    period: 4.0
+    amplitude: 1.0
+    height: 0.25
+    height_amplitude: 0.05
+    enabled: true
+
+rl_bridge:
+  ros__parameters:
+    rl_base: "/test/rl"
+    policy_rate: 50.0
+    max_action_age: 0.04
+
+    rl_obs_size: 17
+    rl_action_size: 4
+
+    enable_interface: "/test/enabled"
+    enable_default: false
+    invalid_value: "nan"    # 必须加引号：不加会被 YAML 解析成 float NaN
+
+    joint_names: [j0, j1]
+    joint_base_path: "/test"
+    default_joint_pos: { j0: 0.0, j1: 0.0 }
+    observation_terms:
+      - index=0  path=/test/command/velocity take=x
+      - index=1  path=/test/command/velocity take=z
+      - index=2  path=/test/command/height
+      - index=3  path=/test/imu/angular_velocity take=vec3 scale=0.5
+      - index=6  path=/test/imu/quaternion transform=projected_gravity
+      - index=9  type=joint_pos joints=j0,j1 relative=true
+      - index=11 type=joint_vel joints=j0,j1 scale=0.1
+      - index=13 type=last_action indices=0..3
+
+    action_terms:
+      - index=0 output=/test/rl/action/j0
+      - index=1 output=/test/rl/action/j1
+      - index=2 output=/test/rl/action/j2 scale=0.5
+      - index=3 output=/test/rl/action/j3
+
+policy_server:
+  ros__parameters:
+    rl_base: "/test/rl"
+    rl_model_path: "/tmp/rmcs_rl_accept/bridge_test.onnx"
+    input_name: "obs"
+    output_name: "actions"
+    normalization_from_metadata: true
+    publish_status: true
+    status_rate: 2.0

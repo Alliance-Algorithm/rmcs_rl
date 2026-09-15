@@ -13,10 +13,6 @@ endif()
 find_package(ament_cmake_auto REQUIRED)
 ament_auto_find_build_dependencies()
 
-# ---- ONNX Runtime (CPU 推理) ----
-# 官方预编译包：https://github.com/microsoft/onnxruntime/releases/tag/v1.20.0
-# SHA256 对应 linux-x64 1.20.0；换平台/版本时必须同步更新。
-# 交叉编译到其他架构时设置 -DONNXRUNTIME_PLATFORM=<平台>（如 linux-aarch64）。
 set(ONNXRUNTIME_VERSION 1.20.0)
 if(NOT DEFINED ONNXRUNTIME_PLATFORM)
     set(ONNXRUNTIME_PLATFORM linux-x64)
@@ -42,23 +38,30 @@ if(NOT EXISTS ${ONNXRUNTIME_ROOT_DIR}/include/onnxruntime_cxx_api.h)
     endif()
 endif()
 include_directories(${ONNXRUNTIME_ROOT_DIR}/include)
-
-file(GLOB_RECURSE PROJECT_SOURCE CONFIGURE_DEPENDS
-    ${PROJECT_SOURCE_DIR}/src/*.cpp
-    ${PROJECT_SOURCE_DIR}/src/*.c
-)
-
-ament_auto_add_library(
-    ${PROJECT_NAME} SHARED
-    ${PROJECT_SOURCE}
-)
-
 include_directories(${PROJECT_SOURCE_DIR}/src)
-target_link_libraries(${PROJECT_NAME} ${ONNXRUNTIME_ROOT_DIR}/lib/libonnxruntime.so)
+
+ament_auto_add_library(rmcs_rl_bridge SHARED
+    src/rl_bridge.cpp
+)
+
+ament_auto_add_library(rmcs_rl_testing SHARED
+    src/testing/synthetic_robot.cpp
+)
+
+ament_auto_add_library(rmcs_rl_legacy SHARED
+    src/rl_controller.cpp
+)
+target_link_libraries(rmcs_rl_legacy ${ONNXRUNTIME_ROOT_DIR}/lib/libonnxruntime.so)
+
+ament_auto_add_executable(policy_server
+    src/policy_server.cpp
+)
+target_link_libraries(policy_server ${ONNXRUNTIME_ROOT_DIR}/lib/libonnxruntime.so)
+install(TARGETS policy_server DESTINATION lib/${PROJECT_NAME})
 
 pluginlib_export_plugin_description_file(rmcs_executor plugins.xml)
 
-# 策略模型随包安装（install/ 内，随 sync-remote 同步到运行机）
 install(DIRECTORY models DESTINATION share/${PROJECT_NAME})
+install(DIRECTORY config DESTINATION share/${PROJECT_NAME})
 
 ament_auto_package()
