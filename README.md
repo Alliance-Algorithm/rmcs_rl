@@ -89,7 +89,7 @@ python3 src/rmcs_rl/tool/check_policy_contract.py <model.onnx> --config <deploy.
 bash src/rmcs_rl/tool/test_layout_contract.sh
 ```
 
-实测 **PASS=21 FAIL=0**。
+实测 **PASS=21 FAIL=0**。CI 里也会跑这一项，外加对 `models/*.onnx` 逐个做模型自检。
 
 ## 工具链
 
@@ -97,7 +97,7 @@ bash src/rmcs_rl/tool/test_layout_contract.sh
 |---|---|
 | `tool/rl_layout.py` | 词条语法 / 规范串 / `layout_hash` 的**单一真源**（`python3 tool/rl_layout.py` 跑自检） |
 | `tool/stamp_layout_metadata.py` | 部署 YAML → 写进 ONNX `metadata_props`（`rmcs_obs_layout` / `rmcs_actions_layout` / `policy_layout_hash` …） |
-| `tool/check_policy_contract.py` | `MODEL --config X [--node N] [--print-layout] [--expect-model-id H]`：校验 YAML ↔ 张量 ↔ metadata 三方一致 |
+| `tool/check_policy_contract.py` | 两种模式：`MODEL`（模型自检：张量契约 + metadata 自洽，不比对 YAML，CI 用）/ `MODEL --config X [--node N] [--print-layout] [--expect-model-id H]`（YAML ↔ 张量 ↔ metadata 完整校验） |
 | `tool/gen_synthetic_policy.py` | `--from-config X -o M.onnx`：生成零动作合成模型（`obs[1,N] → actions[1,M]`；ONNX 后端强制 `ir_version=10`，因为 ORT 1.20 拒收 IR 13） |
 | `tool/test_layout_contract.sh` | Python 侧布局契约回归（含 6 个必须 FAIL 的负例） |
 | `tool/install_rl_deps.sh` | `bash tool/install_rl_deps.sh local\|remote`：装 `libonnxruntime.so.1`（仅 `policy_server` 需要） |

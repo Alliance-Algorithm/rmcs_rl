@@ -1,23 +1,31 @@
 #!/usr/bin/env python3
-"""Check an ONNX policy against the rmcs_rl bridge contract (v2 layout).
+"""Check an ONNX policy against the rmcs_rl contract (v2 layout).
 
-Verifies, in order:
-  1. model loads; graph has exactly one input "obs" and one output "actions"
-  2. both are float32, rank 2, shapes == [1, rl_obs_size] / [1, rl_action_size]
-  3. metadata carries the v2 signatures rmcs_obs_layout / rmcs_actions_layout,
-     byte-identical to the signatures derived from the deployment YAML
-     (v1 metadata is reported as "re-stamp required", not as a confusing mismatch)
-  4. policy_layout_hash (if present) == computed FNV1a64 layout hash
-  5. normalization metadata is sane (rmcs_obs_mean/std length == obs_size, clips float)
-  6. one dummy inference runs and yields finite actions (skipped without onnxruntime)
+Two modes:
+
+  * self-check (no --config; used by CI, deployment YAML lives in the RMCS repo):
+      model loads; one input "obs" / one output "actions"; float32; rank 2; batch 1;
+      concrete (non-dynamic) shapes. Layout metadata is OPTIONAL:
+      - missing / v1 -> SKIP (legacy RlController models are not forced to be stamped)
+      - present v2   -> signatures must be internally consistent with the tensor
+                        sizes, and policy_layout_hash must match those signatures
+                        (catches a bad stamp without any YAML)
+
+  * full contract check (--config deploy.yaml):
+      everything above, plus metadata is REQUIRED and must be byte-identical to the
+      signatures derived from the YAML and to policy_layout_hash
+      (v1 metadata is reported as "re-stamp required", not as a confusing mismatch).
+      Normalization metadata is validated when present (mean/std finite, std > 0, clips float > 0).
+      One dummy inference runs and yields finite actions (skipped without onnxruntime).
 
 Prints the layout_hash and the model_id (FNV1a64 of the model file bytes).
 Exit code: 0 = PASS, 1 = FAIL.
 
 Usage:
+  python3 check_policy_contract.py policy.onnx
   python3 check_policy_contract.py policy.onnx --config deploy.yaml --node rl_bridge
   python3 check_policy_contract.py --config deploy.yaml --print-layout
-  python3 check_policy_contract.py policy.onnx --obs 20 --act 6      # 旧用法（无 YAML）
+  python3 check_policy_contract.py policy.onnx --obs 20 --act 6      # 显式期望尺寸（无 YAML）
 """
 import argparse
 import math
@@ -159,8 +167,10 @@ def main() -> None:
                         help=f"YAML 节点名（缺省 {layout.DEFAULT_NODE}）")
     parser.add_argument("--print-layout", action="store_true",
                         help="只打印规范串 + layout_hash（不需要模型文件）后退出")
-    parser.add_argument("--obs", type=int, default=None, help="旧用法：观测尺寸（无 YAML 时）")
-    parser.add_argument("--act", type=int, default=None, help="旧用法：动作尺寸（无 YAML 时）")
+    parser.add_argument("--obs", type=int, default=None,
+                        help="期望的观测尺寸（缺省取模型形状）")
+    parser.add_argument("--act", type=int, default=None,
+                        help="期望的动作尺寸（缺省取模型形状）")
     parser.add_argument("--expect-model-id", default=None,
                         help="可选：期望的 model_id（16 位 hex），用于部署对账")
     args = parser.parse_args()
@@ -197,10 +207,7 @@ def main() -> None:
                      f"obs_size={obs_size} action_size={act_size}")
     else:
         obs_size, act_size = args.obs, args.act
-        report.skip("config layout check", "未给 --config（只做张量/尺寸检查）")
-        if obs_size is None or act_size is None:
-            print("ERROR: 无 --config 时必须给 --obs 与 --act", file=sys.stderr)
-            sys.exit(1)
+        report.skip("config layout check", "未给 --config（只做模型自检，不比对 YAML）")
     digest = None
     if obs_sig is not None:
         digest = layout.layout_hash(obs_sig, act_sig, obs_size, act_size)
@@ -245,6 +252,25 @@ def main() -> None:
     in_shape, out_shape = _shape_of(inp), _shape_of(out)
     report.check("rank 2", len(in_shape) == 2 and len(out_shape) == 2,
                  f"obs={in_shape} actions={out_shape}")
+    if len(in_shape) != 2 or len(out_shape) != 2:
+        print("== SUMMARY: FAIL (秩不为 2，后续检查跳过) ==")
+        sys.exit(1)
+
+    model_obs, model_act = in_shape[1], out_shape[1]
+    if not isinstance(model_obs, int) or not isinstance(model_act, int) \
+            or model_obs <= 0 or model_act <= 0:
+        report.check("concrete obs/action size", False,
+                     f"obs={in_shape} actions={out_shape}（动态或符号维，无法自检）")
+        print(f"== SUMMARY: {'PASS' if report.ok else 'FAIL'} ==")
+        sys.exit(0 if report.ok else 1)
+
+    if obs_size is None:
+        obs_size = model_obs
+    if act_size is None:
+        act_size = model_act
+    if args.obs is None and args.act is None:
+        report.info("model sizes", f"obs={model_obs} actions={model_act}（取自模型）")
+
     report.check("obs shape", in_shape == [1, obs_size],
                  f"{in_shape} == [1,{obs_size}]" if in_shape == [1, obs_size]
                  else f"{in_shape} != [1,{obs_size}]")
@@ -258,12 +284,19 @@ def main() -> None:
     if version_line:
         report.info("policy_version", version_line)
 
+    require_metadata = args.config is not None
     v1_hint_printed = False
     for key, value in (("rmcs_obs_layout", obs_meta), ("rmcs_actions_layout", act_meta)):
         if value is None:
-            report.check(key, False,
-                         f"metadata 缺少 {key}（v2 布局串）→ 用 stamp_layout_metadata.py 盖章")
+            if require_metadata:
+                report.check(key, False,
+                             f"metadata 缺少 {key}（v2 布局串）→ 用 stamp_layout_metadata.py 盖章")
+            else:
+                report.skip(key, "未盖章（模型自检模式不要求；完整比对需 --config）")
         elif layout.is_v1_signature(value):
+            if not require_metadata:
+                report.skip(key, "v1 旧盖章（模型自检模式忽略）")
+                continue
             report.check(key, False,
                          f"v1 detected → re-stamp with stamp_layout_metadata.py（{key}={value!r}）")
             if v1_hint_printed:
@@ -303,7 +336,17 @@ def main() -> None:
     if declared_hash is None:
         report.skip("policy_layout_hash", "未写（可选，建议盖章）")
     elif not args.config:
-        report.skip("policy_layout_hash", "无 --config 无从核对")
+        if obs_meta and act_meta and not layout.is_v1_signature(obs_meta) \
+                and not layout.is_v1_signature(act_meta):
+            expected = layout.hex16(layout.layout_hash(obs_meta, act_meta, obs_size, act_size))
+            text = declared_hash.strip().lower()
+            if text.startswith("0x"):
+                text = text[2:]
+            report.check("policy_layout_hash (metadata 自洽)", text == expected[2:],
+                         expected if text == expected[2:]
+                         else f"模型={declared_hash!r} 期望={expected}")
+        else:
+            report.skip("policy_layout_hash", "无 --config 且 metadata 不完整，无从核对")
     else:
         text = declared_hash.strip().lower()
         if text.startswith("0x"):

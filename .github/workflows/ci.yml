@@ -52,7 +52,7 @@ jobs:
           set -u
           colcon build --packages-up-to rmcs_rl
 
-      - name: Check ONNX contract of shipped models
+      - name: Check shipped models (self-check, metadata optional)
         shell: bash
         working-directory: /tmp/RMCS/rmcs_ws/src/rmcs_rl
         run: |
@@ -66,24 +66,39 @@ jobs:
           fi
 
           python3 -m pip install --quiet --no-cache-dir \
-              --break-system-packages onnxruntime numpy \
-            || python3 -m pip install --quiet --no-cache-dir onnxruntime numpy
+              --break-system-packages onnx onnxruntime numpy \
+            || python3 -m pip install --quiet --no-cache-dir onnx onnxruntime numpy
 
-          for model in models/*.onnx; do
-            read -r obs act <<< "$(python3 - "$model" <<'PY'
-          import sys
-          import onnxruntime as ort
-          sess = ort.InferenceSession(sys.argv[1], providers=["CPUExecutionProvider"])
-          print(sess.get_inputs()[0].shape[1], sess.get_outputs()[0].shape[1])
-          PY
-            )"
-            echo "== ${model} (obs=${obs}, act=${act}) =="
-            python3 tool/check_policy_contract.py "$model" --obs "$obs" --act "$act"
+          shopt -s nullglob
+          models=(models/*.onnx)
+          if [ "${#models[@]}" -eq 0 ]; then
+            echo "No models under models/, nothing to check"
+          fi
+          for model in "${models[@]}"; do
+            echo "== ${model} =="
+            python3 tool/check_policy_contract.py "$model"
           done
 
-          if python3 tool/check_policy_contract.py \
-              models/policy.onnx --obs 999 --act 999 >/dev/null 2>&1; then
-            echo "FAIL: contract mismatch should have been rejected"
-            exit 1
+          # Negative test: a wrong expected size must be rejected with a shape
+          # error (guards against a false pass when the tool fails for an
+          # unrelated reason, e.g. a missing model file).
+          if [ "${#models[@]}" -gt 0 ]; then
+            if output="$(python3 tool/check_policy_contract.py \
+                "${models[0]}" --obs 999 --act 999 2>&1)"; then
+              echo "FAIL: contract mismatch should have been rejected"
+              exit 1
+            fi
+            if ! grep -q "FAIL obs shape" <<<"${output}"; then
+              echo "FAIL: expected a shape mismatch, got:"
+              echo "${output}"
+              exit 1
+            fi
+            echo "negative contract test OK"
           fi
-          echo "negative contract test OK"
+
+      - name: Toolchain regression (layout contract tools)
+        shell: bash
+        working-directory: /tmp/RMCS/rmcs_ws/src/rmcs_rl
+        run: |
+          set -euo pipefail
+          bash tool/test_layout_contract.sh
