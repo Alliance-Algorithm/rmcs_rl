@@ -1,9 +1,6 @@
 <library path="rmcs_rl_bridge">
   <class type="rmcs::rl::RlBridge" base_class_type="rmcs_executor::Component" />
 </library>
-<library path="rmcs_rl_testing">
-  <class type="rmcs::rl::testing::SyntheticRobot" base_class_type="rmcs_executor::Component" />
-</library>
 <library path="rmcs_rl_legacy">
   <class type="rmcs::rl::RlController" base_class_type="rmcs_executor::Component" />
 </library>

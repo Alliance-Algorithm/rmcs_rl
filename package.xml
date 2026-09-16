@@ -9,16 +9,20 @@
 
   <buildtool_depend>ament_cmake</buildtool_depend>
 
+  <build_depend>rosidl_default_generators</build_depend>
+  <exec_depend>rosidl_default_runtime</exec_depend>
+
   <depend>rclcpp</depend>
   <depend>rmcs_executor</depend>
   <depend>rmcs_description</depend>
-  <depend>rmcs_rl_msgs</depend>
   <depend>ament_index_cpp</depend>
   <depend>std_msgs</depend>
   <depend>pluginlib</depend>
 
   <test_depend>ament_lint_auto</test_depend>
   <test_depend>ament_lint_common</test_depend>
+
+  <member_of_group>rosidl_interface_packages</member_of_group>
 
   <export>
     <build_type>ament_cmake</build_type>

@@ -13,6 +13,17 @@ endif()
 find_package(ament_cmake_auto REQUIRED)
 ament_auto_find_build_dependencies()
 
+find_package(rosidl_default_generators REQUIRED)
+
+rosidl_generate_interfaces(${PROJECT_NAME}
+    "msg/Observation.msg"
+    "msg/Action.msg"
+    "msg/PolicyStatus.msg"
+    DEPENDENCIES std_msgs
+)
+
+rosidl_get_typesupport_target(cpp_typesupport_target ${PROJECT_NAME} rosidl_typesupport_cpp)
+
 set(ONNXRUNTIME_VERSION 1.20.0)
 if(NOT DEFINED ONNXRUNTIME_PLATFORM)
     set(ONNXRUNTIME_PLATFORM linux-x64)
@@ -43,10 +54,7 @@ include_directories(${PROJECT_SOURCE_DIR}/src)
 ament_auto_add_library(rmcs_rl_bridge SHARED
     src/rl_bridge.cpp
 )
-
-ament_auto_add_library(rmcs_rl_testing SHARED
-    src/testing/synthetic_robot.cpp
-)
+target_link_libraries(rmcs_rl_bridge ${cpp_typesupport_target})
 
 ament_auto_add_library(rmcs_rl_legacy SHARED
     src/rl_controller.cpp
@@ -57,11 +65,14 @@ ament_auto_add_executable(policy_server
     src/policy_server.cpp
 )
 target_link_libraries(policy_server ${ONNXRUNTIME_ROOT_DIR}/lib/libonnxruntime.so)
+target_link_libraries(policy_server ${cpp_typesupport_target})
 install(TARGETS policy_server DESTINATION lib/${PROJECT_NAME})
 
 pluginlib_export_plugin_description_file(rmcs_executor plugins.xml)
 
 install(DIRECTORY models DESTINATION share/${PROJECT_NAME})
 install(DIRECTORY config DESTINATION share/${PROJECT_NAME})
+
+ament_export_dependencies(rosidl_default_runtime)
 
 ament_auto_package()

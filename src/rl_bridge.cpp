@@ -28,8 +28,8 @@
 #include <rclcpp/subscription.hpp>
 #include <rmcs_description/tf_description.hpp>
 #include <rmcs_executor/component.hpp>
-#include <rmcs_rl_msgs/msg/action.hpp>
-#include <rmcs_rl_msgs/msg/observation.hpp>
+#include <rmcs_rl/msg/action.hpp>
+#include <rmcs_rl/msg/observation.hpp>
 
 #include "rl_layout.hpp"
 
@@ -305,11 +305,11 @@ public:
         own_output_paths_.insert(rl_base_ + "/action_age");
         own_output_paths_.insert(rl_base_ + "/obs_seq");
 
-        obs_publisher_ = create_publisher<rmcs_rl_msgs::msg::Observation>(
+        obs_publisher_ = create_publisher<rmcs_rl::msg::Observation>(
             rl_base_ + "/obs", rclcpp::QoS { rclcpp::KeepLast(1) }.best_effort());
-        action_subscription_ = create_subscription<rmcs_rl_msgs::msg::Action>(
+        action_subscription_ = create_subscription<rmcs_rl::msg::Action>(
             rl_base_ + "/action", rclcpp::QoS { rclcpp::KeepLast(1) }.best_effort(),
-            [this](rmcs_rl_msgs::msg::Action::UniquePtr message) { on_action_(std::move(message)); });
+            [this](rmcs_rl::msg::Action::UniquePtr message) { on_action_(std::move(message)); });
 
         incoming_.action.assign(action_size_, 0.0);
         read_snapshot_.action.assign(action_size_, 0.0);
@@ -1286,7 +1286,7 @@ private:
 
     void publish_observation_(const std::vector<double>& obs,
         std::chrono::steady_clock::time_point now) {
-        rmcs_rl_msgs::msg::Observation message;
+        rmcs_rl::msg::Observation message;
         message.header.stamp    = get_clock()->now();
         message.header.frame_id = "";
         message.obs_seq         = ++pub_seq_;
@@ -1300,7 +1300,7 @@ private:
         pub_started_   = true;
     }
 
-    void on_action_(rmcs_rl_msgs::msg::Action::UniquePtr message) {
+    void on_action_(rmcs_rl::msg::Action::UniquePtr message) {
         const auto received = std::chrono::steady_clock::now();
         if (message->action.size() != action_size_) {
             RCLCPP_ERROR_THROTTLE(get_logger(), *get_clock(), 1000,
@@ -1442,8 +1442,8 @@ private:
     OutputInterface<double> action_age_output_ { };
     OutputInterface<std::size_t> obs_seq_output_ { };
 
-    rclcpp::Publisher<rmcs_rl_msgs::msg::Observation>::SharedPtr obs_publisher_;
-    rclcpp::Subscription<rmcs_rl_msgs::msg::Action>::SharedPtr action_subscription_;
+    rclcpp::Publisher<rmcs_rl::msg::Observation>::SharedPtr obs_publisher_;
+    rclcpp::Subscription<rmcs_rl::msg::Action>::SharedPtr action_subscription_;
 };
 
 } // namespace rmcs::rl

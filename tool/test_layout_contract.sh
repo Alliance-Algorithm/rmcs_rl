@@ -107,32 +107,7 @@ else
 fi
 echo "$SIG_PLAIN" | sed 's/^/    /'
 
-echo "== 4. 与桥侧验收夹具集成（config/bridge_test.yaml，存在才跑）=="
-BRIDGE_FIXTURE="$PKG/config/bridge_test.yaml"
-if [ -f "$BRIDGE_FIXTURE" ]; then
-    BRIDGE_MODEL="$WORK/bridge_test.onnx"
-    run_expect 0 "gen --from-config（桥夹具）" \
-        "$PY" "$HERE/gen_synthetic_policy.py" --from-config "$BRIDGE_FIXTURE" --node rl_bridge \
-        -o "$BRIDGE_MODEL"
-    run_expect 0 "stamp（桥夹具）" \
-        "$PY" "$HERE/stamp_layout_metadata.py" --model "$BRIDGE_MODEL" \
-        --from-config "$BRIDGE_FIXTURE" --node rl_bridge
-    run_expect 0 "check（桥夹具）" \
-        "$PY" "$HERE/check_policy_contract.py" "$BRIDGE_MODEL" \
-        --config "$BRIDGE_FIXTURE" --node rl_bridge
-    BRIDGE_HASH="$("$PY" "$HERE/check_policy_contract.py" --print-layout \
-        --config "$BRIDGE_FIXTURE" --node rl_bridge 2>/dev/null \
-        | grep -oE '[0-9a-f]{16}' | head -1)"
-    if [ -n "$BRIDGE_HASH" ]; then
-        ok "p0_acceptance.sh 解析方式取到 layout_hash=$BRIDGE_HASH"
-    else
-        bad "--print-layout 首行未给出可被 grep 提取的 layout_hash"
-    fi
-else
-    echo "  [SKIP] $BRIDGE_FIXTURE 不存在（桥侧夹具未提供）"
-fi
-
-echo "== 5. 负例（必须 FAIL，exit 1，消息可读）=="
+echo "== 4. 负例（必须 FAIL，exit 1，消息可读）=="
 "$PY" - "$MODEL" "$WORK/policy_neg_a.onnx" <<'PYEOF'
 import sys, onnx
 src, dst = sys.argv[1], sys.argv[2]

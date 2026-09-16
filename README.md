@@ -28,9 +28,8 @@ topic 存在的**唯一**原因是「策略进程独立」。想消除这 3 条 
 |---|---|---|---|
 | `rmcs::rl::RlBridge` | 库 `rmcs_rl_bridge` | **否** | 观测组装、定频发布、动作回写、`valid/healthy/action_age` 事实位、合同指纹 |
 | `policy_server` | 可执行文件（`ros2 run rmcs_rl policy_server`） | **是**（唯一链接 ORT 的可执行文件） | 收一帧 obs → 归一化 → ONNX → 回一帧 action（纯反应式，无定时器） |
-| `rmcs::rl::testing::SyntheticRobot` | 库 `rmcs_rl_testing` | 否 | **仅测试用**的合成观测源（台架/无硬件时验证链路） |
 | `rmcs::rl::RlController` | 库 `rmcs_rl_legacy` | 是 | **遗留控制器**（旧配置格式，P1 切换完成后删除） |
-| 消息 `rmcs_rl_msgs` | 独立包 | 否 | `Observation` / `Action` / `PolicyStatus` |
+| 消息 `rmcs_rl/msg/*` | 本包 `msg/`（rosidl 生成，类型全名如 `rmcs_rl/msg/Observation`） | 否 | `Observation` / `Action` / `PolicyStatus` |
 
 > ⚠️ `RlController` 是遗留路径：它自带 ONNX 推理、PD、FSM，配置键（`rl_inference_frequency`、
 > `position_pd_joints`、`action_terms: joint=... mode=... kp=...`）与本文档描述的桥式配置**完全不同**，
@@ -44,40 +43,24 @@ RMCS 侧 output 接口 ──(桥：按词条拼 obs)──> obs 向量 ──to
         └─ RMCS 侧 consumer（P1：FSM/PD/限位，写电机 control_*）<──(桥：逐项回写)── action 向量 <─┘
 ```
 
-## 60 秒快速开始（容器内，验证 obs→action 链路）
+## 部署到真机
 
-下面所有命令都在 dev 容器里跑（工作目录 `rmcs_ws`），用的夹具是 `config/bridge_test.yaml`
-（合成观测源 + 桥 + `policy_server` 三段参数都在同一个文件里，两个节点都能直接吃）：
+本包**不含台架夹具**：链路必须挂到真实 RMCS 组件上跑。简要步骤（完整流程见
+[doc/deployment.md](doc/deployment.md)）：
+
+1. 改 `config/executor.yaml`：观测/动作词条与 `joint_*` 指向真机的接口路径，
+   `policy_server.rl_model_path` 指向已盖章的模型；
+2. 把该文件复制到 `rmcs_bringup/config/<robot>.yaml`，或真机上 `--params-file` 直接加载；
+3. 真机起两个进程：
 
 ```sh
-# 0) 环境（容器内）；install/ 还没构建就先构建：
-#    colcon build --packages-up-to rmcs_rl --symlink-install --merge-install
-source /opt/ros/jazzy/setup.bash && source install/setup.bash
-
-# 1) 由部署 YAML 生成一个零动作合成策略（只为打通链路，不是真策略）
-mkdir -p /tmp/rmcs_rl_accept
-python3 src/rmcs_rl/tool/gen_synthetic_policy.py --from-config src/rmcs_rl/config/bridge_test.yaml \
-    --node rl_bridge -o /tmp/rmcs_rl_accept/bridge_test.onnx
-
-# 2) 盖章：把 YAML 推导出的 v2 规范串 + layout_hash 写进模型 metadata
-python3 src/rmcs_rl/tool/stamp_layout_metadata.py --model /tmp/rmcs_rl_accept/bridge_test.onnx \
-    --from-config src/rmcs_rl/config/bridge_test.yaml --node rl_bridge
-
-# 3) 校验三方一致（YAML / 张量形状 / metadata），末尾应打印 == SUMMARY: PASS ==
-python3 src/rmcs_rl/tool/check_policy_contract.py /tmp/rmcs_rl_accept/bridge_test.onnx \
-    --config src/rmcs_rl/config/bridge_test.yaml --node rl_bridge
-
-# 4) 终端 A：executor（合成观测源 + 桥）。日志里应看到 layout_hash=<16 位 hex>
-ros2 run rmcs_executor rmcs_executor --ros-args \
-    --params-file src/rmcs_rl/config/bridge_test.yaml
-
-# 5) 终端 B：策略进程。日志里的 layout_hash 必须与终端 A 的完全相同
-ros2 run rmcs_rl policy_server --ros-args \
-    --params-file src/rmcs_rl/config/bridge_test.yaml
+ros2 run rmcs_executor rmcs_executor --ros-args --params-file <deploy.yaml>
+ros2 run rmcs_rl policy_server --ros-args --params-file <deploy.yaml>
 ```
 
-看到 `[rl_bridge]: valid=1 (obs_seq=... model_id=... action_age=...)` 即链路通。
-`valid=0` 的原因会直接打在日志里（见 [doc/deployment.md](doc/deployment.md) 的排障表）。
+`layout_hash` 两侧必须一致；`valid=0` 的原因会直接打在桥的日志里（见
+[doc/deployment.md](doc/deployment.md) 的排障表）。注意 P1 的 RMCS 侧 consumer 尚未实现，
+真机上桥恒 `valid=0`、不会输出权威动作（见「现状与边界」）。
 
 ## 加一台新车型 / 加一条观测词条
 
@@ -99,18 +82,14 @@ python3 src/rmcs_rl/tool/check_policy_contract.py <model.onnx> --config <deploy.
 > 词条**增删或维度变化**等于换了策略输入维度 → 必须重新导出模型（盖章只改 metadata，不改张量 shape）。
 > 仅「维度不变」的改名/换实现（例如 v1 的类型前缀 id → v2 去类型化 id）才只需要重盖章，不需要重训。
 
-## P0 验收
+## 工具链回归
 
 ```sh
-# 端到端验收：合成策略 → 盖章 → 起 executor + policy_server → 断言 valid/失效语义/错配拒答/去类型化回归
-bash src/rmcs_rl/tool/p0_acceptance.sh
-
-# Python 工具链回归（不需要 executor）：词条语法自检 + gen/stamp/check 正例 + 6 个负例
+# 不需要 executor：词条语法自检 + gen/stamp/check 正例 + 6 个负例
 bash src/rmcs_rl/tool/test_layout_contract.sh
 ```
 
-`p0_acceptance.sh` 当前 **PASS=23 FAIL=0**（日志在 `/tmp/rmcs_rl_accept/logs/`）；
-`test_layout_contract.sh` 实测 **PASS=25 FAIL=0**。
+实测 **PASS=21 FAIL=0**。
 
 ## 工具链
 
@@ -120,14 +99,12 @@ bash src/rmcs_rl/tool/test_layout_contract.sh
 | `tool/stamp_layout_metadata.py` | 部署 YAML → 写进 ONNX `metadata_props`（`rmcs_obs_layout` / `rmcs_actions_layout` / `policy_layout_hash` …） |
 | `tool/check_policy_contract.py` | `MODEL --config X [--node N] [--print-layout] [--expect-model-id H]`：校验 YAML ↔ 张量 ↔ metadata 三方一致 |
 | `tool/gen_synthetic_policy.py` | `--from-config X -o M.onnx`：生成零动作合成模型（`obs[1,N] → actions[1,M]`；ONNX 后端强制 `ir_version=10`，因为 ORT 1.20 拒收 IR 13） |
-| `tool/p0_probe.py` | 采集桥侧 topic（obs + 转发的 float 事实位）输出一行 JSON，供验收脚本断言 |
 | `tool/test_layout_contract.sh` | Python 侧布局契约回归（含 6 个必须 FAIL 的负例） |
-| `tool/p0_acceptance.sh` | P0 端到端验收 |
 | `tool/install_rl_deps.sh` | `bash tool/install_rl_deps.sh local\|remote`：装 `libonnxruntime.so.1`（仅 `policy_server` 需要） |
 
 ## 现状与边界
 
-- **P0 已完成**：桥、策略进程、消息包、合同指纹（v2）、工具链、端到端验收。
+- **P0 已完成**：桥、策略进程、消息定义、合同指纹（v2）、工具链。
 - **P1 未实现**：RMCS 侧 consumer（FSM / PREPARE / kp,kd / 限位 / NaN 让位）与 `RlController` → 桥的切换。
   目前没有组件写 `/wheel_leg/rl/enable`，也没有组件消费 `/wheel_leg/rl/action/*`，因此实车上
   `enable_default: false` → **桥恒 `valid=0`**，不会输出权威动作（这是刻意的：没人宣告权威就不许输出）。
@@ -144,23 +121,22 @@ bash src/rmcs_rl/tool/test_layout_contract.sh
 rmcs_rl/
 ├── README.md                 # 本页（入口）
 ├── config/
-│   ├── executor.yaml         # 实车配置模板（轮腿；复制到 rmcs_bringup/config/<robot>.yaml）
-│   └── bridge_test.yaml      # 端到端测试夹具（合成观测源 + 桥 + policy_server）
+│   └── executor.yaml         # 实车配置模板（轮腿；复制到 rmcs_bringup/config/<robot>.yaml）
 ├── doc/
 │   ├── architecture.md       # 进程/组件、数据流、接口清单、valid 状态机
 │   ├── bridge-design.md      # 重构定稿方案（权威设计）
 │   ├── deployment.md         # 构建 → 模型 → 配置 → 运行 → 验证 → 交接
 │   └── model-contract.md     # 模型张量合同与 metadata 清单
 ├── models/                   # 策略 ONNX（安装到 share/rmcs_rl/models/）
+├── msg/                      # Observation / Action / PolicyStatus（rosidl 生成，类型名 rmcs_rl/msg/*）
 ├── src/
 │   ├── rl_bridge.cpp         # 桥
 │   ├── rl_layout.hpp         # FNV-1a64 / layout_hash / model_id（与 tool/rl_layout.py 同构）
 │   ├── policy_server.cpp     # 策略进程
 │   ├── onnxruntime_inference.hpp
-│   ├── rl_controller.cpp     # 遗留控制器（P1 删除）
-│   └── testing/synthetic_robot.cpp
+│   └── rl_controller.cpp     # 遗留控制器（P1 删除）
 ├── tool/                     # 见上表
-├── plugins.xml               # rmcs_rl_bridge / rmcs_rl_testing / rmcs_rl_legacy 的 pluginlib 导出
+├── plugins.xml               # rmcs_rl_bridge / rmcs_rl_legacy 的 pluginlib 导出
 └── CMakeLists.txt
 ```
 

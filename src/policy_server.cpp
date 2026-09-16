@@ -21,9 +21,9 @@
 #include <rclcpp/qos.hpp>
 #include <rclcpp/rclcpp.hpp>
 #include <rclcpp/subscription.hpp>
-#include <rmcs_rl_msgs/msg/action.hpp>
-#include <rmcs_rl_msgs/msg/observation.hpp>
-#include <rmcs_rl_msgs/msg/policy_status.hpp>
+#include <rmcs_rl/msg/action.hpp>
+#include <rmcs_rl/msg/observation.hpp>
+#include <rmcs_rl/msg/policy_status.hpp>
 
 #include "onnxruntime_inference.hpp"
 #include "rl_layout.hpp"
@@ -130,16 +130,16 @@ public:
 
         load_normalization_();
 
-        action_publisher_ = create_publisher<rmcs_rl_msgs::msg::Action>(
+        action_publisher_ = create_publisher<rmcs_rl::msg::Action>(
             rl_base_ + "/action", rclcpp::QoS { rclcpp::KeepLast(1) }.best_effort());
-        observation_subscription_ = create_subscription<rmcs_rl_msgs::msg::Observation>(
+        observation_subscription_ = create_subscription<rmcs_rl::msg::Observation>(
             rl_base_ + "/obs", rclcpp::QoS { rclcpp::KeepLast(1) }.best_effort(),
-            [this](rmcs_rl_msgs::msg::Observation::UniquePtr message) {
+            [this](rmcs_rl::msg::Observation::UniquePtr message) {
                 on_observation_(std::move(message));
             });
 
         if (bool_or_("publish_status", false)) {
-            status_publisher_ = create_publisher<rmcs_rl_msgs::msg::PolicyStatus>(
+            status_publisher_ = create_publisher<rmcs_rl::msg::PolicyStatus>(
                 rl_base_ + "/policy_status",
                 rclcpp::QoS { rclcpp::KeepLast(1) }.transient_local().best_effort());
             const double rate = std::max(number_or_("status_rate", 2.0), 0.1);
@@ -248,7 +248,7 @@ private:
         action_buffer_.assign(action_size_, 0.0F);
     }
 
-    void on_observation_(rmcs_rl_msgs::msg::Observation::UniquePtr message) {
+    void on_observation_(rmcs_rl::msg::Observation::UniquePtr message) {
         if (message->layout_hash != layout_hash_) {
             if (!layout_mismatch_logged_) {
                 layout_mismatch_logged_ = true;
@@ -292,7 +292,7 @@ private:
             return;
         }
 
-        rmcs_rl_msgs::msg::Action action;
+        rmcs_rl::msg::Action action;
         action.header.stamp = get_clock()->now();
         action.obs_seq      = message->obs_seq;
         action.layout_hash  = layout_hash_;
@@ -329,7 +329,7 @@ private:
 
     void publish_status_() {
         if (!status_publisher_) return;
-        rmcs_rl_msgs::msg::PolicyStatus status;
+        rmcs_rl::msg::PolicyStatus status;
         status.header.stamp       = get_clock()->now();
         status.model_name         = resolved_model_path_;
         status.model_id           = model_id_;
@@ -369,9 +369,9 @@ private:
     std::size_t inference_window_count_  = 0;
 
     OnnxRuntimeInference inference_;
-    rclcpp::Publisher<rmcs_rl_msgs::msg::Action>::SharedPtr action_publisher_;
-    rclcpp::Subscription<rmcs_rl_msgs::msg::Observation>::SharedPtr observation_subscription_;
-    rclcpp::Publisher<rmcs_rl_msgs::msg::PolicyStatus>::SharedPtr status_publisher_;
+    rclcpp::Publisher<rmcs_rl::msg::Action>::SharedPtr action_publisher_;
+    rclcpp::Subscription<rmcs_rl::msg::Observation>::SharedPtr observation_subscription_;
+    rclcpp::Publisher<rmcs_rl::msg::PolicyStatus>::SharedPtr status_publisher_;
     rclcpp::TimerBase::SharedPtr status_timer_;
 };
 
