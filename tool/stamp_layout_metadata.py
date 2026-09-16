@@ -21,6 +21,7 @@
       --node rl_bridge --policy-version infantry_v4-2026.02 --obs-clip 100 --action-clip 100
 """
 import argparse
+import math
 import sys
 
 import rl_layout as layout
@@ -37,10 +38,14 @@ def _float_list(text, key, obs_size):
             values.append(float(item))
         except ValueError:
             raise layout.LayoutError(f"{key} 含非法浮点数 {item!r}")
+        if not math.isfinite(values[-1]):
+            raise layout.LayoutError(f"{key} 含非有限值 {item!r}（NaN/Inf 会让归一化产出 NaN）")
     if len(values) != obs_size:
         raise layout.LayoutError(
             f"{key} 长度 {len(values)} != rl_obs_size {obs_size}（归一化向量必须与观测一一对应）"
         )
+    if key == "rmcs_obs_std" and any(value <= 0.0 for value in values):
+        raise layout.LayoutError(f"{key} 必须全部 > 0（归一化是 (x-mean)/std）")
     return values
 
 
@@ -70,6 +75,10 @@ def main() -> None:
         obs_std = _float_list(args.obs_std, "rmcs_obs_std", obs_size) if args.obs_std else None
         if (obs_mean is None) != (obs_std is None):
             raise layout.LayoutError("rmcs_obs_mean 与 rmcs_obs_std 必须成对给出（归一化是 (x-mean)/std）")
+
+        for option, value in (("--obs-clip", args.obs_clip), ("--action-clip", args.action_clip)):
+            if value is not None and (not math.isfinite(value) or value <= 0.0):
+                raise layout.LayoutError(f"{option}={value!r} 必须是有限正数")
 
         before = layout.read_metadata(args.model)
         updates = layout.stamp_metadata(

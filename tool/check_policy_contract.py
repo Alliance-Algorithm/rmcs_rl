@@ -20,6 +20,7 @@ Usage:
   python3 check_policy_contract.py policy.onnx --obs 20 --act 6      # 旧用法（无 YAML）
 """
 import argparse
+import math
 import sys
 
 import rl_layout as layout
@@ -104,9 +105,12 @@ def _check_normalization(report, meta, obs_size):
             if len(numbers) != obs_size:
                 ok = False
                 detail.append(f"{key} 长度 {len(numbers)} != obs_size {obs_size}")
-            if key == "rmcs_obs_std" and any(value == 0.0 for value in numbers):
+            if any(not math.isfinite(value) for value in numbers):
                 ok = False
-                detail.append("rmcs_obs_std 含 0（除零）")
+                detail.append(f"{key} 含非有限值（NaN/Inf）")
+            if key == "rmcs_obs_std" and any(value <= 0.0 for value in numbers):
+                ok = False
+                detail.append("rmcs_obs_std 含 <= 0（除零/符号反转）")
         report.check("normalization metadata", ok, "; ".join(detail) if detail else "mean/std 长度与 obs_size 一致")
     for key in ("rmcs_obs_clip", "rmcs_action_clip"):
         text = meta.get(key)
@@ -117,7 +121,7 @@ def _check_normalization(report, meta, obs_size):
         except ValueError:
             report.check(key, False, f"{key}={text!r} 不是浮点数")
             continue
-        report.check(key, value > 0.0, f"{key}={text}")
+        report.check(key, math.isfinite(value) and value > 0.0, f"{key}={text}")
 
 
 def _dummy_inference(report, model_path, obs_size, act_size):

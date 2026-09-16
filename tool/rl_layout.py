@@ -638,10 +638,12 @@ def _terms_list(params: Dict, key: str, config_path) -> List[str]:
 def _declared_size(params: Dict, key: str, config_path) -> Optional[int]:
     if key not in params or params[key] is None:
         return None
-    try:
-        return int(params[key])
-    except (TypeError, ValueError):
-        raise LayoutError(f"配置 {config_path} 的 {key}={params[key]!r} 不是整数")
+    value = params[key]
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise LayoutError(
+            f"配置 {config_path} 的 {key}={value!r} 不是整数（C++ 侧只接受 int，浮点/字符串会启动失败）"
+        )
+    return value
 
 
 def _check_obs_index_order(obs_terms, parsed_obs, config_path, node) -> None:

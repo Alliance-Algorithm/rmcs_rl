@@ -336,10 +336,6 @@ public:
                 break;
             }
             case TermKind::kPath: {
-                if (term.has_default) {
-                    term.slot = kNoSlot;
-                    break;
-                }
                 std::vector<Binding> candidates;
                 switch (term.take) {
                 case Take::kScalar:

@@ -68,6 +68,17 @@ namespace {
         }
     }
 
+    double parse_clip_metadata(const std::string& text, const char* key) {
+        const auto value = parse_float(text);
+        if (!value.has_value())
+            throw std::runtime_error(
+                std::string { "policy_server: metadata " } + key + "=" + text + " is not a float");
+        if (!std::isfinite(*value) || *value <= 0.0)
+            throw std::runtime_error(std::string { "policy_server: metadata " } + key
+                + " must be finite and > 0, got " + text);
+        return *value;
+    }
+
 } // namespace
 
 class PolicyServer final : public rclcpp::Node {
@@ -233,10 +244,10 @@ private:
                 obs_std_.clear();
             }
             if (const auto value = inference_.metadata("rmcs_obs_clip"); value && !value->empty())
-                obs_clip_ = parse_float(*value);
+                obs_clip_ = parse_clip_metadata(*value, "rmcs_obs_clip");
             if (const auto value = inference_.metadata("rmcs_action_clip");
                 value && !value->empty())
-                action_clip_ = parse_float(*value);
+                action_clip_ = parse_clip_metadata(*value, "rmcs_action_clip");
         }
 
         const double obs_clip_param = number_or_("obs_clip", -1.0);
