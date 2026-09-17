@@ -52,22 +52,23 @@ jobs:
           set -u
           colcon build --packages-up-to rmcs_rl
 
+      - name: Prepare Python toolchain (venv)
+        shell: bash
+        run: |
+          set -euo pipefail
+          apt-get update -qq
+          apt-get install -y -qq python3-venv
+          python3 -m venv /tmp/rl-venv
+          /tmp/rl-venv/bin/python -m pip install --quiet --no-cache-dir --upgrade pip
+          /tmp/rl-venv/bin/python -m pip install --quiet --no-cache-dir \
+              "onnx==1.22.0" "onnxruntime==1.30.0" "numpy==2.5.3" "pyyaml==6.0.1"
+
       - name: Check shipped models (self-check, metadata optional)
         shell: bash
         working-directory: /tmp/RMCS/rmcs_ws/src/rmcs_rl
         run: |
           set -euo pipefail
-
-          # The base image may not ship pip for the system Python.
-          if ! python3 -m pip --version >/dev/null 2>&1; then
-            echo "python3-pip is missing; installing it..."
-            apt-get update -qq
-            apt-get install -y -qq --no-install-recommends python3-pip
-          fi
-
-          python3 -m pip install --quiet --no-cache-dir \
-              --break-system-packages onnx onnxruntime numpy \
-            || python3 -m pip install --quiet --no-cache-dir onnx onnxruntime numpy
+          PY=/tmp/rl-venv/bin/python
 
           shopt -s nullglob
           models=(models/*.onnx)
@@ -76,14 +77,14 @@ jobs:
           fi
           for model in "${models[@]}"; do
             echo "== ${model} =="
-            python3 tool/check_policy_contract.py "$model"
+            "$PY" tool/check_policy_contract.py "$model"
           done
 
           # Negative test: a wrong expected size must be rejected with a shape
           # error (guards against a false pass when the tool fails for an
           # unrelated reason, e.g. a missing model file).
           if [ "${#models[@]}" -gt 0 ]; then
-            if output="$(python3 tool/check_policy_contract.py \
+            if output="$("$PY" tool/check_policy_contract.py \
                 "${models[0]}" --obs 999 --act 999 2>&1)"; then
               echo "FAIL: contract mismatch should have been rejected"
               exit 1
@@ -101,4 +102,4 @@ jobs:
         working-directory: /tmp/RMCS/rmcs_ws/src/rmcs_rl
         run: |
           set -euo pipefail
-          bash tool/test_layout_contract.sh
+          PYTHON=/tmp/rl-venv/bin/python bash tool/test_layout_contract.sh
