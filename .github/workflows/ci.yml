@@ -52,38 +52,54 @@ jobs:
           set -u
           colcon build --packages-up-to rmcs_rl
 
-      - name: Check ONNX contract of shipped models
+      - name: Prepare Python toolchain (venv)
+        shell: bash
+        run: |
+          set -euo pipefail
+          apt-get update -qq
+          apt-get install -y -qq python3-venv
+          python3 -m venv /tmp/rl-venv
+          /tmp/rl-venv/bin/python -m pip install --quiet --no-cache-dir --upgrade pip
+          /tmp/rl-venv/bin/python -m pip install --quiet --no-cache-dir \
+              "onnx==1.22.0" "onnxruntime==1.30.0" "numpy==2.5.3" "pyyaml==6.0.1"
+
+      - name: Check shipped models (self-check, metadata optional)
         shell: bash
         working-directory: /tmp/RMCS/rmcs_ws/src/rmcs_rl
         run: |
           set -euo pipefail
+          PY=/tmp/rl-venv/bin/python
 
-          # The base image may not ship pip for the system Python.
-          if ! python3 -m pip --version >/dev/null 2>&1; then
-            echo "python3-pip is missing; installing it..."
-            apt-get update -qq
-            apt-get install -y -qq --no-install-recommends python3-pip
+          shopt -s nullglob
+          models=(models/*.onnx)
+          if [ "${#models[@]}" -eq 0 ]; then
+            echo "No models under models/, nothing to check"
           fi
-
-          python3 -m pip install --quiet --no-cache-dir \
-              --break-system-packages onnxruntime numpy \
-            || python3 -m pip install --quiet --no-cache-dir onnxruntime numpy
-
-          for model in models/*.onnx; do
-            read -r obs act <<< "$(python3 - "$model" <<'PY'
-          import sys
-          import onnxruntime as ort
-          sess = ort.InferenceSession(sys.argv[1], providers=["CPUExecutionProvider"])
-          print(sess.get_inputs()[0].shape[1], sess.get_outputs()[0].shape[1])
-          PY
-            )"
-            echo "== ${model} (obs=${obs}, act=${act}) =="
-            python3 tool/check_policy_contract.py "$model" --obs "$obs" --act "$act"
+          for model in "${models[@]}"; do
+            echo "== ${model} =="
+            "$PY" tool/check_policy_contract.py "$model"
           done
 
-          if python3 tool/check_policy_contract.py \
-              models/policy.onnx --obs 999 --act 999 >/dev/null 2>&1; then
-            echo "FAIL: contract mismatch should have been rejected"
-            exit 1
+          # Negative test: a wrong expected size must be rejected with a shape
+          # error (guards against a false pass when the tool fails for an
+          # unrelated reason, e.g. a missing model file).
+          if [ "${#models[@]}" -gt 0 ]; then
+            if output="$("$PY" tool/check_policy_contract.py \
+                "${models[0]}" --obs 999 --act 999 2>&1)"; then
+              echo "FAIL: contract mismatch should have been rejected"
+              exit 1
+            fi
+            if ! grep -q "FAIL obs shape" <<<"${output}"; then
+              echo "FAIL: expected a shape mismatch, got:"
+              echo "${output}"
+              exit 1
+            fi
+            echo "negative contract test OK"
           fi
-          echo "negative contract test OK"
+
+      - name: Toolchain regression (layout contract tools)
+        shell: bash
+        working-directory: /tmp/RMCS/rmcs_ws/src/rmcs_rl
+        run: |
+          set -euo pipefail
+          PYTHON=/tmp/rl-venv/bin/python bash tool/test_layout_contract.sh

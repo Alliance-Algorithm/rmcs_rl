@@ -40,7 +40,7 @@ class DrivePolicy(nn.Module):
         self.clip = clip
 
     def forward(self, obs: torch.Tensor) -> torch.Tensor:
-        height_cmd = obs[:, 3:4] / 5.0  # obs[3] = height_cmd * 5
+        height_cmd = obs[:, 3:4] / 5.0
         a = self.amp * torch.tanh(self.gain * (height_cmd - self.h0))
         a = a + self.bias.unsqueeze(0)
         return torch.clamp(a, -self.clip, self.clip)
@@ -53,13 +53,12 @@ def main() -> None:
 
     model = DrivePolicy().eval()
     dummy = torch.zeros(1, 22, dtype=torch.float32)
-    # 抽样验证：低/基准/高 高度指令
     with torch.no_grad():
         for h in (0.05, 0.132, 0.17):
             obs = dummy.clone()
             obs[0, 3] = h * 5.0
             a = model(obs)
-            target = 0.25 * a + 0.3  # action_scale=0.25, default_dof_pos=0.3
+            target = 0.25 * a + 0.3
             print(f"height={h:.3f} -> actions={a[0].tolist()} (pos target ~{target[0].tolist()})")
 
     torch.onnx.export(
