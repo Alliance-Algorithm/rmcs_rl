@@ -6,7 +6,7 @@ rmcs_executor:
       - rmcs_core::hardware::WheelLegInfantryRL -> wheel_leg_infantry_rl
       - rmcs_core::controller::chassis::WheelLegChassisController -> wheel_leg_chassis_controller
       - rmcs::rl::RlBridge -> rl_bridge
-      - rmcs_core::broadcaster::ValueBroadcaster -> value_broadcaster
+      - rmcs::rl::PolicyServer -> policy_server
 
 wheel_leg_infantry_rl:
   ros__parameters:
@@ -26,19 +26,6 @@ wheel_leg_chassis_controller:
     command_height_min: 0.20
     command_height_max: 0.42
     default_command_height: 0.22
-
-value_broadcaster:
-  ros__parameters:
-    forward_list:
-      - /wheel_leg/rl/valid
-      - /wheel_leg/rl/healthy
-      - /wheel_leg/rl/action_age
-      - /wheel_leg/rl/action/left_hip_joint
-      - /wheel_leg/rl/action/left_knee_joint
-      - /wheel_leg/rl/action/left_wheel
-      - /wheel_leg/rl/action/right_hip_joint
-      - /wheel_leg/rl/action/right_knee_joint
-      - /wheel_leg/rl/action/right_wheel
 
 rl_bridge:
   ros__parameters:
@@ -61,7 +48,7 @@ rl_bridge:
     joint_velocity_suffix: "/velocity"
     joint_torque_suffix: "/torque"
     default_joint_pos:
-      left_hip_joint: -0.5
+      left_hip_joint: -0.5v
       left_knee_joint: -0.35
       left_wheel: 0.0
       right_hip_joint: 0.5
