@@ -53,6 +53,7 @@ include_directories(${PROJECT_SOURCE_DIR}/src)
 
 ament_auto_add_library(rmcs_rl_bridge SHARED
     src/rl_bridge.cpp
+    src/policy_server_launcher.cpp
 )
 target_link_libraries(rmcs_rl_bridge ${cpp_typesupport_target})
 
@@ -72,6 +73,7 @@ pluginlib_export_plugin_description_file(rmcs_executor plugins.xml)
 
 install(DIRECTORY models DESTINATION share/${PROJECT_NAME})
 install(DIRECTORY config DESTINATION share/${PROJECT_NAME})
+install(DIRECTORY launch DESTINATION share/${PROJECT_NAME})
 
 ament_export_dependencies(rosidl_default_runtime)
 
