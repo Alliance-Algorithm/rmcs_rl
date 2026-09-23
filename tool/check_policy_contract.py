@@ -6,7 +6,7 @@ Two modes:
   * self-check (no --config; used by CI, deployment YAML lives in the RMCS repo):
       model loads; one input "obs" / one output "actions"; float32; rank 2; batch 1;
       concrete (non-dynamic) shapes. Layout metadata is OPTIONAL:
-      - missing / v1 -> SKIP (legacy RlController models are not forced to be stamped)
+      - missing / v1 -> SKIP (stamped layout metadata is optional for model-only self-check)
       - present v2   -> signatures must be internally consistent with the tensor
                         sizes, and policy_layout_hash must match those signatures
                         (catches a bad stamp without any YAML)

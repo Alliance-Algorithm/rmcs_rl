@@ -2,6 +2,3 @@
   <class type="rmcs_rl::RlBridge" base_class_type="rmcs_executor::Component" />
   <class type="rmcs_rl::PolicyServerLauncher" base_class_type="rmcs_executor::Component" />
 </library>
-<library path="rmcs_rl_legacy">
-  <class type="rmcs_rl::RlController" base_class_type="rmcs_executor::Component" />
-</library>
