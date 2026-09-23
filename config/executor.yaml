@@ -5,8 +5,8 @@ rmcs_executor:
     components:
       - rmcs_core::hardware::WheelLegInfantryRL -> wheel_leg_infantry_rl
       - rmcs_core::controller::chassis::WheelLegChassisController -> wheel_leg_chassis_controller
-      - rmcs::rl::RlBridge -> rl_bridge
-      - rmcs::rl::PolicyServer -> policy_server
+      - rmcs_rl::RlBridge -> rl_bridge
+      - rmcs_rl::PolicyServerLauncher -> policy_server_launcher
 
 wheel_leg_infantry_rl:
   ros__parameters:
@@ -48,7 +48,7 @@ rl_bridge:
     joint_velocity_suffix: "/velocity"
     joint_torque_suffix: "/torque"
     default_joint_pos:
-      left_hip_joint: -0.5v
+      left_hip_joint: -0.5
       left_knee_joint: -0.35
       left_wheel: 0.0
       right_hip_joint: 0.5
@@ -86,3 +86,14 @@ policy_server:
     normalization_from_metadata: true
     publish_status: false
     status_rate: 2.0
+
+# 由 executor 进程内组件随 rmcs 一起拉起 policy_server（不改 bringup/launch/服务）。
+# params_file 相对 share/rmcs_bringup/config 解析，也可写绝对路径；
+# 复制本模板到 rmcs_bringup/config/<robot>.yaml 后，改成那个文件名。
+policy_server_launcher:
+  ros__parameters:
+    autostart: true
+    params_file: "executor.yaml"
+    respawn: true
+    respawn_delay: 1.0
+    poll_interval: 0.5
