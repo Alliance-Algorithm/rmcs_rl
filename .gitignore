@@ -1,12 +1,5 @@
-build/
-install/
-log/
-
 *.pyc
-*.pcd
 *~
 .#*
 
-/planning/cfg
 /planning/docs
-/planning/src

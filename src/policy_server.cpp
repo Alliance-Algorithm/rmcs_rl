@@ -303,6 +303,15 @@ private:
             return;
         }
 
+        if (!std::all_of(action_buffer_.begin(), action_buffer_.end(),
+                [](float value) { return std::isfinite(value); })) {
+            RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 1000,
+                "policy output contains non-finite values; ignoring frame "
+                "(bridge will see a stale action and drop authority)");
+            ++rejected_count_;
+            return;
+        }
+
         rmcs_rl::msg::Action action;
         action.header.stamp = get_clock()->now();
         action.obs_seq      = message->obs_seq;
