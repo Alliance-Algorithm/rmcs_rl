@@ -1,42 +1,54 @@
 Language: Cpp
+BasedOnStyle: LLVM
 
-BasedOnStyle: WebKit
-
-# 使用空格而不是 Tab
+# RMCS uses spaces and four-space indentation.
 UseTab: Never
-
-# 缩进 4 字符
 IndentWidth: 4
 TabWidth: 4
-
-# 访问修饰符（public）等靠左对齐
+ContinuationIndentWidth: 4
+ConstructorInitializerIndentWidth: 4
 AccessModifierOffset: -4
 
-# 注释不对齐
-AlignTrailingComments: false
-
-# 大括号的换行规则
-BreakBeforeBraces: Attach
-
-# 模板定义的换行规则
-BreakTemplateDeclarations: "Yes"
-
-# 最大列宽度
+Standard: c++23
 ColumnLimit: 100
+MaxEmptyLinesToKeep: 1
 
-# 是否允许短的函数，语句块等单独一行
-AllowShortIfStatementsOnASingleLine: AllIfsAndElse
-AllowShortBlocksOnASingleLine: Empty
-AllowShortFunctionsOnASingleLine: All
-
+BreakBeforeBraces: Attach
+BreakConstructorInitializers: BeforeComma
+BreakInheritanceList: BeforeComma
 BreakBeforeBinaryOperators: NonAssignment
-PenaltyBreakAssignment: 2
-PenaltyBreakString: 2
 
+AlignAfterOpenBracket: AlwaysBreak
+AlignOperands: AlignAfterOperator
+AlignTrailingComments:
+  Kind: Always
+  OverEmptyLines: 64
 AlignConsecutiveAssignments:
+  Enabled: false
+AlignConsecutiveBitFields:
   Enabled: true
   AcrossEmptyLines: false
   AcrossComments: false
-  AlignCompound: false
+AlignConsecutiveDeclarations:
+  Enabled: false
+AlignConsecutiveMacros:
+  Enabled: true
+  AcrossEmptyLines: false
+  AcrossComments: false
 
-SpaceInEmptyBlock: true
+PointerAlignment: Left
+IndentPPDirectives: AfterHash
+PPIndentWidth: 1
+IndentWrappedFunctionNames: true
+
+AllowAllArgumentsOnNextLine: true
+AllowAllParametersOfDeclarationOnNextLine: true
+AllowShortBlocksOnASingleLine: Empty
+AllowShortCaseLabelsOnASingleLine: true
+
+FixNamespaceComments: true
+IncludeBlocks: Preserve
+
+AlwaysBreakTemplateDeclarations: Yes
+IndentRequiresClause: false
+RequiresClausePosition: SingleLine

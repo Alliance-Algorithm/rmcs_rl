@@ -19,7 +19,7 @@
 #include <rclcpp/node.hpp>
 #include <rmcs_executor/component.hpp>
 
-namespace rmcs::rl {
+namespace rmcs_rl {
 
 // 随 executor 生命周期拉起独立的 policy_server 子进程：
 //   - 组件只存在于需要 RL 的配置里，非 RL 车不受影响；
@@ -104,7 +104,8 @@ private:
         }
 
         if (executable_.empty() || ::access(executable_.c_str(), X_OK) != 0) {
-            RCLCPP_ERROR(get_logger(),
+            RCLCPP_ERROR(
+                get_logger(),
                 "policy_server executable not found (looked for '%s'); autostart disabled",
                 executable_.c_str());
             autostart_ = false;
@@ -115,18 +116,22 @@ private:
                 params_path_ = params_file_;
             } else {
                 try {
-                    const auto bringup_share =
-                        ament_index_cpp::get_package_share_directory("rmcs_bringup");
+                    const auto bringup_share = ament_index_cpp::get_package_share_directory(
+                        "rmcs_"
+                        "bringu"
+                        "p");
                     params_path_ = bringup_share + "/config/" + params_file_;
                 } catch (const std::exception& error) {
-                    RCLCPP_ERROR(get_logger(), "cannot locate rmcs_bringup share directory: %s",
+                    RCLCPP_ERROR(
+                        get_logger(), "cannot locate rmcs_bringup share directory: %s",
                         error.what());
                 }
             }
         }
 
         if (params_path_.empty() || ::access(params_path_.c_str(), R_OK) != 0) {
-            RCLCPP_ERROR(get_logger(),
+            RCLCPP_ERROR(
+                get_logger(),
                 "policy_server params file not found (params_file='%s'); autostart disabled",
                 params_file_.c_str());
             autostart_ = false;
@@ -173,8 +178,9 @@ private:
 
         child_pid_ = pid;
         next_start_time_ = SteadyClock::now() + respawn_period_;
-        RCLCPP_INFO(get_logger(), "started policy_server (pid=%d) with params '%s'",
-            static_cast<int>(pid), params_path_.c_str());
+        RCLCPP_INFO(
+            get_logger(), "started policy_server (pid=%d) with params '%s'", static_cast<int>(pid),
+            params_path_.c_str());
     }
 
     void reap_child_(SteadyClock::time_point now) {
@@ -187,7 +193,8 @@ private:
             return;
 
         if (result < 0 && errno != ECHILD) {
-            RCLCPP_WARN(get_logger(), "waitpid(%d) failed: %s", static_cast<int>(child_pid_),
+            RCLCPP_WARN(
+                get_logger(), "waitpid(%d) failed: %s", static_cast<int>(child_pid_),
                 std::strerror(errno));
         }
 
@@ -196,11 +203,13 @@ private:
         next_start_time_ = now + respawn_period_;
 
         if (result == pid && WIFEXITED(status))
-            RCLCPP_WARN(get_logger(), "policy_server (pid=%d) exited with code %d",
-                static_cast<int>(pid), WEXITSTATUS(status));
+            RCLCPP_WARN(
+                get_logger(), "policy_server (pid=%d) exited with code %d", static_cast<int>(pid),
+                WEXITSTATUS(status));
         else if (result == pid && WIFSIGNALED(status))
-            RCLCPP_WARN(get_logger(), "policy_server (pid=%d) killed by signal %d",
-                static_cast<int>(pid), WTERMSIG(status));
+            RCLCPP_WARN(
+                get_logger(), "policy_server (pid=%d) killed by signal %d", static_cast<int>(pid),
+                WTERMSIG(status));
         else
             RCLCPP_WARN(get_logger(), "policy_server (pid=%d) is gone", static_cast<int>(pid));
     }
@@ -221,7 +230,8 @@ private:
 
         ::kill(pid, SIGKILL);
         ::waitpid(pid, nullptr, 0);
-        RCLCPP_WARN(get_logger(), "policy_server (pid=%d) did not stop, killed", static_cast<int>(pid));
+        RCLCPP_WARN(
+            get_logger(), "policy_server (pid=%d) did not stop, killed", static_cast<int>(pid));
     }
 
     bool autostart_ = true;
@@ -235,13 +245,13 @@ private:
 
     SteadyClock::duration poll_period_ = std::chrono::milliseconds(500);
     SteadyClock::duration respawn_period_ = std::chrono::seconds(1);
-    SteadyClock::time_point last_poll_time_ { };
-    SteadyClock::time_point next_start_time_ { };
+    SteadyClock::time_point last_poll_time_{};
+    SteadyClock::time_point next_start_time_{};
     pid_t child_pid_ = -1;
 };
 
-} // namespace rmcs::rl
+} // namespace rmcs_rl
 
 #include <pluginlib/class_list_macros.hpp>
 
-PLUGINLIB_EXPORT_CLASS(rmcs::rl::PolicyServerLauncher, rmcs_executor::Component)
+PLUGINLIB_EXPORT_CLASS(rmcs_rl::PolicyServerLauncher, rmcs_executor::Component)

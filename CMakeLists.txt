@@ -57,11 +57,6 @@ ament_auto_add_library(rmcs_rl_bridge SHARED
 )
 target_link_libraries(rmcs_rl_bridge ${cpp_typesupport_target})
 
-ament_auto_add_library(rmcs_rl_legacy SHARED
-    src/rl_controller.cpp
-)
-target_link_libraries(rmcs_rl_legacy ${ONNXRUNTIME_ROOT_DIR}/lib/libonnxruntime.so)
-
 ament_auto_add_executable(policy_server
     src/policy_server.cpp
 )

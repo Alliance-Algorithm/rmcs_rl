@@ -7,10 +7,10 @@ RMCS（RoboMaster Control System）的 **RL 策略桥**：在「传统 RMCS 结�
 
 详细文档：
 
-- [架构与组件](doc/architecture.md)
-- [桥式重构设计（v2，定稿方案）](doc/bridge-design.md)
-- [构建、配置与部署](doc/deployment.md)
-- [策略模型合同（张量形状 + 元数据要求）](doc/model-contract.md)
+- [架构与组件](planning/docs/architecture.md)
+- [桥式重构设计（v2，定稿方案）](planning/docs/bridge-design.md)
+- [构建、配置与部署](planning/docs/deployment.md)
+- [策略模型合同（张量形状 + 元数据要求）](planning/docs/model-contract.md)
 
 ## 两条硬边界
 
@@ -26,14 +26,10 @@ topic 存在的**唯一**原因是「策略进程独立」。想消除这 3 条 
 
 | 名称 | 位置 | 依赖 ONNX Runtime | 职责 |
 |---|---|---|---|
-| `rmcs::rl::RlBridge` | 库 `rmcs_rl_bridge` | **否** | 观测组装、定频发布、动作回写、`valid/healthy/action_age` 事实位、合同指纹 |
+| `rmcs_rl::RlBridge` | 库 `rmcs_rl_bridge` | **否** | 观测组装、定频发布、动作回写、`valid/healthy/action_age` 事实位、合同指纹 |
+| `rmcs_rl::PolicyServerLauncher` | 库 `rmcs_rl_bridge` | **否** | 随 executor 生命周期 fork/exec 独立的 `policy_server` 子进程，可退避重启、防孤儿 |
 | `policy_server` | 可执行文件（`ros2 run rmcs_rl policy_server`） | **是**（唯一链接 ORT 的可执行文件） | 收一帧 obs → 归一化 → ONNX → 回一帧 action（纯反应式，无定时器） |
-| `rmcs::rl::RlController` | 库 `rmcs_rl_legacy` | 是 | **遗留控制器**（旧配置格式，P1 切换完成后删除） |
 | 消息 `rmcs_rl/msg/*` | 本包 `msg/`（rosidl 生成，类型全名如 `rmcs_rl/msg/Observation`） | 否 | `Observation` / `Action` / `PolicyStatus` |
-
-> ⚠️ `RlController` 是遗留路径：它自带 ONNX 推理、PD、FSM，配置键（`rl_inference_frequency`、
-> `position_pd_joints`、`action_terms: joint=... mode=... kp=...`）与本文档描述的桥式配置**完全不同**，
-> 不要混用、也不要与 `RlBridge` 同时挂载。桥式链路取代它之后即删除。
 
 ## 数据流
 
@@ -46,7 +42,7 @@ RMCS 侧 output 接口 ──(桥：按词条拼 obs)──> obs 向量 ──to
 ## 部署到真机
 
 本包**不含台架夹具**：链路必须挂到真实 RMCS 组件上跑。简要步骤（完整流程见
-[doc/deployment.md](doc/deployment.md)）：
+[planning/docs/deployment.md](planning/docs/deployment.md)）：
 
 1. 改 `config/executor.yaml`：观测/动作词条与 `joint_*` 指向真机的接口路径，
    `policy_server.rl_model_path` 指向已盖章的模型；
@@ -59,7 +55,7 @@ ros2 run rmcs_rl policy_server --ros-args --params-file <deploy.yaml>
 ```
 
 `layout_hash` 两侧必须一致；`valid=0` 的原因会直接打在桥的日志里（见
-[doc/deployment.md](doc/deployment.md) 的排障表）。注意 P1 的 RMCS 侧 consumer 尚未实现，
+[planning/docs/deployment.md](planning/docs/deployment.md) 的排障表）。注意 P1 的 RMCS 侧 consumer 尚未实现，
 真机上桥恒 `valid=0`、不会输出权威动作（见「现状与边界」）。
 
 ## 加一台新车型 / 加一条观测词条
@@ -105,13 +101,11 @@ bash src/rmcs_rl/tool/test_layout_contract.sh
 ## 现状与边界
 
 - **P0 已完成**：桥、策略进程、消息定义、合同指纹（v2）、工具链。
-- **P1 未实现**：RMCS 侧 consumer（FSM / PREPARE / kp,kd / 限位 / NaN 让位）与 `RlController` → 桥的切换。
-  目前没有组件写 `/wheel_leg/rl/enable`，也没有组件消费 `/wheel_leg/rl/action/*`，因此实车上
-  `enable_default: false` → **桥恒 `valid=0`**，不会输出权威动作（这是刻意的：没人宣告权威就不许输出）。
+- **P1 进行中**：RMCS 侧 consumer（FSM / PREPARE / kp,kd / 限位 / NaN 让位）。
+  deformable 已有消费侧落地（`DeformableRlSuspension` / 仲裁）；wheel-leg 尚未迁到桥式，
+  因此轮腿上桥若挂载且 `enable_default: false` → **桥恒 `valid=0`**，不会输出权威动作。
 - 桥**从不写电机 `control_*` 接口**：executor 禁止同名 output，电机控制权始终在 RMCS 侧消费组件手上，
-  所以「RL 接管 / 退回传统控制」不需要仲裁组件（P1 的 consumer 用写 NaN 让位）。
-- `RlController`（库 `rmcs_rl_legacy`）**仍然是唯一的整机可用路径**，P1 完成后删除；
-  它带 ORT 进控制进程，配置格式与桥式完全不同，不要混配。
+  所以「RL 接管 / 退回传统控制」不需要仲裁组件（consumer 用写 NaN 让位）。
 - 观测接口运行期热加不支持（配对只在启动做一次）；`contract_ok` 一旦因合同不符锁存为 false，
   当前实现**只能靠重启 executor 进程恢复**。
 
@@ -122,26 +116,29 @@ rmcs_rl/
 ├── README.md                 # 本页（入口）
 ├── config/
 │   └── executor.yaml         # 实车配置模板（轮腿；复制到 rmcs_bringup/config/<robot>.yaml）
-├── doc/
-│   ├── architecture.md       # 进程/组件、数据流、接口清单、valid 状态机
-│   ├── bridge-design.md      # 重构定稿方案（权威设计）
-│   ├── deployment.md         # 构建 → 模型 → 配置 → 运行 → 验证 → 交接
-│   └── model-contract.md     # 模型张量合同与 metadata 清单
+├── planning/
+│   └── docs/
+│       ├── architecture.md       # 进程/组件、数据流、接口清单、valid 状态机
+│       ├── bridge-design.md      # 重构定稿方案（权威设计）
+│       ├── deployment.md         # 构建 → 模型 → 配置 → 运行 → 验证 → 交接
+│       ├── model-contract.md     # 模型张量合同与 metadata 清单
+│       └── deformable-rl-pipeline.md  # deformable 消费侧落地说明
 ├── models/                   # 策略 ONNX（安装到 share/rmcs_rl/models/）
 ├── msg/                      # Observation / Action / PolicyStatus（rosidl 生成，类型名 rmcs_rl/msg/*）
 ├── src/
 │   ├── rl_bridge.cpp         # 桥
 │   ├── rl_layout.hpp         # FNV-1a64 / layout_hash / model_id（与 tool/rl_layout.py 同构）
-│   ├── policy_server.cpp     # 策略进程
-│   ├── onnxruntime_inference.hpp
-│   └── rl_controller.cpp     # 遗留控制器（P1 删除）
+│   ├── policy_server.cpp     # 策略进程（独立可执行文件，非 executor 组件）
+│   ├── policy_server_launcher.cpp  # PolicyServerLauncher 组件（拉起/重启策略进程）
+│   └── onnxruntime_inference.hpp
 ├── tool/                     # 见上表
-├── plugins.xml               # rmcs_rl_bridge / rmcs_rl_legacy 的 pluginlib 导出
+├── plugins.xml               # rmcs_rl_bridge 的 pluginlib 导出
 └── CMakeLists.txt
 ```
 
 ## 相关
 
-- 集成示例：`rmcs_bringup/config/wheel-leg-infantry-rl.yaml`（当前是遗留 `RlController` 配置）
+- 集成示例：`rmcs_bringup/config/deformable-infantry-omni-rl.yaml`（桥式 + launcher）；
+  `wheel-leg-infantry-rl.yaml` 尚未挂 RL 桥（待迁到桥式）
 - 训练侧：任何能导出 `obs[1,N] → actions[1,M]` 且带 `rmcs_obs_layout` / `rmcs_actions_layout` metadata 的
   ONNX 仓库（Isaac Lab / legged_gym / rsl_rl …）都可以接

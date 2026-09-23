@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """rmcs_rl 布局单一真源：词条语法 → 规范串(v2) → layout_hash / model_id。
 
-C++ 桥（rl_bridge）与策略进程各自实现同一份规范（doc/bridge-design.md §6.2/§6.3），
+C++ 桥（rl_bridge）与策略进程各自实现同一份规范（planning/docs/bridge-design.md §6.2/§6.3），
 Python 侧的真源就是本模块：stamp_layout_metadata.py / check_policy_contract.py /
 gen_synthetic_policy.py 全部从这里取语法与 hash，避免同一份契约靠人写两遍（drift）。
 
