@@ -3,7 +3,7 @@
 
 桥（rl_bridge）在启动时看不到模型文件，因此两侧靠 layout_hash 运行期握手：
 本工具把 YAML 推导出的规范串（v2）与 policy_layout_hash 写进模型 metadata，
-策略进程据此与桥的 Observation.layout_hash 对账（doc/bridge-design.md §6.2）。
+策略进程据此与桥的 Observation.layout_hash 对账（planning/docs/bridge-design.md §6.2）。
 **不需要重训**：换布局/换版本重跑本工具即可。
 
 写入的键：

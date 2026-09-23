@@ -10,8 +10,8 @@
 #include <string>
 #include <vector>
 
-#include <eigen3/Eigen/Dense>
 #include <ament_index_cpp/get_package_share_directory.hpp>
+#include <eigen3/Eigen/Dense>
 #include <rclcpp/logging.hpp>
 #include <rclcpp/node.hpp>
 #include <rmcs_executor/component.hpp>
@@ -20,7 +20,7 @@
 
 #include "onnxruntime_inference.hpp"
 
-namespace rmcs::rl {
+namespace rmcs_rl {
 
 class RlController
     : public rmcs_executor::Component
@@ -36,14 +36,13 @@ public:
 
         joint_names_ = param_or("joint_names", std::vector<std::string>{});
         joint_base_path_ = param_or<std::string>("joint_base_path", "");
-        position_pd_joints_ = param_or(
-            "position_pd_joints", std::vector<std::int64_t>{});
-        velocity_pd_joints_ = param_or(
-            "velocity_pd_joints", std::vector<std::int64_t>{});
+        position_pd_joints_ = param_or("position_pd_joints", std::vector<std::int64_t>{});
+        velocity_pd_joints_ = param_or("velocity_pd_joints", std::vector<std::int64_t>{});
 
         if (joint_base_path_.empty())
             throw std::invalid_argument(
-                "joint_base_path must be configured for this robot (e.g. /chassis, /wheel_leg)");
+                "joint_base_path must be configured for this robot (e.g. "
+                "/chassis, /wheel_leg)");
 
         position_group_angle_suffix_ =
             param_or<std::string>("position_group_angle_suffix", "/angle");
@@ -57,7 +56,8 @@ public:
         const std::size_t dof = joint_names_.size();
         if (dof == 0 || dof > 32)
             throw std::invalid_argument(
-                "joint_names must be configured (1..32 joints, training DOF order)");
+                "joint_names must be configured (1..32 joints, training "
+                "DOF order)");
         for (const auto idx : position_pd_joints_)
             if (idx < 0 || static_cast<std::size_t>(idx) >= dof)
                 throw std::invalid_argument("position_pd_joints out of range");
@@ -66,7 +66,8 @@ public:
                 throw std::invalid_argument("velocity_pd_joints out of range");
         if (position_pd_joints_.empty() && velocity_pd_joints_.empty())
             throw std::invalid_argument(
-                "position_pd_joints/velocity_pd_joints: at least one PD group must be configured");
+                "position_pd_joints/velocity_pd_joints: at least one PD "
+                "group must be configured");
 
         dof_ = dof;
 
@@ -91,8 +92,9 @@ public:
             throw std::invalid_argument(
                 "rl_obs_size=" + std::to_string(rl_obs_size_)
                 + " inconsistent with this controller's observation layout length "
-                  "(10 + 2*" + std::to_string(dof) + " + rl_action_size="
-                + std::to_string(layout_obs_size) + "); see doc/model-contract.md");
+                  "(10 + 2*"
+                + std::to_string(dof) + " + rl_action_size=" + std::to_string(layout_obs_size)
+                + "); see planning/docs/model-contract.md");
         default_dof_pos_ = param_or("default_dof_pos", std::vector<double>(dof, 0.0));
         dof_pos_limits_lower_ = param_or("dof_pos_limits_lower", std::vector<double>(dof, -100.0));
         dof_pos_limits_upper_ = param_or("dof_pos_limits_upper", std::vector<double>(dof, 100.0));
@@ -123,13 +125,10 @@ public:
         default_command_height_ = param_or("default_command_height", 0.0);
 
         auto_enter_rl_ = param_or("auto_enter_rl", false);
-        prepare_dof_pos_ = param_or(
-            "prepare_dof_pos",
-            std::vector<double>(position_pd_joints_.size(), 0.0));
-        if (!position_pd_joints_.empty()
-            && prepare_dof_pos_.size() != position_pd_joints_.size())
-            throw std::invalid_argument(
-                "prepare_dof_pos size must match position_pd_joints size");
+        prepare_dof_pos_ =
+            param_or("prepare_dof_pos", std::vector<double>(position_pd_joints_.size(), 0.0));
+        if (!position_pd_joints_.empty() && prepare_dof_pos_.size() != position_pd_joints_.size())
+            throw std::invalid_argument("prepare_dof_pos size must match position_pd_joints size");
         prepare_kp_ = param_or("prepare_kp", 80.0);
         prepare_kd_ = param_or("prepare_kd", 2.0);
         prepare_max_velocity_ = param_or("prepare_max_velocity", 1.0);
@@ -139,14 +138,18 @@ public:
         rl_inference_frequency_ = param_or("rl_inference_frequency", 100.0);
         rl_publish_network_io_ = param_or("rl_publish_network_io", false);
 
-        joint_angle_input_ = std::make_unique<rmcs_executor::Component::InputInterface<double>[]>(dof);
-        joint_velocity_input_ = std::make_unique<rmcs_executor::Component::InputInterface<double>[]>(dof);
-        joint_control_torque_output_ = std::make_unique<rmcs_executor::Component::OutputInterface<double>[]>(dof);
+        joint_angle_input_ =
+            std::make_unique<rmcs_executor::Component::InputInterface<double>[]>(dof);
+        joint_velocity_input_ =
+            std::make_unique<rmcs_executor::Component::InputInterface<double>[]>(dof);
+        joint_control_torque_output_ =
+            std::make_unique<rmcs_executor::Component::OutputInterface<double>[]>(dof);
         for (std::size_t i = 0; i < dof; ++i) {
             const std::string base = joint_base_path_ + "/" + joint_names_[i];
-            const bool is_position_joint = std::find(
-                position_pd_joints_.begin(), position_pd_joints_.end(),
-                static_cast<std::int64_t>(i))
+            const bool is_position_joint =
+                std::find(
+                    position_pd_joints_.begin(), position_pd_joints_.end(),
+                    static_cast<std::int64_t>(i))
                 != position_pd_joints_.end();
             register_input(
                 base
@@ -172,15 +175,16 @@ public:
 
         if (rl_publish_network_io_) {
             register_output(
-                joint_base_path_ + "/rl/observation", rl_observation_output_, std::vector<double>{});
+                joint_base_path_ + "/rl/observation", rl_observation_output_,
+                std::vector<double>{});
             register_output(
                 joint_base_path_ + "/rl/action", rl_action_output_, std::vector<double>{});
             observation_publisher_ = create_publisher<std_msgs::msg::Float64MultiArray>(
                 joint_base_path_ + "/rl/observation", 1);
             action_publisher_ = create_publisher<std_msgs::msg::Float64MultiArray>(
                 joint_base_path_ + "/rl/action", 1);
-            state_publisher_ = create_publisher<std_msgs::msg::Int32>(
-                joint_base_path_ + "/rl/state", 1);
+            state_publisher_ =
+                create_publisher<std_msgs::msg::Int32>(joint_base_path_ + "/rl/state", 1);
         }
         register_output(joint_base_path_ + "/rl/state", rl_state_output_, 0);
 
@@ -191,17 +195,17 @@ public:
         inference_ready_ = false;
         const std::string resolved_model_path = resolve_model_path_(rl_model_path_);
         if (!resolved_model_path.empty()) {
-            inference_ready_ = inference_.load(OnnxRuntimeInference::Config{
-                .model_path = resolved_model_path,
-                .input_name = "obs",
-                .output_name = "actions",
-                .input_size = rl_obs_size_,
-                .output_size = rl_action_size_,
-            });
+            inference_ready_ = inference_.load(
+                OnnxRuntimeInference::Config{
+                    .model_path = resolved_model_path,
+                    .input_name = "obs",
+                    .output_name = "actions",
+                    .input_size = rl_obs_size_,
+                    .output_size = rl_action_size_,
+                });
             if (inference_ready_) {
                 RCLCPP_INFO(
-                    get_logger(),
-                    "RL policy loaded: %s ([1,%zu] -> [1,%zu], %.1f Hz, %zu joints)",
+                    get_logger(), "RL policy loaded: %s ([1,%zu] -> [1,%zu], %.1f Hz, %zu joints)",
                     resolved_model_path.c_str(), rl_obs_size_, rl_action_size_,
                     rl_inference_frequency_, dof);
             } else {
@@ -218,8 +222,8 @@ public:
 
     void update() override {
         const auto now = std::chrono::steady_clock::now();
-        const double dt = std::clamp(
-            std::chrono::duration<double>(now - last_update_time_).count(), 0.0, 0.1);
+        const double dt =
+            std::clamp(std::chrono::duration<double>(now - last_update_time_).count(), 0.0, 0.1);
         last_update_time_ = now;
 
         if (reset_count_.ready() && *reset_count_ != last_reset_count_) {
@@ -233,15 +237,9 @@ public:
 
         switch (state_) {
         case State::kInit:
-        case State::kIdle:
-            write_zero_outputs_();
-            break;
-        case State::kPrepare:
-            prepare_step_(dt);
-            break;
-        case State::kRl:
-            rl_step_();
-            break;
+        case State::kIdle: write_zero_outputs_(); break;
+        case State::kPrepare: prepare_step_(dt); break;
+        case State::kRl: rl_step_(); break;
         }
 
         *rl_state_output_ = static_cast<int>(state_);
@@ -261,8 +259,7 @@ public:
                 oss << read_joint_angle_(i) * (180.0 / std::numbers::pi);
             }
             oss << "] (state=" << static_cast<int>(state_) << ")";
-            RCLCPP_WARN_THROTTLE(
-                get_logger(), *get_clock(), 1000, "%s", oss.str().c_str());
+            RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 1000, "%s", oss.str().c_str());
         }
     }
 
@@ -273,8 +270,7 @@ private:
         try {
             if (get_parameter(name, value))
                 return value;
-        } catch (const rclcpp::exceptions::InvalidParameterValueException&) {
-        }
+        } catch (const rclcpp::exceptions::InvalidParameterValueException&) {}
         RCLCPP_WARN(get_logger(), "Parameter '%s' not set, using default", name.c_str());
         return default_value;
     }
@@ -317,9 +313,7 @@ private:
         case 0: target = State::kInit; return true;
         case 1: target = State::kIdle; return true;
         case 2: target = State::kPrepare; return true;
-        case 3:
-            target = inference_ready_ ? State::kRl : State::kIdle;
-            return inference_ready_;
+        case 3: target = inference_ready_ ? State::kRl : State::kIdle; return inference_ready_;
         default: return false;
         }
     }
@@ -335,9 +329,8 @@ private:
                         get_logger(), *get_clock(), 1000,
                         "Refusing RL: state=%d prepare_reached=%d joint_q=[%.3f %.3f %.3f %.3f] "
                         "(send 2 first, wait PREPARE done, then 3)",
-                        static_cast<int>(state_), prepare_reached_ ? 1 : 0,
-                        read_joint_angle_(0), read_joint_angle_(1), read_joint_angle_(2),
-                        read_joint_angle_(3));
+                        static_cast<int>(state_), prepare_reached_ ? 1 : 0, read_joint_angle_(0),
+                        read_joint_angle_(1), read_joint_angle_(2), read_joint_angle_(3));
                     target = state_;
                 }
                 if (target != state_)
@@ -358,7 +351,8 @@ private:
         reset_policy_runtime_();
         if (target == State::kPrepare) {
             for (std::size_t k = 0; k < position_pd_joints_.size(); ++k)
-                prepare_pos_[k] = read_joint_angle_(static_cast<std::size_t>(position_pd_joints_[k]));
+                prepare_pos_[k] =
+                    read_joint_angle_(static_cast<std::size_t>(position_pd_joints_[k]));
             prepare_reached_ = false;
         }
         RCLCPP_INFO(get_logger(), "Entering state %d", static_cast<int>(target));
@@ -386,8 +380,8 @@ private:
             obs[k++] = gravity[i] * obs_gravity_scale_;
         for (std::size_t i = 0; i < dof_; ++i) {
             obs[k++] = is_velocity_pd_joint_(i)
-                ? 0.0
-                : (read_joint_angle_(i) - default_dof_pos_[i]) * obs_dof_pos_scale_;
+                         ? 0.0
+                         : (read_joint_angle_(i) - default_dof_pos_[i]) * obs_dof_pos_scale_;
         }
         for (std::size_t i = 0; i < dof_; ++i)
             obs[k++] = read_joint_velocity_(i) * obs_dof_vel_scale_;
@@ -445,7 +439,8 @@ private:
                 return;
             }
             for (std::size_t i = 0; i < rl_action_size_; ++i)
-                action_[i] = std::clamp(static_cast<double>(act_f[i]), -clip_actions_, clip_actions_);
+                action_[i] =
+                    std::clamp(static_cast<double>(act_f[i]), -clip_actions_, clip_actions_);
             last_actions_ = action_;
             if (rl_publish_network_io_) {
                 (*rl_action_output_) = action_;
@@ -467,18 +462,18 @@ private:
         for (const auto idx : position_pd_joints_) {
             const std::size_t i = static_cast<std::size_t>(idx);
             const double target = std::clamp(
-                position_action_scale_ * action_[i] + default_dof_pos_[i],
-                dof_pos_limits_lower_[i], dof_pos_limits_upper_[i]);
+                position_action_scale_ * action_[i] + default_dof_pos_[i], dof_pos_limits_lower_[i],
+                dof_pos_limits_upper_[i]);
             const double tau = position_kp_ * (target - read_joint_angle_(i))
-                               - position_kd_ * read_joint_velocity_(i);
+                             - position_kd_ * read_joint_velocity_(i);
             torques[i] = std::clamp(tau, -position_torque_max_, position_torque_max_);
         }
         for (const auto idx : velocity_pd_joints_) {
             const std::size_t i = static_cast<std::size_t>(idx);
-            const double vel_target = std::clamp(
-                velocity_action_scale_ * action_[i], -max_velocity_, max_velocity_);
+            const double vel_target =
+                std::clamp(velocity_action_scale_ * action_[i], -max_velocity_, max_velocity_);
             const double tau = velocity_kp_ * (vel_target - read_joint_velocity_(i))
-                               - velocity_kd_ * read_joint_velocity_(i);
+                             - velocity_kd_ * read_joint_velocity_(i);
             torques[i] = std::clamp(tau, -velocity_torque_max_, velocity_torque_max_);
         }
 
@@ -500,7 +495,7 @@ private:
                 prepare_pos_[k] = target;
             }
             const double tau = prepare_kp_ * (prepare_pos_[k] - read_joint_angle_(i))
-                               - prepare_kd_ * read_joint_velocity_(i);
+                             - prepare_kd_ * read_joint_velocity_(i);
             torques[i] = std::clamp(tau, -position_torque_max_, position_torque_max_);
             if (std::abs(prepare_pos_[k] - read_joint_angle_(i)) > prepare_reach_threshold_)
                 reached = false;
@@ -519,7 +514,8 @@ private:
     void write_zero_outputs_() { write_outputs_(std::vector<double>(dof_, 0.0)); }
 
     void fail_safe_(const std::string& reason) {
-        RCLCPP_ERROR_THROTTLE(get_logger(), *get_clock(), 1000, "RL safety stop: %s", reason.c_str());
+        RCLCPP_ERROR_THROTTLE(
+            get_logger(), *get_clock(), 1000, "RL safety stop: %s", reason.c_str());
         write_zero_outputs_();
         reset_policy_runtime_();
         if (state_ != State::kIdle) {
@@ -625,7 +621,8 @@ private:
 
     std::unique_ptr<rmcs_executor::Component::InputInterface<double>[]> joint_angle_input_;
     std::unique_ptr<rmcs_executor::Component::InputInterface<double>[]> joint_velocity_input_;
-    std::unique_ptr<rmcs_executor::Component::OutputInterface<double>[]> joint_control_torque_output_;
+    std::unique_ptr<rmcs_executor::Component::OutputInterface<double>[]>
+        joint_control_torque_output_;
 
     rmcs_executor::Component::InputInterface<Eigen::Quaterniond> imu_quaternion_;
     rmcs_executor::Component::InputInterface<Eigen::Vector3d> imu_angular_velocity_;
@@ -645,8 +642,8 @@ private:
     rclcpp::Publisher<std_msgs::msg::Int32>::SharedPtr state_publisher_;
 };
 
-} // namespace rmcs::rl
+} // namespace rmcs_rl
 
 #include <pluginlib/class_list_macros.hpp>
 
-PLUGINLIB_EXPORT_CLASS(rmcs::rl::RlController, rmcs_executor::Component)
+PLUGINLIB_EXPORT_CLASS(rmcs_rl::RlController, rmcs_executor::Component)

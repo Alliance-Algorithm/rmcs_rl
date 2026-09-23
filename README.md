@@ -7,10 +7,10 @@ RMCS（RoboMaster Control System）的 **RL 策略桥**：在「传统 RMCS 结�
 
 详细文档：
 
-- [架构与组件](doc/architecture.md)
-- [桥式重构设计（v2，定稿方案）](doc/bridge-design.md)
-- [构建、配置与部署](doc/deployment.md)
-- [策略模型合同（张量形状 + 元数据要求）](doc/model-contract.md)
+- [架构与组件](planning/docs/architecture.md)
+- [桥式重构设计（v2，定稿方案）](planning/docs/bridge-design.md)
+- [构建、配置与部署](planning/docs/deployment.md)
+- [策略模型合同（张量形状 + 元数据要求）](planning/docs/model-contract.md)
 
 ## 两条硬边界
 
@@ -26,9 +26,10 @@ topic 存在的**唯一**原因是「策略进程独立」。想消除这 3 条 
 
 | 名称 | 位置 | 依赖 ONNX Runtime | 职责 |
 |---|---|---|---|
-| `rmcs::rl::RlBridge` | 库 `rmcs_rl_bridge` | **否** | 观测组装、定频发布、动作回写、`valid/healthy/action_age` 事实位、合同指纹 |
+| `rmcs_rl::RlBridge` | 库 `rmcs_rl_bridge` | **否** | 观测组装、定频发布、动作回写、`valid/healthy/action_age` 事实位、合同指纹 |
+| `rmcs_rl::PolicyServerLauncher` | 库 `rmcs_rl_bridge` | **否** | 随 executor 生命周期 fork/exec 独立的 `policy_server` 子进程，可退避重启、防孤儿 |
 | `policy_server` | 可执行文件（`ros2 run rmcs_rl policy_server`） | **是**（唯一链接 ORT 的可执行文件） | 收一帧 obs → 归一化 → ONNX → 回一帧 action（纯反应式，无定时器） |
-| `rmcs::rl::RlController` | 库 `rmcs_rl_legacy` | 是 | **遗留控制器**（旧配置格式，P1 切换完成后删除） |
+| `rmcs_rl::RlController` | 库 `rmcs_rl_legacy` | 是 | **遗留控制器**（旧配置格式，P1 切换完成后删除） |
 | 消息 `rmcs_rl/msg/*` | 本包 `msg/`（rosidl 生成，类型全名如 `rmcs_rl/msg/Observation`） | 否 | `Observation` / `Action` / `PolicyStatus` |
 
 > ⚠️ `RlController` 是遗留路径：它自带 ONNX 推理、PD、FSM，配置键（`rl_inference_frequency`、
@@ -46,7 +47,7 @@ RMCS 侧 output 接口 ──(桥：按词条拼 obs)──> obs 向量 ──to
 ## 部署到真机
 
 本包**不含台架夹具**：链路必须挂到真实 RMCS 组件上跑。简要步骤（完整流程见
-[doc/deployment.md](doc/deployment.md)）：
+[planning/docs/deployment.md](planning/docs/deployment.md)）：
 
 1. 改 `config/executor.yaml`：观测/动作词条与 `joint_*` 指向真机的接口路径，
    `policy_server.rl_model_path` 指向已盖章的模型；
@@ -59,7 +60,7 @@ ros2 run rmcs_rl policy_server --ros-args --params-file <deploy.yaml>
 ```
 
 `layout_hash` 两侧必须一致；`valid=0` 的原因会直接打在桥的日志里（见
-[doc/deployment.md](doc/deployment.md) 的排障表）。注意 P1 的 RMCS 侧 consumer 尚未实现，
+[planning/docs/deployment.md](planning/docs/deployment.md) 的排障表）。注意 P1 的 RMCS 侧 consumer 尚未实现，
 真机上桥恒 `valid=0`、不会输出权威动作（见「现状与边界」）。
 
 ## 加一台新车型 / 加一条观测词条
@@ -122,17 +123,20 @@ rmcs_rl/
 ├── README.md                 # 本页（入口）
 ├── config/
 │   └── executor.yaml         # 实车配置模板（轮腿；复制到 rmcs_bringup/config/<robot>.yaml）
-├── doc/
-│   ├── architecture.md       # 进程/组件、数据流、接口清单、valid 状态机
-│   ├── bridge-design.md      # 重构定稿方案（权威设计）
-│   ├── deployment.md         # 构建 → 模型 → 配置 → 运行 → 验证 → 交接
-│   └── model-contract.md     # 模型张量合同与 metadata 清单
+├── planning/
+│   └── docs/
+│       ├── architecture.md       # 进程/组件、数据流、接口清单、valid 状态机
+│       ├── bridge-design.md      # 重构定稿方案（权威设计）
+│       ├── deployment.md         # 构建 → 模型 → 配置 → 运行 → 验证 → 交接
+│       ├── model-contract.md     # 模型张量合同与 metadata 清单
+│       └── deformable-rl-pipeline.md  # deformable 消费侧落地说明
 ├── models/                   # 策略 ONNX（安装到 share/rmcs_rl/models/）
 ├── msg/                      # Observation / Action / PolicyStatus（rosidl 生成，类型名 rmcs_rl/msg/*）
 ├── src/
 │   ├── rl_bridge.cpp         # 桥
 │   ├── rl_layout.hpp         # FNV-1a64 / layout_hash / model_id（与 tool/rl_layout.py 同构）
-│   ├── policy_server.cpp     # 策略进程
+│   ├── policy_server.cpp     # 策略进程（独立可执行文件，非 executor 组件）
+│   ├── policy_server_launcher.cpp  # PolicyServerLauncher 组件（拉起/重启策略进程）
 │   ├── onnxruntime_inference.hpp
 │   └── rl_controller.cpp     # 遗留控制器（P1 删除）
 ├── tool/                     # 见上表
