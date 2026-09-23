@@ -9,8 +9,7 @@ ContinuationIndentWidth: 4
 ConstructorInitializerIndentWidth: 4
 AccessModifierOffset: -4
 
-# This clang-format version accepts c++20; the build still uses C++23 in CMake.
-Standard: c++20
+Standard: c++23
 ColumnLimit: 100
 MaxEmptyLinesToKeep: 1
 
