@@ -3,6 +3,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <string>
+#include <typeinfo>
 #include <vector>
 
 #include <rmcs_executor/component.hpp>

@@ -283,15 +283,23 @@ private:
             }
             case TermKind::kPath: {
                 std::vector<Binding> candidates;
-                switch (term.take) {
-                case Take::kScalar:
-                    candidates = {Binding::kDouble, Binding::kBool, Binding::kInt, Binding::kSize};
-                    break;
-                case Take::kComponent:
-                case Take::kVector:
-                    candidates = {Binding::kVector3, Binding::kDirectionVector};
-                    break;
-                case Take::kGravity: candidates = {Binding::kQuaternion}; break;
+                if (term.has_binding) {
+                    candidates = {term.binding};
+                } else {
+                    switch (term.take) {
+                    case Take::kScalar:
+                        candidates = {
+                            Binding::kDouble,
+                            Binding::kBool,
+                            Binding::kInt,
+                            Binding::kSize};
+                        break;
+                    case Take::kComponent:
+                    case Take::kVector:
+                        candidates = {Binding::kVector3, Binding::kDirectionVector};
+                        break;
+                    case Take::kGravity: candidates = {Binding::kQuaternion}; break;
+                    }
                 }
                 term.slot = acquire_slot(
                     *this, term.path, candidates, !term.has_default, output_map, slots_,
@@ -454,12 +462,20 @@ private:
         prev_pub_seq_ = 0;
     }
 
+    // Interface storage is kept before configuration and runtime state so the component wiring
+    // remains visible at the class boundary.
+    std::vector<Slot> slots_;
+    std::vector<std::unique_ptr<OutputInterface<double>>> action_outputs_;
+
+    OutputInterface<double> valid_output_{};
+    OutputInterface<double> healthy_output_{};
+    OutputInterface<double> action_age_output_{};
+    OutputInterface<std::size_t> obs_seq_output_{};
+
     JointConfig joint_config_;
 
     std::vector<ObsTerm> obs_terms_;
     std::vector<ActionTerm> action_terms_;
-    std::vector<Slot> slots_;
-    std::vector<std::unique_ptr<OutputInterface<double>>> action_outputs_;
     std::unordered_set<std::string> own_output_paths_;
 
     std::size_t obs_size_ = 0;
@@ -500,11 +516,6 @@ private:
 
     ActionChannel action_channel_;
     ActionSnapshot read_snapshot_;
-
-    OutputInterface<double> valid_output_{};
-    OutputInterface<double> healthy_output_{};
-    OutputInterface<double> action_age_output_{};
-    OutputInterface<std::size_t> obs_seq_output_{};
 
     rclcpp::Publisher<rmcs_rl::msg::Observation>::SharedPtr obs_publisher_;
     rclcpp::Subscription<rmcs_rl::msg::Action>::SharedPtr action_subscription_;
