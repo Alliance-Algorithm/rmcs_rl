@@ -47,12 +47,14 @@ FNV1A64_OFFSET_BASIS = 0xCBF29CE484222325
 FNV1A64_PRIME = 0x100000001B3
 MASK64 = 0xFFFFFFFFFFFFFFFF
 
-SIGNATURE_VERSION = "v2"
+OBS_SIGNATURE_VERSION = "v3"
+ACTION_SIGNATURE_VERSION = "v2"
 DEFAULT_NODE = "rl_bridge"
 
 OBS_KEYS = frozenset({
     "path", "take", "transform", "type", "index", "scale", "clip", "default",
     "name", "joints", "relative", "zero", "indices", "value",
+    "history_length",
 })
 ACTION_KEYS = frozenset({"index", "output", "name", "scale", "clip"})
 
@@ -423,14 +425,25 @@ def _obs_entry(term: Dict) -> str:
     return entry + "@" + str(term["dim"])
 
 
-def obs_signature(terms: Sequence[str], action_size: int) -> str:
+def obs_signature(terms: Sequence[str], action_size: int, history_length: int = 1) -> str:
     """canonical v2 观测布局串："v2" ( "|" <id>[*scale]@dim )*。"""
+    if int(history_length) < 1:
+        raise LayoutError("history_length 必须 >= 1")
     entries = [_obs_entry(parse_obs_term(spec, action_size)) for spec in terms]
-    return "|".join([SIGNATURE_VERSION] + entries)
+    return "|".join([f"{OBS_SIGNATURE_VERSION}-history={int(history_length)}"] + entries)
 
 
 def obs_signature_dim(signature: str) -> int:
     """规范串里所有 entry 的 dim 之和（用于「metadata 自洽」检查）。"""
+    history = 1
+    if signature.startswith("v3-history="):
+        prefix, _, _ = signature.partition("|")
+        try:
+            history = int(prefix.split("=", 1)[1])
+        except (IndexError, ValueError) as exc:
+            raise LayoutError(f"历史帧签名非法：{signature!r}") from exc
+        if history < 1:
+            raise LayoutError(f"历史帧长度非法：{signature!r}")
     total = 0
     for entry in _signature_entries(signature):
         _, _, dim_text = entry.rpartition("@")
@@ -438,7 +451,7 @@ def obs_signature_dim(signature: str) -> int:
             total += int(dim_text)
         except ValueError:
             raise LayoutError(f"规范串 entry 缺少 @dim（{entry!r}）：{signature!r}")
-    return total
+    return total * history
 
 
 
@@ -497,16 +510,16 @@ def action_signature(terms: Sequence[str]) -> str:
         raise LayoutError(
             f"动作 index 必须是 0..{len(parsed) - 1} 的完整置换（无空洞/无重复），实际 {indices}"
         )
-    return "|".join([SIGNATURE_VERSION] + [term["id"] for term in parsed])
+    return "|".join([ACTION_SIGNATURE_VERSION] + [term["id"] for term in parsed])
 
 
 
 def _signature_entries(signature: str) -> List[str]:
     text = (signature or "").strip()
-    if text in ("", SIGNATURE_VERSION):
+    if text in ("", OBS_SIGNATURE_VERSION, ACTION_SIGNATURE_VERSION):
         return []
-    if text.startswith(SIGNATURE_VERSION + "|"):
-        text = text[len(SIGNATURE_VERSION) + 1:]
+    if text.startswith("v3-history=") or text.startswith("v2|"):
+        text = text[text.index("|") + 1:]
     return [entry for entry in text.split("|") if entry != ""]
 
 
@@ -518,7 +531,8 @@ def parse_signature(signature: str) -> Dict:
     「模型带 v1 metadata，需重盖章」而不是一个困惑的 mismatch。
     """
     text = (signature or "").strip()
-    version = "v2" if (text == SIGNATURE_VERSION or text.startswith(SIGNATURE_VERSION + "|")) else "v1"
+    version = "v3" if text.startswith("v3-history=") else (
+        "v2" if text.startswith("v2|") or text == "v2" else "v1")
     return {"version": version, "entries": _signature_entries(text)}
 
 
@@ -588,14 +602,32 @@ def load_config(config_path, node: str = DEFAULT_NODE):
     parsed_obs = [parse_obs_term(spec, act_size) for spec in obs_terms]
     dim_sum = sum(term["dim"] for term in parsed_obs)
     declared_obs = _declared_size(params, "rl_obs_size", config_path)
-    obs_size = dim_sum if declared_obs is None else declared_obs
-    if declared_obs is not None and declared_obs != dim_sum:
+    history_length = _declared_size(params, "history_length", config_path) or 1
+    if history_length < 1:
+        raise LayoutError(f"history_length={history_length} 必须 >= 1（{config_path}）")
+    obs_size = dim_sum * history_length
+    if declared_obs is not None and declared_obs != obs_size:
         raise LayoutError(
-            f"rl_obs_size={declared_obs} 与观测词条维度之和 {dim_sum} 不一致"
+            f"rl_obs_size={declared_obs} 与单帧维度 {dim_sum} x history_length {history_length}"
+            f" = {obs_size} 不一致"
             f"（{config_path} 节点 {node}）"
         )
     _check_obs_index_order(obs_terms, parsed_obs, config_path, node)
     return obs_terms, act_terms, obs_size, act_size
+
+
+def history_length(config_path, node: str = DEFAULT_NODE) -> int:
+    yaml = _import_yaml()
+    try:
+        with open(str(config_path), "r", encoding="utf-8") as handle:
+            document = yaml.safe_load(handle)
+    except (OSError, yaml.YAMLError) as exc:
+        raise LayoutError(f"无法读取配置 {config_path}: {exc}")
+    params = _select_params(document, node, config_path)
+    value = _declared_size(params, "history_length", config_path) or 1
+    if value < 1:
+        raise LayoutError(f"history_length={value} 必须 >= 1（{config_path}）")
+    return value
 
 
 def _select_params(document, node: str, config_path) -> Dict:
@@ -768,7 +800,7 @@ def _self_test() -> None:
         other = parse_obs_term(f"path=/v take=x type={interface}", 6)
         assert (other["dim"], other["id"]) == (1, "vec3c:/v:x"), other
     assert obs_signature(["path=/v take=x"], 6) == obs_signature(["path=/v take=x type=direction_vector"], 6)
-    assert obs_signature(["path=/v take=x"], 6) == "v2|vec3c:/v:x@1"
+    assert obs_signature(["path=/v take=x"], 6) == "v3-history=1|vec3c:/v:x@1"
     for axis in ("x", "y", "z"):
         assert parse_obs_term(f"path=/v take={axis}", 6)["id"] == f"vec3c:/v:{axis}"
 
@@ -817,8 +849,8 @@ def _self_test() -> None:
     assert parse_obs_term("path=/v clip=-1:1", 6)["clip"] == (-1.0, 1.0)
     _expect_error(lambda: parse_obs_term("path=/v clip=1:-1", 6), "clip")
 
-    assert obs_signature(["path=/v scale=2 clip=10 index=3 default=0.1"], 6) == "v2|/v*2@1"
-    assert obs_signature(["path=/v"], 6) == "v2|/v@1"
+    assert obs_signature(["path=/v scale=2 clip=10 index=3 default=0.1"], 6) == "v3-history=1|/v*2@1"
+    assert obs_signature(["path=/v"], 6) == "v3-history=1|/v@1"
 
     action = parse_action_term("index=0 output=/rl/action/lf0")
     assert (action["index"], action["output"], action["name"], action["id"]) \

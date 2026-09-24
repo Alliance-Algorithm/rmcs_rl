@@ -53,6 +53,13 @@ include_directories(${PROJECT_SOURCE_DIR}/src)
 
 ament_auto_add_library(rmcs_rl_bridge SHARED
     src/rl_bridge.cpp
+    src/rl_bridge/utility.cpp
+    src/rl_bridge/parameters.cpp
+    src/rl_bridge/joint_config.cpp
+    src/rl_bridge/term_parser.cpp
+    src/rl_bridge/interface_binding.cpp
+    src/rl_bridge/observation.cpp
+    src/rl_bridge/action_channel.cpp
     src/policy_server_launcher.cpp
 )
 target_link_libraries(rmcs_rl_bridge ${cpp_typesupport_target})
