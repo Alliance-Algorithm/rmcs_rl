@@ -67,7 +67,8 @@ def main() -> None:
 
     try:
         obs_terms, act_terms, obs_size, act_size = layout.load_config(args.config, args.node)
-        obs_sig = layout.obs_signature(obs_terms, act_size)
+        obs_sig = layout.obs_signature(
+            obs_terms, act_size, layout.history_length(args.config, args.node))
         act_sig = layout.action_signature(act_terms)
         digest = layout.layout_hash(obs_sig, act_sig, obs_size, act_size)
 

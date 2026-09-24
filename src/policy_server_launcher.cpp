@@ -1,4 +1,3 @@
-
 #include <cerrno>
 #include <chrono>
 #include <csignal>
@@ -21,15 +20,15 @@
 
 namespace rmcs_rl {
 
-// 随 executor 生命周期拉起独立的 policy_server 子进程：
-//   - 组件只存在于需要 RL 的配置里，非 RL 车不受影响；
-//   - 子进程设置 PR_SET_PDEATHSIG，executor 结束/崩溃时自动被内核回收，不会留孤儿；
-//   - update() 低频 waitpid(WNOHANG) 监管，可选退避重启。
+// Spawns and supervises an independent policy_server child process for the executor lifetime:
+//   - the component only exists in RL configs; non-RL robots are unaffected;
+//   - the child sets PR_SET_PDEATHSIG so the kernel reaps it when executor exits/crashes;
+//   - update() does a low-frequency waitpid(WNOHANG) poll with optional backoff restart.
 class PolicyServerLauncher
     : public rmcs_executor::Component
     , public rclcpp::Node {
 public:
-    PolicyServerLauncher()
+    explicit PolicyServerLauncher()
         : Node(
               get_component_name(),
               rclcpp::NodeOptions{}.automatically_declare_parameters_from_overrides(true)) {
@@ -168,7 +167,7 @@ private:
         }
 
         if (pid == 0) {
-            // 子进程内只调用 async-signal-safe 的接口。
+            // Only async-signal-safe calls are allowed inside the child.
             ::prctl(PR_SET_PDEATHSIG, SIGTERM);
             if (::getppid() != parent_pid)
                 ::_exit(EXIT_FAILURE);
@@ -230,8 +229,7 @@ private:
 
         ::kill(pid, SIGKILL);
         ::waitpid(pid, nullptr, 0);
-        RCLCPP_WARN(
-            get_logger(), "policy_server (pid=%d) did not stop, killed", static_cast<int>(pid));
+        RCLCPP_WARN(get_logger(), "policy_server (pid=%d) did not stop, killed", static_cast<int>(pid));
     }
 
     bool autostart_ = true;

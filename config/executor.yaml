@@ -11,10 +11,6 @@ rmcs_executor:
 wheel_leg_infantry_rl:
   ros__parameters:
     board_serial: ""
-    hip_kp: 200.0
-    hip_kd: 4.0
-    knee_kp: 200.0
-    knee_kd: 4.0
 
 wheel_leg_chassis_controller:
   ros__parameters:
@@ -29,9 +25,10 @@ wheel_leg_chassis_controller:
 
 rl_bridge:
   ros__parameters:
+    history_length: 1
     rl_base: "/wheel_leg/rl"
-    policy_rate: 50.0
-    max_action_age: 0.04            # 缺省 = 2 / policy_rate；超时 → valid=0（绝不保持旧动作）
+    policy_rate: 100.0
+    max_action_age: 0.02            # 缺省 = 2 / policy_rate；超时 → valid=0（绝不保持旧动作）
 
     rl_obs_size: 28
     rl_action_size: 6
