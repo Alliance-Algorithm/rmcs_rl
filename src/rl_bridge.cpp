@@ -6,6 +6,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
+#include <deque>
 #include <limits>
 #include <map>
 #include <memory>
@@ -284,12 +285,18 @@ public:
             term.index = cursor;
             cursor += term.dim;
         }
-        obs_size_ = cursor;
+        obs_frame_size_ = cursor;
+        const auto history_length = integer_or_("history_length").value_or(1);
+        if (history_length < 1 || history_length > 64)
+            throw std::invalid_argument("RlBridge: history_length must be in [1, 64]");
+        history_length_ = static_cast<std::size_t>(history_length);
+        obs_size_ = obs_frame_size_ * history_length_;
         if (const auto declared = integer_or_("rl_obs_size");
             declared.has_value() && static_cast<std::size_t>(*declared) != obs_size_)
             throw std::invalid_argument(
                 "RlBridge: rl_obs_size=" + std::to_string(*declared)
-                + " but observation_terms sum to " + std::to_string(obs_size_));
+                + " but observation frame/history contract is " + std::to_string(obs_frame_size_)
+                + "x" + std::to_string(history_length_) + "=" + std::to_string(obs_size_));
 
         policy_rate_ = number_or_("policy_rate", 50.0);
         if (!(policy_rate_ > 0.0) || !is_finite(policy_rate_))
@@ -420,16 +427,23 @@ public:
             if (read_unsigned_(reset_slot_, reset_count) && reset_count != last_reset_count_) {
                 last_reset_count_ = reset_count;
                 reset_runtime_();
-                RCLCPP_INFO(
-                    get_logger(), "RMCS reset: last_action cleared (reset_count=%llu)",
-                    static_cast<unsigned long long>(reset_count));
             }
         }
 
         if (!pub_started_ || now - last_pub_time_ >= pub_period_) {
             std::vector<double> obs;
             if (build_observation_(obs)) {
-                publish_observation_(obs, now);
+                if (history_.empty())
+                    history_.assign(history_length_, obs);
+                else {
+                    history_.pop_front();
+                    history_.push_back(obs);
+                }
+                std::vector<double> stacked;
+                stacked.reserve(obs_size_);
+                for (const auto& frame : history_)
+                    stacked.insert(stacked.end(), frame.begin(), frame.end());
+                publish_observation_(stacked, now);
                 ++pub_ok_count_;
             } else {
                 ++obs_invalid_count_;
@@ -1162,7 +1176,7 @@ private:
     }
 
     std::string obs_layout_signature_() const {
-        std::string signature = "v2";
+        std::string signature = "v3-history=" + std::to_string(history_length_);
         for (const auto& term : obs_terms_) {
             signature += "|" + term.id;
             if (term.scale != 1.0)
@@ -1467,6 +1481,7 @@ private:
     void reset_runtime_() {
         std::fill(last_actions_.begin(), last_actions_.end(), 0.0);
         std::fill(written_.begin(), written_.end(), 0.0);
+        history_.clear();
         pub_started_ = false;
         prev_pub_seq_ = 0;
     }
@@ -1503,6 +1518,8 @@ private:
     std::unordered_set<std::string> own_output_paths_;
 
     std::size_t obs_size_ = 0;
+    std::size_t obs_frame_size_ = 0;
+    std::size_t history_length_ = 1;
     std::size_t action_size_ = 0;
 
     std::string rl_base_;
@@ -1522,6 +1539,7 @@ private:
 
     std::vector<double> last_actions_;
     std::vector<double> written_;
+    std::deque<std::vector<double>> history_;
 
     std::chrono::nanoseconds pub_period_{std::chrono::milliseconds(20)};
     std::chrono::steady_clock::time_point last_pub_time_{};
