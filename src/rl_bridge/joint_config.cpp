@@ -1,9 +1,9 @@
-#include "rl_bridge/joint_config.hpp"
+#include <rmcs_rl/rl_bridge/joint_config.hpp>
 
 #include <stdexcept>
 
-#include "rl_bridge/parameters.hpp"
-#include "rl_bridge/utility.hpp"
+#include <rmcs_rl/rl_bridge/parameters.hpp>
+#include <rmcs_rl/rl_bridge/utility.hpp>
 
 namespace rmcs_rl {
 

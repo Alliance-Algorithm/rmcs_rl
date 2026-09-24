@@ -4,7 +4,7 @@
 #include <string>
 #include <vector>
 
-#include "rl_bridge/types.hpp"
+#include <rmcs_rl/rl_bridge/types.hpp>
 
 namespace rmcs_rl {
 
