@@ -1,4 +1,4 @@
-#include "rl_bridge/action_channel.hpp"
+#include <rmcs_rl/rl_bridge/action_channel.hpp>
 
 #include <algorithm>
 #include <limits>

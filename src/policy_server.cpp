@@ -25,8 +25,8 @@
 #include <rmcs_rl/msg/observation.hpp>
 #include <rmcs_rl/msg/policy_status.hpp>
 
-#include "onnxruntime_inference.hpp"
-#include "rl_layout.hpp"
+#include <rmcs_rl/onnxruntime_inference.hpp>
+#include <rmcs_rl/rl_layout.hpp>
 
 namespace rmcs_rl {
 
