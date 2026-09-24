@@ -23,15 +23,15 @@
 #include <rmcs_rl/msg/action.hpp>
 #include <rmcs_rl/msg/observation.hpp>
 
-#include "rl_bridge/action_channel.hpp"
-#include "rl_bridge/interface_binding.hpp"
-#include "rl_bridge/joint_config.hpp"
-#include "rl_bridge/observation.hpp"
-#include "rl_bridge/parameters.hpp"
-#include "rl_bridge/term_parser.hpp"
-#include "rl_bridge/types.hpp"
-#include "rl_bridge/utility.hpp"
-#include "rl_layout.hpp"
+#include <rmcs_rl/rl_bridge/action_channel.hpp>
+#include <rmcs_rl/rl_bridge/interface_binding.hpp>
+#include <rmcs_rl/rl_bridge/joint_config.hpp>
+#include <rmcs_rl/rl_bridge/observation.hpp>
+#include <rmcs_rl/rl_bridge/parameters.hpp>
+#include <rmcs_rl/rl_bridge/term_parser.hpp>
+#include <rmcs_rl/rl_bridge/types.hpp>
+#include <rmcs_rl/rl_bridge/utility.hpp>
+#include <rmcs_rl/rl_layout.hpp>
 
 namespace rmcs_rl {
 

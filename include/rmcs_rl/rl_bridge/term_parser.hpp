@@ -6,8 +6,8 @@
 
 #include <rclcpp/node.hpp>
 
-#include "rl_bridge/joint_config.hpp"
-#include "rl_bridge/types.hpp"
+#include <rmcs_rl/rl_bridge/joint_config.hpp>
+#include <rmcs_rl/rl_bridge/types.hpp>
 
 namespace rmcs_rl {
 

@@ -123,14 +123,17 @@ rmcs_rl/
 │       ├── deployment.md         # 构建 → 模型 → 配置 → 运行 → 验证 → 交接
 │       ├── model-contract.md     # 模型张量合同与 metadata 清单
 │       └── deformable-rl-pipeline.md  # deformable 消费侧落地说明
+├── include/rmcs_rl/          # 头文件（安装到 include/rmcs_rl/，与 rosidl 生成头一致）
+│   ├── rl_layout.hpp         # FNV-1a64 / layout_hash / model_id（与 tool/rl_layout.py 同构）
+│   ├── onnxruntime_inference.hpp
+│   └── rl_bridge/            # 桥内部辅助模块头文件
 ├── models/                   # 策略 ONNX（安装到 share/rmcs_rl/models/）
 ├── msg/                      # Observation / Action / PolicyStatus（rosidl 生成，类型名 rmcs_rl/msg/*）
-├── src/
-│   ├── rl_bridge.cpp         # 桥
-│   ├── rl_layout.hpp         # FNV-1a64 / layout_hash / model_id（与 tool/rl_layout.py 同构）
+├── src/                      # 仅实现文件
+│   ├── rl_bridge.cpp         # 桥（RlBridge 组件）
+│   ├── rl_bridge/            # 桥内部辅助模块实现
 │   ├── policy_server.cpp     # 策略进程（独立可执行文件，非 executor 组件）
-│   ├── policy_server_launcher.cpp  # PolicyServerLauncher 组件（拉起/重启策略进程）
-│   └── onnxruntime_inference.hpp
+│   └── policy_server_launcher.cpp  # PolicyServerLauncher 组件（拉起/重启策略进程）
 ├── tool/                     # 见上表
 ├── plugins.xml               # rmcs_rl_bridge 的 pluginlib 导出
 └── CMakeLists.txt

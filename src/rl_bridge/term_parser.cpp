@@ -1,9 +1,9 @@
-#include "rl_bridge/term_parser.hpp"
+#include <rmcs_rl/rl_bridge/term_parser.hpp>
 
 #include <map>
 #include <stdexcept>
 
-#include "rl_bridge/utility.hpp"
+#include <rmcs_rl/rl_bridge/utility.hpp>
 
 namespace rmcs_rl {
 

@@ -48,8 +48,6 @@ if(NOT EXISTS ${ONNXRUNTIME_ROOT_DIR}/include/onnxruntime_cxx_api.h)
         message(FATAL_ERROR "Failed to extract ONNX Runtime archive: ${ONNXRUNTIME_ARCHIVE}")
     endif()
 endif()
-include_directories(${ONNXRUNTIME_ROOT_DIR}/include)
-include_directories(${PROJECT_SOURCE_DIR}/src)
 
 ament_auto_add_library(rmcs_rl_bridge SHARED
     src/rl_bridge.cpp
@@ -62,10 +60,18 @@ ament_auto_add_library(rmcs_rl_bridge SHARED
     src/rl_bridge/action_channel.cpp
     src/policy_server_launcher.cpp
 )
+target_include_directories(rmcs_rl_bridge PUBLIC
+    $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/include>
+    $<INSTALL_INTERFACE:include/rmcs_rl>
+)
 target_link_libraries(rmcs_rl_bridge ${cpp_typesupport_target})
 
 ament_auto_add_executable(policy_server
     src/policy_server.cpp
+)
+target_include_directories(policy_server PRIVATE
+    ${ONNXRUNTIME_ROOT_DIR}/include
+    ${PROJECT_SOURCE_DIR}/include
 )
 target_link_libraries(policy_server ${ONNXRUNTIME_ROOT_DIR}/lib/libonnxruntime.so)
 target_link_libraries(policy_server ${cpp_typesupport_target})
@@ -79,4 +85,4 @@ install(DIRECTORY launch DESTINATION share/${PROJECT_NAME})
 
 ament_export_dependencies(rosidl_default_runtime)
 
-ament_auto_package()
+ament_auto_package(USE_SCOPED_HEADER_INSTALL_DIR)
