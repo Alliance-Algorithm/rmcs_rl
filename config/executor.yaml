@@ -19,37 +19,37 @@ wheel_leg_chassis_controller:
     yaw_rate_max: 3.0
     heading_kp: 3.0
     deadzone: 0.08
-    command_height_min: 0.20
-    command_height_max: 0.42
-    default_command_height: 0.22
+    command_height_min: 0.26
+    command_height_max: 0.28
+    default_command_height: 0.27
 
 rl_bridge:
   ros__parameters:
     history_length: 1
     rl_base: "/wheel_leg/rl"
-    policy_rate: 100.0
-    max_action_age: 0.02            # 缺省 = 2 / policy_rate；超时 → valid=0（绝不保持旧动作）
+    policy_rate: 50.0
+    max_action_age: 0.04            # 缺省 = 2 / policy_rate；超时 → valid=0（绝不保持旧动作）
 
-    rl_obs_size: 28
+    rl_obs_size: 35
     rl_action_size: 6
 
     enable_interface: "/wheel_leg/rl/enable"
     enable_default: false
     invalid_value: "nan"            # 必须加引号！不加会被 YAML 解析成 float，桥启动即失败
     reset_interface: "/chassis/reset_count"
-    expected_model_id: "0"
+    expected_model_id: "0x198248e43e64d643"
 
-    joint_names: [left_hip_joint, left_knee_joint, left_wheel, right_hip_joint, right_knee_joint, right_wheel]
+    joint_names: [left_hip_joint, left_knee_joint, right_hip_joint, right_knee_joint, left_wheel, right_wheel]
     joint_base_path: "/wheel_leg"
     joint_angle_suffix: "/angle"
     joint_velocity_suffix: "/velocity"
     joint_torque_suffix: "/torque"
     default_joint_pos:
-      left_hip_joint: -0.5
-      left_knee_joint: -0.35
+      left_hip_joint: 0.0
+      left_knee_joint: 0.0
+      right_hip_joint: 0.0
+      right_knee_joint: 0.0
       left_wheel: 0.0
-      right_hip_joint: 0.5
-      right_knee_joint: 0.35
       right_wheel: 0.0
 
     observation_terms:
@@ -59,25 +59,25 @@ rl_bridge:
       - index=3  path=/chassis/control_height scale=5.0
       - index=4  path=/wheel_leg/imu/angular_velocity take=vec3 scale=0.5
       - index=7  path=/wheel_leg/imu/quaternion transform=projected_gravity
-      - index=10 type=joint_pos joints=left_hip_joint,left_knee_joint relative=true
-      - index=12 type=joint_pos joints=left_wheel zero=true
-      - index=13 type=joint_pos joints=right_hip_joint,right_knee_joint relative=true
-      - index=15 type=joint_pos joints=right_wheel zero=true
-      - index=16 type=joint_vel joints=left_hip_joint,left_knee_joint,left_wheel,right_hip_joint,right_knee_joint,right_wheel scale=0.1
+      - index=10 type=joint_pos joints=left_hip_joint,left_knee_joint,right_hip_joint,right_knee_joint relative=true
+      - index=14 type=joint_pos joints=left_wheel,right_wheel zero=true
+      - index=16 type=joint_vel joints=left_hip_joint,left_knee_joint,right_hip_joint,right_knee_joint scale=0.1
+      - index=20 type=joint_vel joints=left_wheel,right_wheel scale=0.1
       - index=22 type=last_action
+      - index=28 type=constant value=1,0,0,0,0,0,0
 
     action_terms:
-      - index=0 output=/wheel_leg/rl/action/left_hip_joint
-      - index=1 output=/wheel_leg/rl/action/left_knee_joint
-      - index=2 output=/wheel_leg/rl/action/left_wheel
-      - index=3 output=/wheel_leg/rl/action/right_hip_joint
-      - index=4 output=/wheel_leg/rl/action/right_knee_joint
-      - index=5 output=/wheel_leg/rl/action/right_wheel
+      - index=0 output=/wheel_leg/rl/action/left_hip name=left_hip
+      - index=1 output=/wheel_leg/rl/action/left_knee name=left_knee
+      - index=2 output=/wheel_leg/rl/action/right_hip name=right_hip
+      - index=3 output=/wheel_leg/rl/action/right_knee name=right_knee
+      - index=4 output=/wheel_leg/rl/action/left_wheel name=left_wheel
+      - index=5 output=/wheel_leg/rl/action/right_wheel name=right_wheel
 
 policy_server:
   ros__parameters:
     rl_base: "/wheel_leg/rl"                    # 必须与桥一致
-    rl_model_path: "models/wheel_leg_V1.onnx"
+    rl_model_path: "models/wheel_leg_v1.onnx"
     input_name: "obs"
     output_name: "actions"
     normalization_from_metadata: true

@@ -79,12 +79,18 @@ public:
             const auto input_shape = input_info.GetShape();
             const auto output_shape = output_info.GetShape();
             if (input_shape.size() != 2 || output_shape.size() != 2) {
-                error = "tensor rank must be 2 ([1, N])";
+                error = "tensor rank must be 2 ([batch, N])";
                 session_.reset();
                 return false;
             }
-            if (input_shape[0] != 1 || output_shape[0] != 1) {
-                error = "batch dimension must be 1";
+            if ((input_shape[0] != 1 && input_shape[0] != -1)
+                || (output_shape[0] != 1 && output_shape[0] != -1)) {
+                error = "batch dimension must be 1 or dynamic";
+                session_.reset();
+                return false;
+            }
+            if (input_shape[1] <= 0 || output_shape[1] <= 0) {
+                error = "feature dimensions must be concrete positive values";
                 session_.reset();
                 return false;
             }
@@ -106,8 +112,10 @@ public:
 
             config_.input_size = model_input_size;
             config_.output_size = model_output_size;
-            input_shape_.assign(input_shape.begin(), input_shape.end());
-            output_shape_.assign(output_shape.begin(), output_shape.end());
+            // This deployment path runs one observation at a time. Normalize a
+            // symbolic batch dimension to 1 for Ort::CreateTensor below.
+            input_shape_ = {1, static_cast<std::int64_t>(model_input_size)};
+            output_shape_ = {1, static_cast<std::int64_t>(model_output_size)};
             input_buffer_.assign(config_.input_size, 0.0F);
             output_buffer_.assign(config_.output_size, 0.0F);
             memory_info_ = Ort::MemoryInfo::CreateCpu(OrtArenaAllocator, OrtMemTypeDefault);
