@@ -1,11 +1,11 @@
-#include <rmcs_rl/rl_bridge/observation.hpp>
+#include "rl_bridge/observation.hpp"
 
 #include <algorithm>
 #include <cmath>
 #include <stdexcept>
 
-#include <rmcs_rl/rl_bridge/interface_binding.hpp>
-#include <rmcs_rl/rl_bridge/utility.hpp>
+#include "rl_bridge/interface_binding.hpp"
+#include "rl_bridge/utility.hpp"
 
 namespace rmcs_rl {
 
@@ -90,8 +90,10 @@ bool build_observation(
                 if (!term.zero) {
                     if (!read_double(slots[term.joint_slots[j]], value))
                         return false;
-                    if (term.relative)
-                        value -= term.joint_defaults[j];
+                    if (term.relative) {
+                        const double delta = value - term.joint_defaults[j];
+                        value = std::atan2(std::sin(delta), std::cos(delta));
+                    }
                 }
                 push(
                     term.index + j, value, term.scale, term.has_clip, term.clip_min, term.clip_max,
