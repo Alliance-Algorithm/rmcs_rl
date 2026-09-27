@@ -4,8 +4,8 @@
 Two modes:
 
   * self-check (no --config; used by CI, deployment YAML lives in the RMCS repo):
-      model loads; one input "obs" / one output "actions"; float32; rank 2; batch 1;
-      concrete (non-dynamic) shapes. Layout metadata is OPTIONAL:
+      model loads; one input "obs" / one output "actions"; float32; rank 2;
+      batch 1 or dynamic; concrete feature dimensions. Layout metadata is OPTIONAL:
       - missing / v1 -> SKIP (stamped layout metadata is optional for model-only self-check)
       - present v2   -> signatures must be internally consistent with the tensor
                         sizes, and policy_layout_hash must match those signatures
@@ -257,11 +257,17 @@ def main() -> None:
         print("== SUMMARY: FAIL (秩不为 2，后续检查跳过) ==")
         sys.exit(1)
 
+    batch_ok = all(
+        dim == 1 or dim is None or isinstance(dim, str)
+        for dim in (in_shape[0], out_shape[0])
+    )
+    report.check("batch dimension", batch_ok,
+                 f"obs={in_shape[0]!r} actions={out_shape[0]!r}（允许 1 或动态维）")
     model_obs, model_act = in_shape[1], out_shape[1]
     if not isinstance(model_obs, int) or not isinstance(model_act, int) \
             or model_obs <= 0 or model_act <= 0:
-        report.check("concrete obs/action size", False,
-                     f"obs={in_shape} actions={out_shape}（动态或符号维，无法自检）")
+        report.check("concrete obs/action feature size", False,
+                     f"obs={in_shape} actions={out_shape}（特征维必须是正整数）")
         print(f"== SUMMARY: {'PASS' if report.ok else 'FAIL'} ==")
         sys.exit(0 if report.ok else 1)
 
@@ -272,12 +278,10 @@ def main() -> None:
     if args.obs is None and args.act is None:
         report.info("model sizes", f"obs={model_obs} actions={model_act}（取自模型）")
 
-    report.check("obs shape", in_shape == [1, obs_size],
-                 f"{in_shape} == [1,{obs_size}]" if in_shape == [1, obs_size]
-                 else f"{in_shape} != [1,{obs_size}]")
-    report.check("actions shape", out_shape == [1, act_size],
-                 f"{out_shape} == [1,{act_size}]" if out_shape == [1, act_size]
-                 else f"{out_shape} != [1,{act_size}]")
+    report.check("obs feature shape", model_obs == obs_size,
+                 f"{in_shape} feature={model_obs} expected={obs_size}")
+    report.check("actions feature shape", model_act == act_size,
+                 f"{out_shape} feature={model_act} expected={act_size}")
 
     meta = {prop.key: prop.value for prop in model.metadata_props}
     obs_meta, act_meta = meta.get("rmcs_obs_layout"), meta.get("rmcs_actions_layout")
