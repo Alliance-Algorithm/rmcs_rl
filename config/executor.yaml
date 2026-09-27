@@ -58,7 +58,7 @@ rl_bridge:
       - index=1  path=/chassis/control_velocity take=y
       - index=2  path=/chassis/control_velocity take=z
       - index=3  path=/chassis/control_height scale=5.0
-      # RL 坐标 [x,y,z]=[车身 y,-车身 x,车身 z]；原始 /wheel_leg/imu 仍为车身系。
+      # 训练 IMU 观测直接使用车身 Body xyz；URDF 轴向差异不对 IMU 做 90° 换轴。
       - index=4  path=/wheel_leg/rl/imu/angular_velocity take=vec3 scale=0.5
       - index=7  path=/wheel_leg/rl/imu/projected_gravity take=vec3
       - index=10 type=joint_pos joints=left_hip_joint,left_knee_joint,right_hip_joint,right_knee_joint relative=true
