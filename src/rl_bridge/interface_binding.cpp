@@ -79,7 +79,6 @@ std::size_t acquire_slot(
     Slot slot;
     slot.path = path;
     slot.binding = selected;
-    slot.required = required;
     switch (selected) {
     case Binding::kDouble:
         slot.double_value = std::make_unique<rmcs_executor::Component::InputInterface<double>>();
