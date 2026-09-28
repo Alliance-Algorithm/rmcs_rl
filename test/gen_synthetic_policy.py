@@ -1,60 +1,15 @@
 #!/usr/bin/env python3
-"""Generate a synthetic policy ONNX matching the rmcs_rl contract.
-
-Contract: input "obs" float32 [1, N_obs] -> output "actions" float32 [1, N_act].
-The synthetic policy outputs constant zeros: in RL state, position PD holds
-default_dof_pos — safe for bench pipeline validation (no learned behavior).
-
-Sizes come from --obs/--act, or from the deployment YAML (--from-config) so the
-model shape always matches the bridge contract; metadata is *not* stamped here
-(run stamp_layout_metadata.py afterwards, then check_policy_contract.py).
-
-Negative test: generate with a wrong obs size (e.g. --obs 42) and verify the
-consumer refuses to load (obs size mismatch).
-
-Usage:
-  python3 gen_synthetic_policy.py --obs 22 --act 4 -o policy.onnx
-  python3 gen_synthetic_policy.py --from-config deploy.yaml --node rl_bridge -o policy.onnx
-"""
+"""Generate a zero-action model for offline contract regression fixtures."""
 import argparse
 import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tool"))
 
 import rl_layout as layout
 
 
-def _export_with_torch(obs: int, act: int, output: str) -> bool:
-    """torch 可用则用 torch.onnx.export（保留历史导出路径）；不可用返回 False。"""
-    try:
-        import torch
-        import torch.nn as nn
-    except ImportError:
-        return False
-
-    class _ZeroPolicy(nn.Module):
-        def __init__(self, obs_size: int, act_size: int) -> None:
-            super().__init__()
-            self.linear = nn.Linear(obs_size, act_size, bias=False)
-            with torch.no_grad():
-                self.linear.weight.zero_()
-
-        def forward(self, obs: torch.Tensor) -> torch.Tensor:
-            return self.linear(obs)
-
-    model = _ZeroPolicy(obs, act).eval()
-    dummy = torch.zeros(1, obs, dtype=torch.float32)
-    torch.onnx.export(
-        model,
-        dummy,
-        output,
-        input_names=["obs"],
-        output_names=["actions"],
-        opset_version=13,
-    )
-    return True
-
-
 def _export_with_onnx(obs: int, act: int, output: str) -> None:
-    """无 torch 时的等价实现：actions = obs @ W，W 全零 → 恒零动作。"""
+    """actions = obs @ W with zero weights; no training dependency."""
     import numpy as np
     import onnx
     from onnx import TensorProto, helper, numpy_helper
@@ -111,15 +66,12 @@ def main() -> None:
         print(f"ERROR: obs/act 必须为正整数（obs={obs} act={act}）", file=sys.stderr)
         sys.exit(1)
 
-    backend = "torch" if _export_with_torch(obs, act, args.output) else "onnx"
-    if backend == "onnx":
-        _export_with_onnx(obs, act, args.output)
+    _export_with_onnx(obs, act, args.output)
 
     print(
         f"wrote {args.output}: obs float32[1,{obs}] -> actions float32[1,{act}] "
         "(zero policy)"
     )
-    print(f"backend: {backend}")
 
 
 if __name__ == "__main__":

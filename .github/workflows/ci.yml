@@ -7,6 +7,7 @@ on:
       - "include/**"
       - "models/**"
       - "tool/**"
+      - "test/**"
       - "CMakeLists.txt"
       - "package.xml"
       - "plugins.xml"
@@ -51,7 +52,17 @@ jobs:
           set +u
           source /opt/ros/jazzy/setup.bash
           set -u
-          colcon build --packages-up-to rmcs_rl
+          colcon build --packages-up-to rmcs_rl --cmake-args -DBUILD_TESTING=ON
+
+      - name: C++ runtime regression
+        shell: bash
+        working-directory: /tmp/RMCS/rmcs_ws
+        run: |
+          set -e
+          source /opt/ros/jazzy/setup.bash
+          source install/setup.bash
+          colcon test --packages-select rmcs_rl
+          colcon test-result --test-result-base build/rmcs_rl --verbose
 
       - name: Prepare Python toolchain (venv)
         shell: bash
@@ -103,4 +114,4 @@ jobs:
         working-directory: /tmp/RMCS/rmcs_ws/src/rmcs_rl
         run: |
           set -euo pipefail
-          PYTHON=/tmp/rl-venv/bin/python bash tool/test_layout_contract.sh
+          PYTHON=/tmp/rl-venv/bin/python bash test/test_layout_contract.sh

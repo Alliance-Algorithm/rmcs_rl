@@ -2,8 +2,42 @@
 
 #include <algorithm>
 #include <limits>
+#include <stdexcept>
 
 namespace rmcs_rl {
+
+void ActionChannel::resize(std::size_t action_size) {
+    const std::lock_guard lock{mutex_};
+    incoming_.action.assign(action_size, 0.0);
+    received_ = false;
+    has_read_.store(false, std::memory_order_release);
+}
+
+void ActionChannel::store(const rmcs_rl::msg::Action& message) {
+    const std::lock_guard lock{mutex_};
+    if (message.action.size() != incoming_.action.size())
+        throw std::invalid_argument("action channel size mismatch");
+    incoming_.obs_seq = message.obs_seq;
+    incoming_.layout_hash = message.layout_hash;
+    incoming_.model_id = message.model_id;
+    std::copy(message.action.begin(), message.action.end(), incoming_.action.begin());
+    received_ = true;
+}
+
+bool ActionChannel::try_read(ActionSnapshot& snapshot) {
+    // The executor must never wait for the ROS callback. A seqlock cannot protect
+    // concurrent reads/writes of a non-atomic vector under the C++ memory model.
+    const std::unique_lock lock{mutex_, std::try_to_lock};
+    if (!lock.owns_lock())
+        // Keep the caller's previous snapshot. The bridge still checks its age,
+        // sequence and contract before allowing it to drive outputs.
+        return has_read_.load(std::memory_order_acquire);
+    if (!received_)
+        return false;
+    snapshot = incoming_;
+    has_read_.store(true, std::memory_order_release);
+    return true;
+}
 
 void write_actions(
     bool valid, const ActionSnapshot& snapshot, const std::vector<ActionTerm>& terms,
@@ -19,9 +53,7 @@ void write_actions(
             written[i] = value;
         } else {
             switch (invalid_mode) {
-            case InvalidMode::kNaN:
-                value = std::numeric_limits<double>::quiet_NaN();
-                break;
+            case InvalidMode::kNaN: value = std::numeric_limits<double>::quiet_NaN(); break;
             case InvalidMode::kZero: value = 0.0; break;
             case InvalidMode::kHold: value = written[i]; break;
             }
@@ -38,7 +70,7 @@ void reset_action_state(std::vector<double>& last_actions, std::vector<double>& 
 std::string invalid_reason(
     bool enabled, bool contract_ok, bool has_snapshot, bool fresh, bool seq_ok, bool finite) {
     if (!contract_ok)
-        return "contract/model mismatch (latched; restart or re-enable)";
+        return "contract/model mismatch (latched; restart required)";
     if (!enabled)
         return "disabled by enable interface";
     if (!has_snapshot)

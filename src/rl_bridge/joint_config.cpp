@@ -2,7 +2,7 @@
 
 #include <stdexcept>
 
-#include <rmcs_rl/rl_bridge/parameters.hpp>
+#include <rmcs_rl/parameters.hpp>
 #include <rmcs_rl/rl_bridge/utility.hpp>
 
 namespace rmcs_rl {
