@@ -71,9 +71,10 @@ python3 src/rmcs_rl/tool/check_policy_contract.py <模型.onnx> --config <车辆
 盖章只写元数据；布局匹配不能证明训练侧的坐标或动作含义正确。
 更新模型或配置后重启 RMCS。模型或布局不匹配会锁存拒绝动作，需要重启恢复。
 
-当前 `models/deformable_sps_V2.onnx` 缺少 `rmcs_obs_layout` 和 `rmcs_actions_layout`，
-完整契约检查与策略服务会拒绝它。这是已有模型的部署缺口，需核对训练契约后补元数据；
-不能只按张量维数推断其含义。
+当前部署使用 `models/deformable_sps_V1.onnx`；其 `rmcs_obs_layout`、
+`rmcs_actions_layout`、`policy_layout_hash` 和 `policy_version` 已按
+`deformable-infantry-omni-rl.yaml` 盖章。盖章只确认运行时布局契约，不能只按张量维数
+推断训练侧的坐标或动作含义；更新模型或 YAML 后必须重新盖章并同步 `expected_model_id`。
 
 ## 运行接口
 
