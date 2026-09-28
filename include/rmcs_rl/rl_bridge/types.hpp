@@ -1,6 +1,5 @@
 #pragma once
 
-#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <limits>
@@ -10,7 +9,6 @@
 
 #include <eigen3/Eigen/Dense>
 #include <eigen3/Eigen/Geometry>
-#include <rclcpp/node.hpp>
 #include <rmcs_description/tf_description.hpp>
 #include <rmcs_executor/component.hpp>
 
@@ -81,7 +79,6 @@ struct ActionTerm {
 struct Slot {
     std::string path;
     Binding binding = Binding::kDouble;
-    bool required = true;
     std::unique_ptr<rmcs_executor::Component::InputInterface<double>> double_value;
     std::unique_ptr<rmcs_executor::Component::InputInterface<bool>> bool_value;
     std::unique_ptr<rmcs_executor::Component::InputInterface<int>> int_value;
@@ -98,7 +95,6 @@ struct ActionSnapshot {
     std::uint64_t layout_hash = 0;
     std::uint64_t model_id = 0;
     std::vector<double> action;
-    std::chrono::steady_clock::time_point received{};
 };
 
 } // namespace rmcs_rl

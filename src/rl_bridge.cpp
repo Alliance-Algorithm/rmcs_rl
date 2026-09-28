@@ -3,10 +3,8 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
-#include <deque>
 #include <limits>
 #include <memory>
-#include <set>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -24,11 +22,12 @@
 #include <rmcs_rl/msg/observation.hpp>
 
 #include <rmcs_rl/rl_bridge/action_channel.hpp>
+#include <rmcs_rl/rl_bridge/config.hpp>
 #include <rmcs_rl/rl_bridge/interface_binding.hpp>
 #include <rmcs_rl/rl_bridge/joint_config.hpp>
 #include <rmcs_rl/rl_bridge/observation.hpp>
-#include <rmcs_rl/rl_bridge/parameters.hpp>
-#include <rmcs_rl/rl_bridge/term_parser.hpp>
+#include <rmcs_rl/rl_bridge/observation_history.hpp>
+#include <rmcs_rl/rl_bridge/observation_timeline.hpp>
 #include <rmcs_rl/rl_bridge/types.hpp>
 #include <rmcs_rl/rl_bridge/utility.hpp>
 #include <rmcs_rl/rl_layout.hpp>
@@ -42,21 +41,30 @@ public:
     explicit RlBridge()
         : Node(
               get_component_name(),
-              rclcpp::NodeOptions{}.automatically_declare_parameters_from_overrides(true)) {
+              rclcpp::NodeOptions{}.automatically_declare_parameters_from_overrides(true))
+        , config_(load_bridge_config(*this))
+        , history_(config_.obs_frame_size, config_.history_length) {
 
-        rl_base_ = string_or(*this, "rl_base", "/rl");
-
-        joint_config_ = load_joint_config(*this);
-
-        load_action_terms_();
-        load_observation_terms_();
-        load_runtime_parameters_();
-
-        register_status_outputs_();
+        for (const auto& term : config_.action_terms) {
+            action_outputs_.push_back(std::make_unique<OutputInterface<double>>());
+            register_output(term.output, *action_outputs_.back(), 0.0);
+            own_output_paths_.insert(term.output);
+        }
+        register_output(config_.rl_base + "/valid", valid_output_, 0.0);
+        register_output(config_.rl_base + "/healthy", healthy_output_, 0.0);
+        register_output(
+            config_.rl_base + "/action_age", action_age_output_,
+            std::numeric_limits<double>::quiet_NaN());
+        register_output(config_.rl_base + "/obs_seq", obs_seq_output_, std::size_t{0});
+        own_output_paths_.insert(config_.rl_base + "/valid");
+        own_output_paths_.insert(config_.rl_base + "/healthy");
+        own_output_paths_.insert(config_.rl_base + "/action_age");
+        own_output_paths_.insert(config_.rl_base + "/obs_seq");
         setup_topics_();
-
-        action_channel_.resize(action_size_);
-        read_snapshot_.action.assign(action_size_, 0.0);
+        last_actions_.assign(config_.action_size, 0.0);
+        written_.assign(config_.action_size, 0.0);
+        action_channel_.resize(config_.action_size);
+        read_snapshot_.action.assign(config_.action_size, 0.0);
     }
 
     void before_pairing(const OutputInfoMap& output_map) override {
@@ -69,15 +77,15 @@ public:
                     "RlBridge: interface \"" + slot.path
                     + "\" is produced by RlBridge itself (self reference)");
 
-        obs_signature_ = obs_layout_signature(obs_terms_, history_length_);
-        actions_signature_ = actions_layout_signature(action_terms_);
-        layout_hash_ =
-            rmcs_rl::layout_hash(obs_signature_, actions_signature_, obs_size_, action_size_);
+        obs_signature_ = obs_layout_signature(config_.obs_terms, config_.history_length);
+        actions_signature_ = actions_layout_signature(config_.action_terms);
+        layout_hash_ = rmcs_rl::layout_hash(
+            obs_signature_, actions_signature_, config_.obs_size, config_.action_size);
 
         log_layout_();
         RCLCPP_INFO(
-            get_logger(), "contract: obs_size=%zu action_size=%zu policy_rate=%.3f Hz", obs_size_,
-            action_size_, policy_rate_);
+            get_logger(), "contract: obs_size=%zu action_size=%zu policy_rate=%.3f Hz",
+            config_.obs_size, config_.action_size, config_.policy_rate);
         RCLCPP_INFO(
             get_logger(), "layout_hash=%s (obs/action signatures below)",
             hex16(layout_hash_).c_str());
@@ -85,7 +93,7 @@ public:
         RCLCPP_INFO(get_logger(), "  action signature : %s", actions_signature_.c_str());
         RCLCPP_INFO(
             get_logger(), "topics: %s/obs -> %s/action (best_effort, keep_last=1)",
-            rl_base_.c_str(), rl_base_.c_str());
+            config_.rl_base.c_str(), config_.rl_base.c_str());
     }
 
     void update() override {
@@ -101,8 +109,8 @@ public:
         bool seq_ok = false;
         bool finite = true;
         if (has_snapshot) {
-            age = obs_age_of(snapshot.obs_seq, now);
-            seq_ok = (snapshot.obs_seq == pub_seq_) || (snapshot.obs_seq + 1 == pub_seq_);
+            age = timeline_.age(snapshot.obs_seq, now);
+            seq_ok = std::isfinite(age);
             finite = std::all_of(snapshot.action.begin(), snapshot.action.end(), [](double value) {
                 return std::isfinite(value);
             });
@@ -110,10 +118,11 @@ public:
         }
 
         const bool enabled = read_enable_();
-        const bool fresh = has_snapshot && is_finite(age) && age <= max_action_age_;
+        const bool fresh = has_snapshot && is_finite(age) && age <= config_.max_action_age;
         const bool valid = enabled && contract_ok_ && has_snapshot && fresh && seq_ok && finite;
 
-        write_actions(valid, snapshot, action_terms_, invalid_mode_, written_, action_outputs_);
+        write_actions(
+            valid, snapshot, config_.action_terms, config_.invalid_mode, written_, action_outputs_);
 
         if (valid)
             last_actions_ = snapshot.action;
@@ -121,7 +130,7 @@ public:
         *valid_output_ = valid ? 1.0 : 0.0;
         *healthy_output_ = (contract_ok_ && fresh) ? 1.0 : 0.0;
         *action_age_output_ = age;
-        *obs_seq_output_ = pub_seq_;
+        *obs_seq_output_ = timeline_.sequence();
 
         if (valid != last_valid_) {
             if (valid) {
@@ -140,130 +149,16 @@ public:
     }
 
 private:
-    void load_action_terms_() {
-        const auto action_specs = string_array_or(*this, "action_terms");
-        if (action_specs.empty())
-            throw std::invalid_argument("RlBridge: required parameter 'action_terms' is missing");
-        std::unordered_set<std::string> output_paths;
-        std::set<std::size_t> action_indices;
-        for (const auto& spec : action_specs) {
-            auto term = parse_action_term(spec);
-            if (!output_paths.emplace(term.output).second)
-                throw std::invalid_argument(
-                    "RlBridge: two action terms map to the same output "
-                    "interface '"
-                    + term.output + "'");
-            if (!action_indices.emplace(term.index).second)
-                throw std::invalid_argument(
-                    "RlBridge: duplicate action index " + std::to_string(term.index)
-                    + " (each slot must appear exactly once)");
-            action_terms_.push_back(std::move(term));
-        }
-        for (std::size_t i = 0; i < action_terms_.size(); ++i)
-            if (action_terms_[i].index != i)
-                throw std::invalid_argument(
-                    "RlBridge: action indices must form the complete "
-                    "permutation 0.."
-                    + std::to_string(action_terms_.size() - 1) + "; got index="
-                    + std::to_string(action_terms_[i].index) + " at position " + std::to_string(i));
-        action_size_ = action_terms_.size();
-        if (const auto declared = integer_parameter(*this, "rl_action_size");
-            declared.has_value() && static_cast<std::size_t>(*declared) != action_size_)
-            throw std::invalid_argument(
-                "RlBridge: rl_action_size=" + std::to_string(*declared) + " but action_terms has "
-                + std::to_string(action_size_) + " entries");
-        last_actions_.assign(action_size_, 0.0);
-        written_.assign(action_size_, 0.0);
-
-        for (const auto& term : action_terms_) {
-            action_outputs_.push_back(std::make_unique<OutputInterface<double>>());
-            register_output(term.output, *action_outputs_.back(), 0.0);
-            own_output_paths_.insert(term.output);
-        }
-    }
-
-    void load_observation_terms_() {
-        const auto observation_specs = string_array_or(*this, "observation_terms");
-        if (observation_specs.empty())
-            throw std::invalid_argument(
-                "RlBridge: required parameter 'observation_terms' is "
-                "missing");
-        const TermParseContext context{*this, joint_config_, action_size_};
-        for (const auto& spec : observation_specs)
-            obs_terms_.push_back(parse_obs_term(spec, context));
-
-        assign_observation_indices(obs_terms_);
-        obs_frame_size_ = [&] {
-            std::size_t cursor = 0;
-            for (const auto& term : obs_terms_)
-                cursor += term.dim;
-            return cursor;
-        }();
-        const auto history_length = integer_parameter(*this, "history_length").value_or(1);
-        if (history_length < 1 || history_length > 64)
-            throw std::invalid_argument("RlBridge: history_length must be in [1, 64]");
-        history_length_ = static_cast<std::size_t>(history_length);
-        obs_size_ = obs_frame_size_ * history_length_;
-        if (const auto declared = integer_parameter(*this, "rl_obs_size");
-            declared.has_value() && static_cast<std::size_t>(*declared) != obs_size_)
-            throw std::invalid_argument(
-                "RlBridge: rl_obs_size=" + std::to_string(*declared)
-                + " but observation frame/history contract is " + std::to_string(obs_frame_size_)
-                + "x" + std::to_string(history_length_) + "=" + std::to_string(obs_size_));
-    }
-
-    void load_runtime_parameters_() {
-        policy_rate_ = number_or(*this, "policy_rate", 50.0);
-        if (!(policy_rate_ > 0.0) || !is_finite(policy_rate_))
-            throw std::invalid_argument("RlBridge: policy_rate must be finite and > 0");
-        pub_period_ = std::chrono::duration_cast<std::chrono::nanoseconds>(
-            std::chrono::duration<double>(1.0 / policy_rate_));
-        max_action_age_ = number_or(*this, "max_action_age", 2.0 / policy_rate_);
-        if (!(max_action_age_ > 0.0) || !is_finite(max_action_age_))
-            throw std::invalid_argument("RlBridge: max_action_age must be finite and > 0");
-        expected_model_id_ = parse_u64(string_or(*this, "expected_model_id", "0"), "expected_model_id");
-
-        const std::string invalid = string_or(*this, "invalid_value", "nan");
-        if (invalid == "nan")
-            invalid_mode_ = InvalidMode::kNaN;
-        else if (invalid == "zero")
-            invalid_mode_ = InvalidMode::kZero;
-        else if (invalid == "hold")
-            invalid_mode_ = InvalidMode::kHold;
-        else
-            throw std::invalid_argument(
-                "RlBridge: invalid_value must be nan|zero|hold "
-                "(quote it in YAML: invalid_value: \"nan\" — an unquoted "
-                "nan is parsed as a float), got '"
-                + string_or(*this, "invalid_value", "<non-string>") + "'");
-
-        enable_path_ = string_or(*this, "enable_interface", rl_base_ + "/enable");
-        enable_default_ = bool_or(*this, "enable_default", false);
-        reset_path_ = string_or(*this, "reset_interface", "");
-    }
-
-    void register_status_outputs_() {
-        register_output(rl_base_ + "/valid", valid_output_, 0.0);
-        register_output(rl_base_ + "/healthy", healthy_output_, 0.0);
-        register_output(
-            rl_base_ + "/action_age", action_age_output_, std::numeric_limits<double>::quiet_NaN());
-        register_output(rl_base_ + "/obs_seq", obs_seq_output_, std::size_t{0});
-        own_output_paths_.insert(rl_base_ + "/valid");
-        own_output_paths_.insert(rl_base_ + "/healthy");
-        own_output_paths_.insert(rl_base_ + "/action_age");
-        own_output_paths_.insert(rl_base_ + "/obs_seq");
-    }
-
     void setup_topics_() {
         obs_publisher_ = create_publisher<rmcs_rl::msg::Observation>(
-            rl_base_ + "/obs", rclcpp::QoS{rclcpp::KeepLast(1)}.best_effort());
+            config_.rl_base + "/obs", rclcpp::QoS{rclcpp::KeepLast(1)}.best_effort());
         action_subscription_ = create_subscription<rmcs_rl::msg::Action>(
-            rl_base_ + "/action", rclcpp::QoS{rclcpp::KeepLast(1)}.best_effort(),
+            config_.rl_base + "/action", rclcpp::QoS{rclcpp::KeepLast(1)}.best_effort(),
             [this](rmcs_rl::msg::Action::UniquePtr message) { on_action_(std::move(message)); });
     }
 
     void bind_observation_slots_(const OutputInfoMap& output_map) {
-        for (auto& term : obs_terms_) {
+        for (auto& term : config_.obs_terms) {
             switch (term.kind) {
             case TermKind::kConstant:
             case TermKind::kLastAction: break;
@@ -271,11 +166,11 @@ private:
             case TermKind::kJointVel:
             case TermKind::kJointTorque: {
                 for (std::size_t j = 0; j < term.joints.size(); ++j) {
-                    const auto& joint = joint_config_.names[term.joints[j]];
+                    const auto& joint = config_.joint_config.names[term.joints[j]];
                     const char field = term.kind == TermKind::kJointPos ? 'a'
                                      : term.kind == TermKind::kJointVel ? 'v'
                                                                         : 't';
-                    const auto path = joint_path(joint_config_, joint, field);
+                    const auto path = joint_path(config_.joint_config, joint, field);
                     term.joint_slots.push_back(acquire_slot(
                         *this, path, {Binding::kDouble}, true, output_map, slots_, "joint term"));
                 }
@@ -289,10 +184,7 @@ private:
                     switch (term.take) {
                     case Take::kScalar:
                         candidates = {
-                            Binding::kDouble,
-                            Binding::kBool,
-                            Binding::kInt,
-                            Binding::kSize};
+                            Binding::kDouble, Binding::kBool, Binding::kInt, Binding::kSize};
                         break;
                     case Take::kComponent:
                     case Take::kVector:
@@ -311,14 +203,14 @@ private:
     }
 
     void bind_control_slots_(const OutputInfoMap& output_map) {
-        if (!enable_path_.empty())
+        if (!config_.enable_path.empty())
             enable_slot_ = acquire_slot(
-                *this, enable_path_, {Binding::kBool, Binding::kDouble}, false, output_map, slots_,
-                "enable interface");
+                *this, config_.enable_path, {Binding::kBool, Binding::kDouble}, false, output_map,
+                slots_, "enable interface");
 
-        if (!reset_path_.empty())
+        if (!config_.reset_path.empty())
             reset_slot_ = acquire_slot(
-                *this, reset_path_, {Binding::kSize, Binding::kInt, Binding::kDouble}, false,
+                *this, config_.reset_path, {Binding::kSize, Binding::kInt, Binding::kDouble}, false,
                 output_map, slots_, "reset interface");
     }
 
@@ -333,23 +225,13 @@ private:
     }
 
     void maybe_publish_observation_(std::chrono::steady_clock::time_point now) {
-        if (pub_started_ && now - last_pub_time_ < pub_period_)
+        if (!timeline_.due(now, config_.pub_period))
             return;
 
         std::vector<double> obs;
-        if (build_observation(obs_terms_, slots_, last_actions_, obs_size_, obs)) {
-            if (history_.empty())
-                history_.assign(history_length_, obs);
-            else {
-                history_.pop_front();
-                history_.push_back(obs);
-            }
-            std::vector<double> stacked;
-            stacked.reserve(obs_size_);
-            for (const auto& frame : history_)
-                stacked.insert(stacked.end(), frame.begin(), frame.end());
-            publish_observation_(stacked, now);
-            ++pub_ok_count_;
+        if (build_observation(
+                config_.obs_terms, slots_, last_actions_, config_.obs_frame_size, obs)) {
+            publish_observation_(history_.append(obs), now);
         } else {
             ++obs_invalid_count_;
             RCLCPP_WARN_THROTTLE(
@@ -362,11 +244,11 @@ private:
 
     bool read_enable_() const {
         if (enable_slot_ == kNoSlot)
-            return enable_default_;
+            return config_.enable_default;
         double raw = 0.0;
         if (!read_double(slots_[enable_slot_], raw))
-            return enable_default_;
-        return raw != 0.0;
+            return config_.enable_default;
+        return std::isfinite(raw) && raw != 0.0;
     }
 
     void check_contract_(const ActionSnapshot& snapshot) {
@@ -379,19 +261,20 @@ private:
                     "(policy process and bridge disagree; refusing to output actions)",
                     hex16(snapshot.layout_hash).c_str(), hex16(layout_hash_).c_str());
             }
-        } else if (expected_model_id_ != 0 && snapshot.model_id != expected_model_id_) {
+        } else if (
+            config_.expected_model_id != 0 && snapshot.model_id != config_.expected_model_id) {
             if (contract_ok_) {
                 contract_ok_ = false;
                 RCLCPP_FATAL(
                     get_logger(), "model mismatch: action model_id=%s != expected_model_id=%s",
-                    hex16(snapshot.model_id).c_str(), hex16(expected_model_id_).c_str());
+                    hex16(snapshot.model_id).c_str(), hex16(config_.expected_model_id).c_str());
             }
         }
     }
 
     void log_layout_() const {
-        RCLCPP_INFO(get_logger(), "observation layout (obs_size=%zu):", obs_size_);
-        for (const auto& term : obs_terms_) {
+        RCLCPP_INFO(get_logger(), "observation layout (obs_size=%zu):", config_.obs_size);
+        for (const auto& term : config_.obs_terms) {
             std::ostringstream line;
             line << "  [" << term.index << ":" << term.index + term.dim << ") " << term.id
                  << "  scale=" << format_number(term.scale);
@@ -409,8 +292,8 @@ private:
             }
             RCLCPP_INFO(get_logger(), "%s", line.str().c_str());
         }
-        RCLCPP_INFO(get_logger(), "action layout (action_size=%zu):", action_size_);
-        for (const auto& term : action_terms_) {
+        RCLCPP_INFO(get_logger(), "action layout (action_size=%zu):", config_.action_size);
+        for (const auto& term : config_.action_terms) {
             std::ostringstream line;
             line << "  #" << term.index << " " << term.id << " -> " << term.output;
             if (term.scale != 1.0)
@@ -423,47 +306,28 @@ private:
         const std::vector<double>& obs, std::chrono::steady_clock::time_point now) {
         rmcs_rl::msg::Observation message;
         message.header.stamp = get_clock()->now();
-        message.header.frame_id = "";
-        message.obs_seq = ++pub_seq_;
+        message.obs_seq = timeline_.publish(now);
         message.layout_hash = layout_hash_;
         message.obs = obs;
         obs_publisher_->publish(message);
-
-        prev_pub_seq_ = pub_seq_ - 1;
-        prev_pub_time_ = last_pub_time_;
-        last_pub_time_ = now;
-        pub_started_ = true;
     }
 
     void on_action_(rmcs_rl::msg::Action::UniquePtr message) {
-        if (message->action.size() != action_size_) {
+        if (message->action.size() != config_.action_size) {
             RCLCPP_ERROR_THROTTLE(
                 get_logger(), *get_clock(), 1000, "ignoring action with %zu values (expected %zu)",
-                message->action.size(), action_size_);
+                message->action.size(), config_.action_size);
             return;
         }
         action_channel_.store(*message);
     }
 
-    double obs_age_of(std::uint64_t obs_seq, std::chrono::steady_clock::time_point now) const {
-        if (!pub_started_)
-            return std::numeric_limits<double>::quiet_NaN();
-        if (obs_seq == pub_seq_)
-            return std::chrono::duration<double>(now - last_pub_time_).count();
-        if (obs_seq + 1 == pub_seq_)
-            return std::chrono::duration<double>(now - prev_pub_time_).count();
-        return std::numeric_limits<double>::quiet_NaN();
-    }
-
     void reset_runtime_() {
         reset_action_state(last_actions_, written_);
-        history_.clear();
-        pub_started_ = false;
-        prev_pub_seq_ = 0;
+        history_.reset();
+        timeline_.reset();
     }
 
-    // Interface storage is kept before configuration and runtime state so the component wiring
-    // remains visible at the class boundary.
     std::vector<Slot> slots_;
     std::vector<std::unique_ptr<OutputInterface<double>>> action_outputs_;
 
@@ -472,25 +336,9 @@ private:
     OutputInterface<double> action_age_output_{};
     OutputInterface<std::size_t> obs_seq_output_{};
 
-    JointConfig joint_config_;
-
-    std::vector<ObsTerm> obs_terms_;
-    std::vector<ActionTerm> action_terms_;
+    BridgeConfig config_;
     std::unordered_set<std::string> own_output_paths_;
 
-    std::size_t obs_size_ = 0;
-    std::size_t obs_frame_size_ = 0;
-    std::size_t history_length_ = 1;
-    std::size_t action_size_ = 0;
-
-    std::string rl_base_;
-    double policy_rate_ = 50.0;
-    double max_action_age_ = 0.04;
-    std::uint64_t expected_model_id_ = 0;
-    InvalidMode invalid_mode_ = InvalidMode::kNaN;
-    std::string enable_path_;
-    bool enable_default_ = false;
-    std::string reset_path_;
     std::size_t enable_slot_ = kNoSlot;
     std::size_t reset_slot_ = kNoSlot;
 
@@ -500,17 +348,11 @@ private:
 
     std::vector<double> last_actions_;
     std::vector<double> written_;
-    std::deque<std::vector<double>> history_;
+    ObservationHistory history_;
 
-    std::chrono::nanoseconds pub_period_{std::chrono::milliseconds(20)};
-    std::chrono::steady_clock::time_point last_pub_time_{};
-    std::chrono::steady_clock::time_point prev_pub_time_{};
-    bool pub_started_ = false;
-    std::uint64_t pub_seq_ = 0;
-    std::uint64_t prev_pub_seq_ = 0;
+    ObservationTimeline timeline_;
     std::uint64_t last_reset_count_ = 0;
     std::uint64_t obs_invalid_count_ = 0;
-    std::uint64_t pub_ok_count_ = 0;
     bool contract_ok_ = true;
     bool last_valid_ = false;
 

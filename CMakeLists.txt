@@ -51,8 +51,10 @@ endif()
 
 ament_auto_add_library(rmcs_rl_bridge SHARED
     src/rl_bridge.cpp
+    src/rl_bridge/config.cpp
+    src/rl_bridge/observation_history.cpp
     src/rl_bridge/utility.cpp
-    src/rl_bridge/parameters.cpp
+    src/parameters.cpp
     src/rl_bridge/joint_config.cpp
     src/rl_bridge/term_parser.cpp
     src/rl_bridge/interface_binding.cpp
@@ -68,6 +70,9 @@ target_link_libraries(rmcs_rl_bridge ${cpp_typesupport_target})
 
 ament_auto_add_executable(policy_server
     src/policy_server.cpp
+    src/policy/policy_model.cpp
+    src/policy/onnx_runtime.cpp
+    src/parameters.cpp
 )
 target_include_directories(policy_server PRIVATE
     ${ONNXRUNTIME_ROOT_DIR}/include
@@ -80,8 +85,20 @@ install(TARGETS policy_server DESTINATION lib/${PROJECT_NAME})
 pluginlib_export_plugin_description_file(rmcs_executor plugins.xml)
 
 install(DIRECTORY models DESTINATION share/${PROJECT_NAME})
-install(DIRECTORY config DESTINATION share/${PROJECT_NAME})
 install(DIRECTORY launch DESTINATION share/${PROJECT_NAME})
+
+if(BUILD_TESTING)
+    find_package(ament_cmake_gtest REQUIRED)
+    ament_add_gtest(runtime_test
+        test/runtime_test.cpp
+        src/policy/policy_model.cpp
+        src/policy/onnx_runtime.cpp
+    )
+    target_include_directories(runtime_test PRIVATE src ${ONNXRUNTIME_ROOT_DIR}/include)
+    target_link_libraries(runtime_test rmcs_rl_bridge ${ONNXRUNTIME_ROOT_DIR}/lib/libonnxruntime.so)
+    target_compile_definitions(runtime_test PRIVATE
+        RMCS_RL_IDENTITY_FIXTURE="${PROJECT_SOURCE_DIR}/test/data/normalized_identity.onnx")
+endif()
 
 ament_export_dependencies(rosidl_default_runtime)
 

@@ -1,4 +1,4 @@
-#include <rmcs_rl/rl_bridge/parameters.hpp>
+#include <rmcs_rl/parameters.hpp>
 
 #include <cmath>
 #include <stdexcept>
@@ -17,7 +17,7 @@ std::optional<double> number_parameter(rclcpp::Node& node, const std::string& na
     case rclcpp::ParameterType::PARAMETER_DOUBLE: return parameter.as_double();
     case rclcpp::ParameterType::PARAMETER_INTEGER: return static_cast<double>(parameter.as_int());
     case rclcpp::ParameterType::PARAMETER_NOT_SET: return std::nullopt;
-    default: throw std::invalid_argument("RlBridge: parameter '" + name + "' must be a number");
+    default: throw std::invalid_argument("rmcs_rl: parameter '" + name + "' must be a number");
     }
 }
 
@@ -26,7 +26,7 @@ double number_or(rclcpp::Node& node, const std::string& name, double fallback) {
     if (!value.has_value())
         return fallback;
     if (!std::isfinite(*value))
-        throw std::invalid_argument("RlBridge: parameter '" + name + "' is not finite");
+        throw std::invalid_argument("rmcs_rl: parameter '" + name + "' is not finite");
     return *value;
 }
 
@@ -40,8 +40,8 @@ std::uint64_t parse_u64(const std::string& text, const std::string& name) {
         return static_cast<std::uint64_t>(value);
     } catch (const std::exception&) {
         throw std::invalid_argument(
-            "RlBridge: parameter '" + name
-            + "' must be a decimal or 0x-prefixed 64-bit id, got '" + text + "'");
+            "rmcs_rl: parameter '" + name + "' must be a decimal or 0x-prefixed 64-bit id, got '"
+            + text + "'");
     }
 }
 
@@ -51,7 +51,7 @@ std::optional<std::int64_t> integer_parameter(rclcpp::Node& node, const std::str
         return std::nullopt;
     const auto rounded = std::llround(*value);
     if (std::abs(*value - static_cast<double>(rounded)) > 1e-9)
-        throw std::invalid_argument("RlBridge: parameter '" + name + "' must be an integer");
+        throw std::invalid_argument("rmcs_rl: parameter '" + name + "' must be an integer");
     return rounded;
 }
 
@@ -66,7 +66,7 @@ bool bool_or(rclcpp::Node& node, const std::string& name, bool fallback) {
     if (parameter.get_type() == rclcpp::ParameterType::PARAMETER_NOT_SET)
         return fallback;
     if (parameter.get_type() != rclcpp::ParameterType::PARAMETER_BOOL)
-        throw std::invalid_argument("RlBridge: parameter '" + name + "' must be a boolean");
+        throw std::invalid_argument("rmcs_rl: parameter '" + name + "' must be a boolean");
     return parameter.as_bool();
 }
 
@@ -81,7 +81,7 @@ std::string string_or(rclcpp::Node& node, const std::string& name, const std::st
     if (parameter.get_type() == rclcpp::ParameterType::PARAMETER_NOT_SET)
         return fallback;
     if (parameter.get_type() != rclcpp::ParameterType::PARAMETER_STRING)
-        throw std::invalid_argument("RlBridge: parameter '" + name + "' must be a string");
+        throw std::invalid_argument("rmcs_rl: parameter '" + name + "' must be a string");
     return parameter.as_string();
 }
 
@@ -91,7 +91,7 @@ std::vector<std::string> string_array_or(rclcpp::Node& node, const std::string& 
         if (!node.get_parameter(name, value))
             return {};
     } catch (const std::exception&) {
-        throw std::invalid_argument("RlBridge: parameter '" + name + "' must be a list of strings");
+        throw std::invalid_argument("rmcs_rl: parameter '" + name + "' must be a list of strings");
     }
     return value;
 }

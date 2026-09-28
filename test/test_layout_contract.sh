@@ -3,8 +3,11 @@ set -u
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PKG="$(cd "$HERE/.." && pwd)"
+TOOLS="$PKG/tool"
 PY="${PYTHON:-python3}"
-WORK="${TMPDIR:-/tmp}"
+WORK="$(mktemp -d "${TMPDIR:-/tmp}/rmcs-rl-contract.XXXXXX")"
+trap 'rm -rf "$WORK"' EXIT
+cd "$WORK"
 FIXTURE="$WORK/x.yaml"
 FIXTURE_TYPES="$WORK/x_types.yaml"
 MODEL="$WORK/policy.onnx"
@@ -71,18 +74,18 @@ sed -e 's|path=/chassis/control_height |path=/chassis/control_height type=scalar
     "$FIXTURE" >"$FIXTURE_TYPES"
 
 echo "== 1. 词条语法自检（rl_layout.py）=="
-run_expect 0 "rl_layout self-test" "$PY" "$HERE/rl_layout.py"
+run_expect 0 "rl_layout self-test" "$PY" "$HERE/test_layout.py"
 expect_msg "rl_layout self-test OK" "self-test OK"
 
 echo "== 2. 生成 → 盖章 → 校验（正例必须 PASS）=="
 run_expect 0 "gen_synthetic_policy --from-config" \
     "$PY" "$HERE/gen_synthetic_policy.py" --from-config "$FIXTURE" -o "$MODEL"
 run_expect 0 "stamp_layout_metadata" \
-    "$PY" "$HERE/stamp_layout_metadata.py" --model "$MODEL" --from-config "$FIXTURE"
+    "$PY" "$TOOLS/stamp_layout_metadata.py" --model "$MODEL" --from-config "$FIXTURE"
 cat "$LOG"
 SHA_BEFORE="$(sha256sum "$MODEL" | cut -d' ' -f1)"
 run_expect 0 "stamp_layout_metadata（幂等重跑）" \
-    "$PY" "$HERE/stamp_layout_metadata.py" --model "$MODEL" --from-config "$FIXTURE"
+    "$PY" "$TOOLS/stamp_layout_metadata.py" --model "$MODEL" --from-config "$FIXTURE"
 SHA_AFTER="$(sha256sum "$MODEL" | cut -d' ' -f1)"
 if [ "$SHA_BEFORE" = "$SHA_AFTER" ]; then
     ok "盖章幂等（文件字节不变）"
@@ -90,14 +93,14 @@ else
     bad "盖章非幂等：$SHA_BEFORE != $SHA_AFTER"
 fi
 run_expect 0 "check_policy_contract（正例）" \
-    "$PY" "$HERE/check_policy_contract.py" "$MODEL" --config "$FIXTURE"
+    "$PY" "$TOOLS/check_policy_contract.py" "$MODEL" --config "$FIXTURE"
 cat "$LOG"
 expect_msg "== SUMMARY: PASS ==" "SUMMARY PASS"
 
 echo "== 3. 逃生口 type= 不改变布局指纹 =="
-SIG_PLAIN="$("$PY" "$HERE/check_policy_contract.py" --print-layout --config "$FIXTURE" \
+SIG_PLAIN="$("$PY" "$TOOLS/check_policy_contract.py" --print-layout --config "$FIXTURE" \
     | grep -E 'obs_signature|action_signature|layout_hash')"
-SIG_TYPES="$("$PY" "$HERE/check_policy_contract.py" --print-layout --config "$FIXTURE_TYPES" \
+SIG_TYPES="$("$PY" "$TOOLS/check_policy_contract.py" --print-layout --config "$FIXTURE_TYPES" \
     | grep -E 'obs_signature|action_signature|layout_hash')"
 if [ -n "$SIG_PLAIN" ] && [ "$SIG_PLAIN" = "$SIG_TYPES" ]; then
     ok "带/不带 type= 的规范串与 layout_hash 完全一致"
@@ -118,7 +121,7 @@ model.metadata_props.extend(keep)
 onnx.save(model, dst)
 PYEOF
 run_expect 1 "(a) metadata 缺 rmcs_obs_layout" \
-    "$PY" "$HERE/check_policy_contract.py" "$WORK/policy_neg_a.onnx" --config "$FIXTURE"
+    "$PY" "$TOOLS/check_policy_contract.py" "$WORK/policy_neg_a.onnx" --config "$FIXTURE"
 expect_msg "rmcs_obs_layout" "缺键提示"
 
 "$PY" - "$FIXTURE" "$WORK/x_swapped.yaml" <<'PYEOF'
@@ -137,7 +140,7 @@ doc["rl_bridge"]["ros__parameters"]["observation_terms"] = terms
 yaml.safe_dump(doc, open(dst, "w", encoding="utf-8"), allow_unicode=True, sort_keys=False)
 PYEOF
 run_expect 1 "(b) 真·换序（index 位置不变，语义换位）" \
-    "$PY" "$HERE/check_policy_contract.py" "$MODEL" --config "$WORK/x_swapped.yaml"
+    "$PY" "$TOOLS/check_policy_contract.py" "$MODEL" --config "$WORK/x_swapped.yaml"
 expect_msg "rmcs_obs_layout" "签名不一致提示"
 
 "$PY" - "$FIXTURE" "$WORK/x_index_clash.yaml" <<'PYEOF'
@@ -149,7 +152,7 @@ terms[0], terms[1] = terms[1], terms[0]          # 只换顺序，index= 保持�
 yaml.safe_dump(doc, open(dst, "w", encoding="utf-8"), allow_unicode=True, sort_keys=False)
 PYEOF
 run_expect 1 "(b2) 换序但不改 index= → index 断言" \
-    "$PY" "$HERE/check_policy_contract.py" "$MODEL" --config "$WORK/x_index_clash.yaml"
+    "$PY" "$TOOLS/check_policy_contract.py" "$MODEL" --config "$WORK/x_index_clash.yaml"
 expect_msg "index=" "index 断言提示"
 
 "$PY" - "$FIXTURE" "$WORK/x_scale.yaml" <<'PYEOF'
@@ -161,7 +164,7 @@ terms[5] = terms[5].replace("scale=0.1", "scale=0.2")   # joint_vel 缩放
 yaml.safe_dump(doc, open(dst, "w", encoding="utf-8"), allow_unicode=True, sort_keys=False)
 PYEOF
 run_expect 1 "(c) 改一个 scale=" \
-    "$PY" "$HERE/check_policy_contract.py" "$MODEL" --config "$WORK/x_scale.yaml"
+    "$PY" "$TOOLS/check_policy_contract.py" "$MODEL" --config "$WORK/x_scale.yaml"
 expect_msg "policy_layout_hash" "hash 不一致提示"
 
 "$PY" - "$MODEL" "$WORK/policy_neg_d.onnx" <<'PYEOF'
@@ -174,7 +177,7 @@ for prop in model.metadata_props:
 onnx.save(model, dst)
 PYEOF
 run_expect 1 "(d) policy_layout_hash 写错" \
-    "$PY" "$HERE/check_policy_contract.py" "$WORK/policy_neg_d.onnx" --config "$FIXTURE"
+    "$PY" "$TOOLS/check_policy_contract.py" "$WORK/policy_neg_d.onnx" --config "$FIXTURE"
 expect_msg "policy_layout_hash" "hash 校验失败提示"
 
 "$PY" - "$FIXTURE" "$WORK/x_actsize.yaml" <<'PYEOF'
@@ -185,7 +188,7 @@ doc["rl_bridge"]["ros__parameters"]["rl_action_size"] = 5   # 词条是 6 条
 yaml.safe_dump(doc, open(dst, "w", encoding="utf-8"), allow_unicode=True, sort_keys=False)
 PYEOF
 run_expect 1 "(e) rl_action_size != 动作词条数" \
-    "$PY" "$HERE/check_policy_contract.py" "$MODEL" --config "$WORK/x_actsize.yaml"
+    "$PY" "$TOOLS/check_policy_contract.py" "$MODEL" --config "$WORK/x_actsize.yaml"
 expect_msg "rl_action_size" "尺寸不一致提示"
 
 echo

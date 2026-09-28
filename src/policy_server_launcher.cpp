@@ -17,13 +17,10 @@
 #include <rclcpp/logging.hpp>
 #include <rclcpp/node.hpp>
 #include <rmcs_executor/component.hpp>
+#include <rmcs_rl/parameters.hpp>
 
 namespace rmcs_rl {
 
-// Spawns and supervises an independent policy_server child process for the executor lifetime:
-//   - the component only exists in RL configs; non-RL robots are unaffected;
-//   - the child sets PR_SET_PDEATHSIG so the kernel reaps it when executor exits/crashes;
-//   - update() does a low-frequency waitpid(WNOHANG) poll with optional backoff restart.
 class PolicyServerLauncher
     : public rmcs_executor::Component
     , public rclcpp::Node {
@@ -32,11 +29,11 @@ public:
         : Node(
               get_component_name(),
               rclcpp::NodeOptions{}.automatically_declare_parameters_from_overrides(true)) {
-        autostart_ = bool_or_("autostart", true);
-        respawn_ = bool_or_("respawn", true);
-        respawn_delay_ = number_or_("respawn_delay", 1.0);
-        poll_interval_ = number_or_("poll_interval", 0.5);
-        params_file_ = string_or_("params_file", "");
+        autostart_ = bool_or(*this, "autostart", true);
+        respawn_ = bool_or(*this, "respawn", true);
+        respawn_delay_ = number_or(*this, "respawn_delay", 1.0);
+        poll_interval_ = number_or(*this, "poll_interval", 0.5);
+        params_file_ = string_or(*this, "params_file", "");
 
         resolve_paths_();
     }
@@ -62,35 +59,6 @@ public:
 
 private:
     using SteadyClock = std::chrono::steady_clock;
-
-    std::string string_or_(const std::string& name, const std::string& fallback) const {
-        if (!has_parameter(name))
-            return fallback;
-        const auto parameter = get_parameter(name);
-        if (parameter.get_type() != rclcpp::ParameterType::PARAMETER_STRING)
-            return fallback;
-        return parameter.as_string();
-    }
-
-    double number_or_(const std::string& name, double fallback) const {
-        if (!has_parameter(name))
-            return fallback;
-        const auto parameter = get_parameter(name);
-        if (parameter.get_type() == rclcpp::ParameterType::PARAMETER_DOUBLE)
-            return parameter.as_double();
-        if (parameter.get_type() == rclcpp::ParameterType::PARAMETER_INTEGER)
-            return static_cast<double>(parameter.as_int());
-        return fallback;
-    }
-
-    bool bool_or_(const std::string& name, bool fallback) const {
-        if (!has_parameter(name))
-            return fallback;
-        const auto parameter = get_parameter(name);
-        if (parameter.get_type() != rclcpp::ParameterType::PARAMETER_BOOL)
-            return fallback;
-        return parameter.as_bool();
-    }
 
     void resolve_paths_() {
         try {
@@ -229,7 +197,8 @@ private:
 
         ::kill(pid, SIGKILL);
         ::waitpid(pid, nullptr, 0);
-        RCLCPP_WARN(get_logger(), "policy_server (pid=%d) did not stop, killed", static_cast<int>(pid));
+        RCLCPP_WARN(
+            get_logger(), "policy_server (pid=%d) did not stop, killed", static_cast<int>(pid));
     }
 
     bool autostart_ = true;
