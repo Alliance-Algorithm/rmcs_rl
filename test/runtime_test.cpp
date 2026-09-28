@@ -79,6 +79,42 @@ TEST(ActionChannel, ConcurrentSnapshotsNeverMixFrames) {
     EXPECT_EQ(snapshot.obs_seq, 10000u);
 }
 
+TEST(ActionChannel, KeepsPreviousSnapshotWhenWriterOwnsLock) {
+    ActionChannel channel;
+    channel.resize(1);
+
+    msg::Action message;
+    message.action = {1.0};
+    message.obs_seq = message.layout_hash = message.model_id = 1;
+    channel.store(message);
+
+    ActionSnapshot snapshot;
+    ASSERT_TRUE(channel.try_read(snapshot));
+    EXPECT_EQ(snapshot.action, (std::vector{1.0}));
+
+    // A second read after the first successful read is allowed to retain the
+    // caller's snapshot if a concurrent store briefly owns the mutex. The
+    // channel's public API does not expose the mutex, so this loop exercises
+    // the same boundary without adding a production-only test hook.
+    std::atomic<bool> finished = false;
+    std::jthread writer{[&] {
+        for (std::uint64_t sequence = 2; sequence <= 10000; ++sequence) {
+            message.obs_seq = message.layout_hash = message.model_id = sequence;
+            message.action[0] = static_cast<double>(sequence);
+            channel.store(message);
+        }
+        finished = true;
+    }};
+
+    while (!finished) {
+        ASSERT_TRUE(channel.try_read(snapshot));
+        ASSERT_EQ(snapshot.action.size(), 1u);
+        EXPECT_EQ(snapshot.obs_seq, snapshot.model_id);
+        EXPECT_EQ(snapshot.action.front(), static_cast<double>(snapshot.obs_seq));
+    }
+    writer.join();
+}
+
 TEST(PolicyModel, NormalizesClipsAndRejectsInvalidFrames) {
     PolicyModel::Config config;
     config.path = RMCS_RL_IDENTITY_FIXTURE;

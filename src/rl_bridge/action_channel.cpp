@@ -10,6 +10,7 @@ void ActionChannel::resize(std::size_t action_size) {
     const std::lock_guard lock{mutex_};
     incoming_.action.assign(action_size, 0.0);
     received_ = false;
+    has_read_.store(false, std::memory_order_release);
 }
 
 void ActionChannel::store(const rmcs_rl::msg::Action& message) {
@@ -27,9 +28,14 @@ bool ActionChannel::try_read(ActionSnapshot& snapshot) {
     // The executor must never wait for the ROS callback. A seqlock cannot protect
     // concurrent reads/writes of a non-atomic vector under the C++ memory model.
     const std::unique_lock lock{mutex_, std::try_to_lock};
-    if (!lock.owns_lock() || !received_)
+    if (!lock.owns_lock())
+        // Keep the caller's previous snapshot. The bridge still checks its age,
+        // sequence and contract before allowing it to drive outputs.
+        return has_read_.load(std::memory_order_acquire);
+    if (!received_)
         return false;
     snapshot = incoming_;
+    has_read_.store(true, std::memory_order_release);
     return true;
 }
 

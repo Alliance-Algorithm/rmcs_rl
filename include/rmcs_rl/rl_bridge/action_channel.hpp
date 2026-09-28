@@ -1,5 +1,6 @@
 #pragma once
 
+#include <atomic>
 #include <cstddef>
 #include <memory>
 #include <mutex>
@@ -23,6 +24,7 @@ private:
     ActionSnapshot incoming_;
     std::mutex mutex_;
     bool received_ = false;
+    std::atomic<bool> has_read_ = false;
 };
 
 void write_actions(
