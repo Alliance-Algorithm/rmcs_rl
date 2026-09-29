@@ -14,9 +14,9 @@
   rmcs_obs_mean/std    可选（--obs-mean/--obs-std，长度必须 == rl_obs_size）
   rmcs_obs_clip        可选单浮点（--obs-clip）
   rmcs_action_clip     可选单浮点（--action-clip）
-  rmcs_model_type      可选结构标识 mlp/transformer/generic（--model-type）
-  rmcs_history_length  可选序列长度（Transformer 或带历史帧 MLP）
-  rmcs_obs_frame_size  可选单帧维度
+  rmcs_model_type      可选结构标识 mlp/transformer/generic（--model-type；缺省由部署端按 rank 推断）
+  rmcs_history_length  序列长度（缺省取 YAML history_length，部署端据此强制 模型T==history）
+  rmcs_obs_frame_size  单帧观测维度（缺省由 rl_obs_size/history_length 推导）
 
 用法：
   python3 stamp_layout_metadata.py --model policy.onnx --from-config deploy.yaml
@@ -91,19 +91,14 @@ def main() -> None:
                 raise layout.LayoutError(f"{option}={value!r} 必须是有限正数")
 
         history_length = layout.history_length(args.config, args.node)
-        sequence_length = args.sequence_length if args.sequence_length is not None else (
-            history_length if args.model_type in ("mlp", "transformer") else None)
+        sequence_length = args.sequence_length if args.sequence_length is not None else history_length
         feature_size = args.feature_size if args.feature_size is not None else (
-            obs_size // history_length if args.model_type in ("mlp", "transformer") else None)
-        if feature_size is None and sequence_length is not None and obs_size % sequence_length == 0:
-            feature_size = obs_size // sequence_length
-        if sequence_length is not None and sequence_length < 1:
-            raise layout.LayoutError("--sequence-length 必须 >= 1")
-        if feature_size is not None and feature_size < 1:
-            raise layout.LayoutError("--feature-size 必须 >= 1")
-        if sequence_length is not None and feature_size is None:
-            raise layout.LayoutError("给出 --sequence-length 时必须能推导或指定 --feature-size")
-        if sequence_length is not None and sequence_length * feature_size != obs_size:
+            obs_size // history_length)
+        if sequence_length < 1:
+            raise layout.LayoutError(f"--sequence-length 必须 >= 1")
+        if feature_size < 1:
+            raise layout.LayoutError(f"--feature-size 必须 >= 1")
+        if sequence_length * feature_size != obs_size:
             raise layout.LayoutError(
                 f"sequence_length * feature_size={sequence_length * feature_size} != rl_obs_size={obs_size}")
 

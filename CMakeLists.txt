@@ -97,7 +97,10 @@ if(BUILD_TESTING)
     target_include_directories(runtime_test PRIVATE src ${ONNXRUNTIME_ROOT_DIR}/include)
     target_link_libraries(runtime_test rmcs_rl_bridge ${ONNXRUNTIME_ROOT_DIR}/lib/libonnxruntime.so)
     target_compile_definitions(runtime_test PRIVATE
-        RMCS_RL_IDENTITY_FIXTURE="${PROJECT_SOURCE_DIR}/test/data/normalized_identity.onnx")
+        RMCS_RL_IDENTITY_FIXTURE="${PROJECT_SOURCE_DIR}/test/data/normalized_identity.onnx"
+        RMCS_RL_SEQ_FIXTURE="${PROJECT_SOURCE_DIR}/test/data/seq_identity.onnx"
+        RMCS_RL_SEQ_MISMATCH_FIXTURE="${PROJECT_SOURCE_DIR}/test/data/seq_history_mismatch.onnx"
+        RMCS_RL_EXTRA_FIXTURE="${PROJECT_SOURCE_DIR}/test/data/extra_input_identity.onnx")
 endif()
 
 ament_export_dependencies(rosidl_default_runtime)

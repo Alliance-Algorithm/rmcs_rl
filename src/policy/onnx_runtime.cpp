@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cmath>
 #include <numeric>
 #include <stdexcept>
 
@@ -56,25 +57,51 @@ OnnxRuntime::OnnxRuntime(const Config& config)
     options.SetInterOpNumThreads(1);
     session_ = Ort::Session{env_, config.model_path.c_str(), options};
 
-    if (session_.GetInputCount() != 1 || session_.GetOutputCount() != 1)
+    if (session_.GetOutputCount() != 1)
+        throw std::invalid_argument("model must have exactly one output");
+    const std::size_t input_count = session_.GetInputCount();
+    if (input_count == 0)
+        throw std::invalid_argument("model must have at least one input");
+
+    input_names_.reserve(input_count);
+    std::size_t primary_index = input_count; // sentinel: not found
+    for (std::size_t index = 0; index < input_count; ++index) {
+        const auto actual_input = session_.GetInputNameAllocated(index, allocator_);
+        input_names_.emplace_back(actual_input.get());
+        if (input_names_.back() == input_name_)
+            primary_index = index;
+    }
+    if (primary_index == input_count) {
+        std::string listing;
+        for (std::size_t index = 0; index < input_count; ++index)
+            listing += (index == 0 ? "" : ", ") + input_names_[index];
         throw std::invalid_argument(
-            "model must have exactly one runtime input and one output; multi-input models need a future adapter");
-    const auto actual_input = session_.GetInputNameAllocated(0, allocator_);
+            "primary input '" + input_name_ + "' not found; model inputs: [" + listing + "]");
+    }
     const auto actual_output = session_.GetOutputNameAllocated(0, allocator_);
-    if (actual_input.get() != input_name_ || actual_output.get() != output_name_)
+    if (actual_output.get() != output_name_)
         throw std::invalid_argument(
-            "tensor names must be '" + input_name_ + "' / '" + output_name_ + "', got '"
-            + actual_input.get() + "' / '" + actual_output.get() + "'");
+            "output tensor must be named '" + output_name_ + "', got '" + actual_output.get()
+            + "'");
+    for (std::size_t index = 0; index < input_count; ++index) {
+        const auto input_type = session_.GetInputTypeInfo(index);
+        if (input_type.GetONNXType() != ONNX_TYPE_TENSOR)
+            throw std::invalid_argument(
+                "input '" + input_names_[index] + "' must be a tensor");
+        const auto input_info = input_type.GetTensorTypeAndShapeInfo();
+        if (input_info.GetElementType() != ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT)
+            throw std::invalid_argument(
+                "input '" + input_names_[index] + "' element type must be float32");
+    }
 
     // Keep TypeInfo alive while reading the TensorTypeAndShapeInfo. The
     // latter is a view into TypeInfo in ONNX Runtime; chaining a temporary
     // here can read freed type metadata on some runtime builds.
-    const auto input_type = session_.GetInputTypeInfo(0);
+    const auto input_type = session_.GetInputTypeInfo(primary_index);
     const auto output_type = session_.GetOutputTypeInfo(0);
     const auto input_info = input_type.GetTensorTypeAndShapeInfo();
     const auto output_info = output_type.GetTensorTypeAndShapeInfo();
-    if (input_info.GetElementType() != ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT
-        || output_info.GetElementType() != ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT)
+    if (output_info.GetElementType() != ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT)
         throw std::invalid_argument("tensor element type must be float32");
 
     const auto raw_input_shape = input_info.GetShape();
@@ -169,7 +196,12 @@ OnnxRuntime::OnnxRuntime(const Config& config)
                 "rank-3 input needs concrete sequence/feature dimensions or sequence_length/feature_size");
         if ((declared_sequence != 0 && declared_sequence != sequence)
             || (declared_feature != 0 && declared_feature != feature))
-            throw std::invalid_argument("configured sequence/feature dimensions do not match model");
+            throw std::invalid_argument(
+                "model input dims (T=" + std::to_string(declared_sequence)
+                + ", F=" + std::to_string(declared_feature) + ") do not match expected (T="
+                + std::to_string(sequence) + ", F=" + std::to_string(feature)
+                + ") from sequence_length/feature_size or rmcs_history_length/rmcs_obs_frame_size "
+                  "(model sequence must equal bridge history_length)");
         if (expected_observation != 0 && sequence * feature != expected_observation)
             throw std::invalid_argument("sequence_length * feature_size does not match observation_size");
         input_shape_ = {1, static_cast<std::int64_t>(sequence), static_cast<std::int64_t>(feature)};
@@ -180,6 +212,79 @@ OnnxRuntime::OnnxRuntime(const Config& config)
         std::accumulate(input_shape_.begin(), input_shape_.end(), std::size_t{1}, [](auto value, auto dim) {
             return value * static_cast<std::size_t>(dim);
         }));
+
+    // Extra (non-obs) inputs: every one needs a constant from extra_inputs.*,
+    // and every declared constant must match a model input.
+    std::map<std::string, std::vector<double>> remaining = config.extra_input_values;
+    constant_slot_.assign(input_count, -1);
+    for (std::size_t index = 0; index < input_count; ++index) {
+        if (index == primary_index)
+            continue;
+        const auto found = remaining.find(input_names_[index]);
+        if (found == remaining.end())
+            throw std::invalid_argument(
+                "model input '" + input_names_[index]
+                + "' has no constant value; declare it under policy_server extra_inputs."
+                   "<name> in the vehicle YAML");
+        const std::vector<double> source = found->second;
+        remaining.erase(found);
+
+        const auto extra_type = session_.GetInputTypeInfo(index);
+        if (extra_type.GetONNXType() != ONNX_TYPE_TENSOR)
+            throw std::invalid_argument(
+                "extra input '" + input_names_[index] + "' must be a tensor");
+        const auto extra_info = extra_type.GetTensorTypeAndShapeInfo();
+        if (extra_info.GetElementType() != ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT)
+            throw std::invalid_argument(
+                "extra input '" + input_names_[index] + "' element type must be float32");
+        const auto raw_shape = extra_info.GetShape();
+        if (raw_shape.empty() || raw_shape.size() > 3)
+            throw std::invalid_argument(
+                "extra input '" + input_names_[index] + "' rank must be 1, 2, or 3");
+
+        ConstantInput constant;
+        constant.name = input_names_[index];
+        std::size_t elements = 1;
+        std::size_t first_dim = 0;
+        if (raw_shape.size() >= 2) {
+            if (!batch_dimension_ok(raw_shape[0]))
+                throw std::invalid_argument(
+                    "extra input '" + constant.name + "' batch dimension must be 1 or dynamic");
+            constant.shape.push_back(1);
+            first_dim = 1;
+        }
+        for (std::size_t dim = first_dim; dim < raw_shape.size(); ++dim) {
+            if (raw_shape[dim] <= 0)
+                throw std::invalid_argument(
+                    "extra input '" + constant.name
+                    + "' non-batch dimensions must be concrete (dynamic dim "
+                    + std::to_string(dim) + ")");
+            constant.shape.push_back(raw_shape[dim]);
+            elements *= static_cast<std::size_t>(raw_shape[dim]);
+        }
+        if (source.size() != elements)
+            throw std::invalid_argument(
+                "extra input '" + constant.name + "' needs " + std::to_string(elements)
+                + " values, got " + std::to_string(source.size()));
+        constant.values.reserve(elements);
+        for (const double value : source) {
+            if (!std::isfinite(value))
+                throw std::invalid_argument(
+                    "extra input '" + constant.name + "' contains a non-finite value");
+            constant.values.push_back(static_cast<float>(value));
+        }
+        constant_slot_[index] = static_cast<std::int64_t>(constants_.size());
+        constants_.push_back(std::move(constant));
+    }
+    if (!remaining.empty()) {
+        std::string listing;
+        for (const auto& [name, values] : remaining) {
+            static_cast<void>(values);
+            listing += (listing.empty() ? "" : ", ") + name;
+        }
+        throw std::invalid_argument(
+            "extra_inputs entry(s) [" + listing + "] have no matching model input");
+    }
 
     std::size_t output_size = 1;
     bool output_dynamic = false;
@@ -213,13 +318,29 @@ void OnnxRuntime::run(std::span<const float> input, std::span<float> output) {
     if (input.size() != input_size() || output.size() != output_size())
         throw std::invalid_argument("inference buffers do not match model dimensions");
     std::copy(input.begin(), input.end(), input_buffer_.begin());
-    auto tensor = Ort::Value::CreateTensor<float>(
-        memory_info_, input_buffer_.data(), input_buffer_.size(), input_shape_.data(),
-        input_shape_.size());
-    const char* input_names[] = {input_name_.c_str()};
+
+    const std::size_t input_count = input_names_.size();
+    std::vector<const char*> input_names;
+    input_names.reserve(input_count);
+    std::vector<Ort::Value> input_tensors;
+    input_tensors.reserve(input_count);
+    for (std::size_t index = 0; index < input_count; ++index) {
+        input_names.push_back(input_names_[index].c_str());
+        if (constant_slot_[index] < 0) {
+            input_tensors.push_back(Ort::Value::CreateTensor<float>(
+                memory_info_, input_buffer_.data(), input_buffer_.size(), input_shape_.data(),
+                input_shape_.size()));
+        } else {
+            auto& constant = constants_[static_cast<std::size_t>(constant_slot_[index])];
+            input_tensors.push_back(Ort::Value::CreateTensor<float>(
+                memory_info_, constant.values.data(), constant.values.size(), constant.shape.data(),
+                constant.shape.size()));
+        }
+    }
     const char* output_names[] = {output_name_.c_str()};
-    const auto outputs =
-        session_.Run(Ort::RunOptions{nullptr}, input_names, &tensor, 1, output_names, 1);
+    const auto outputs = session_.Run(
+        Ort::RunOptions{nullptr}, input_names.data(), input_tensors.data(), input_count,
+        output_names, 1);
     if (outputs.size() != 1 || !outputs[0].IsTensor()
         || outputs[0].GetTensorTypeAndShapeInfo().GetElementCount() != output_size())
         throw std::runtime_error("inference output does not match model dimensions");

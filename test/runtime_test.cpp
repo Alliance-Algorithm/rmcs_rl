@@ -147,6 +147,71 @@ TEST(PolicyModel, ParameterClipsOverrideMetadata) {
     EXPECT_EQ(action, (std::array{3.0, -3.0}));
 }
 
+TEST(PolicyModel, LoadsRank3SequenceInput) {
+    PolicyModel::Config config;
+    config.path = RMCS_RL_SEQ_FIXTURE;
+    PolicyModel model{config};
+    const auto& info = model.info();
+    EXPECT_EQ(info.model_type, "transformer");
+    EXPECT_EQ(info.input_rank, 3u);
+    EXPECT_EQ(info.sequence_length, 2u);
+    EXPECT_EQ(info.feature_size, 3u);
+    ASSERT_EQ(info.obs_size, 6u);
+    ASSERT_EQ(info.action_size, 3u);
+    std::array<double, 3> action{};
+    std::string error;
+    ASSERT_TRUE(model.run(std::array{1., 2., 3., 4., 5., 6.}, action, error)) << error;
+    EXPECT_EQ(action, (std::array{5.0, 7.0, 9.0}));
+    EXPECT_FALSE(model.run(std::array{1., 2., 3.}, action, error));
+}
+
+TEST(PolicyModel, RejectsSequenceHistoryMetadataMismatch) {
+    PolicyModel::Config config;
+    config.path = RMCS_RL_SEQ_MISMATCH_FIXTURE;
+    EXPECT_THROW(PolicyModel{config}, std::invalid_argument);
+}
+
+TEST(PolicyModel, RejectsTransformerTypeOnRank2Input) {
+    PolicyModel::Config config;
+    config.path = RMCS_RL_IDENTITY_FIXTURE;
+    config.model_type = "transformer";
+    EXPECT_THROW(PolicyModel{config}, std::invalid_argument);
+}
+
+TEST(PolicyModel, FeedsExtraInputConstants) {
+    PolicyModel::Config config;
+    config.path = RMCS_RL_EXTRA_FIXTURE;
+    config.extra_input_values["offset"] = {10.0};
+    PolicyModel model{config};
+    ASSERT_EQ(model.info().obs_size, 2u);
+    ASSERT_EQ(model.info().action_size, 2u);
+    std::array<double, 2> action{};
+    std::string error;
+    ASSERT_TRUE(model.run(std::array{3.0, 6.0}, action, error)) << error;
+    EXPECT_EQ(action, (std::array{13.0, 16.0}));
+}
+
+TEST(PolicyModel, RejectsMissingExtraInputDeclaration) {
+    PolicyModel::Config config;
+    config.path = RMCS_RL_EXTRA_FIXTURE;
+    EXPECT_THROW(PolicyModel{config}, std::invalid_argument);
+}
+
+TEST(PolicyModel, RejectsExtraInputWithoutMatchingModelInput) {
+    PolicyModel::Config config;
+    config.path = RMCS_RL_EXTRA_FIXTURE;
+    config.extra_input_values["offset"] = {10.0};
+    config.extra_input_values["bogus"] = {1.0};
+    EXPECT_THROW(PolicyModel{config}, std::invalid_argument);
+}
+
+TEST(PolicyModel, RejectsWrongExtraInputValueCount) {
+    PolicyModel::Config config;
+    config.path = RMCS_RL_EXTRA_FIXTURE;
+    config.extra_input_values["offset"] = {1.0, 2.0};
+    EXPECT_THROW(PolicyModel{config}, std::invalid_argument);
+}
+
 } // namespace
 } // namespace rmcs_rl
 #include <algorithm>

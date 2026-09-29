@@ -9,8 +9,13 @@ import rl_layout as layout
 
 
 def _export_with_onnx(obs: int, act: int, output: str, model_type: str,
-                      sequence_length: int, feature_size: int) -> None:
-    """Export a zero-action MLP/sequence fixture without a training dependency."""
+                      sequence_length: int, feature_size: int,
+                      extra_specs: list) -> None:
+    """Export a zero-action MLP/sequence fixture without a training dependency.
+
+    extra_specs: [(name, dims)] 额外输入；每个 ReduceSum 成标量后加到主输出，
+    保证额外输入被图消费（onnx.checker 要求）且输出仍为 [1, act]。
+    """
     import numpy as np
     import onnx
     from onnx import TensorProto, helper, numpy_helper
@@ -32,12 +37,26 @@ def _export_with_onnx(obs: int, act: int, output: str, model_type: str,
         weight_shape = (obs, act)
         matmul_input = "obs"
     weight = numpy_helper.from_array(np.zeros(weight_shape, dtype=np.float32), name="W")
-    matmul = helper.make_node("MatMul", [matmul_input, "W"], ["actions"], name="zero_action")
+    matmul_output = "actions" if not extra_specs else "logits"
+    matmul = helper.make_node("MatMul", [matmul_input, "W"], [matmul_output], name="zero_action")
     nodes = [node, matmul] if node is not None else [matmul]
+
+    input_infos = [helper.make_tensor_value_info("obs", TensorProto.FLOAT, input_shape)]
+    current = matmul_output
+    for index, (name, dims) in enumerate(extra_specs):
+        input_infos.append(
+            helper.make_tensor_value_info(name, TensorProto.FLOAT, [1, *dims]))
+        nodes.append(helper.make_node(
+            "ReduceSum", [name], [f"{name}_sum"], name=f"sum_{name}", keepdims=0))
+        final = "actions" if index == len(extra_specs) - 1 else f"add_{index}"
+        nodes.append(helper.make_node(
+            "Add", [current, f"{name}_sum"], [final], name=f"add_{name}"))
+        current = final
+
     graph = helper.make_graph(
         nodes,
         "zero_policy",
-        [helper.make_tensor_value_info("obs", TensorProto.FLOAT, input_shape)],
+        input_infos,
         [helper.make_tensor_value_info("actions", TensorProto.FLOAT, [1, act])],
         [weight],
     )
@@ -60,6 +79,8 @@ def main() -> None:
                         help="序列长度；>1 时生成 rank-3 输入")
     parser.add_argument("--feature-size", type=int, default=None,
                         help="单帧维度；缺省由 obs/sequence 推导")
+    parser.add_argument("--extra-input", action="append", default=[], metavar="NAME:DIMS",
+                        help="额外输入张量，如 mask:4 或 pos:2x3（可重复）")
     parser.add_argument("--from-config", "--config", dest="config", default=None,
                         help="部署 YAML：由 observation_terms/action_terms 推导 obs/act 尺寸")
     parser.add_argument("--node", default=layout.DEFAULT_NODE,
@@ -98,9 +119,32 @@ def main() -> None:
     if feature_size <= 0 or sequence_length * feature_size != obs:
         print("ERROR: obs 必须能按 sequence-length 分解为正整数 feature-size", file=sys.stderr)
         sys.exit(1)
-    _export_with_onnx(obs, act, args.output, args.model_type, sequence_length, feature_size)
+
+    extra_specs = []
+    for spec in args.extra_input:
+        if ":" not in spec:
+            print(f"ERROR: --extra-input 需要 NAME:DIMS 形式（got {spec!r}）", file=sys.stderr)
+            sys.exit(1)
+        name, dims_text = spec.split(":", 1)
+        try:
+            dims = [int(part) for part in dims_text.split("x")]
+        except ValueError:
+            print(f"ERROR: --extra-input 维度非法（got {spec!r}）", file=sys.stderr)
+            sys.exit(1)
+        if not name or not dims or any(dim <= 0 for dim in dims):
+            print(f"ERROR: --extra-input 需要非空名字与正整数维（got {spec!r}）", file=sys.stderr)
+            sys.exit(1)
+        if name == "obs" or any(existing == name for existing, _ in extra_specs):
+            print(f"ERROR: --extra-input 名字重复或与 obs 冲突（got {name!r}）", file=sys.stderr)
+            sys.exit(1)
+        extra_specs.append((name, dims))
+
+    _export_with_onnx(obs, act, args.output, args.model_type, sequence_length, feature_size,
+                      extra_specs)
 
     input_desc = f"[1,{obs}]" if sequence_length == 1 else f"[1,{sequence_length},{feature_size}]"
+    for name, dims in extra_specs:
+        input_desc += f" + {name}[1,{'x'.join(str(dim) for dim in dims)}]"
     print(f"wrote {args.output}: obs float32{input_desc} -> actions float32[1,{act}] (zero policy)")
 
 

@@ -191,6 +191,103 @@ run_expect 1 "(e) rl_action_size != 动作词条数" \
     "$PY" "$TOOLS/check_policy_contract.py" "$MODEL" --config "$WORK/x_actsize.yaml"
 expect_msg "rl_action_size" "尺寸不一致提示"
 
+echo "== 5. Transformer rank-3 与 T==history 强制 =="
+FIXTURE_H4="$WORK/x_h4.yaml"
+FIXTURE_H5="$WORK/x_h5.yaml"
+MODEL_SEQ="$WORK/policy_seq.onnx"
+
+cat >"$FIXTURE_H4" <<'YAML'
+rl_bridge:
+  ros__parameters:
+    history_length: 4
+    rl_obs_size: 20
+    rl_action_size: 6
+    observation_terms:
+      - index=0 path=/chassis/control_height
+      - index=1 path=/chassis/control_velocity take=x
+      - index=2 path=/wheel_leg/imu/angular_velocity take=vec3
+    action_terms:
+      - index=0 output=/wheel_leg/rl/action/lf0
+      - index=1 output=/wheel_leg/rl/action/lf1
+      - index=2 output=/wheel_leg/rl/action/l_wheel
+      - index=3 output=/wheel_leg/rl/action/rf0
+      - index=4 output=/wheel_leg/rl/action/rf1
+      - index=5 output=/wheel_leg/rl/action/r_wheel
+YAML
+sed -e 's/history_length: 4/history_length: 5/' \
+    -e 's|index=2 path=/wheel_leg/imu/angular_velocity take=vec3|index=2 type=joint_pos joints=lf0,lf1 relative=true|' \
+    "$FIXTURE_H4" >"$FIXTURE_H5"
+
+run_expect 0 "gen rank-3 transformer 夹具 (T=4, F=5)" \
+    "$PY" "$HERE/gen_synthetic_policy.py" --obs 20 --act 6 \
+    --model-type transformer --sequence-length 4 -o "$MODEL_SEQ"
+run_expect 0 "盖章 transformer（默认写 rmcs_history_length）" \
+    "$PY" "$TOOLS/stamp_layout_metadata.py" --model "$MODEL_SEQ" \
+    --from-config "$FIXTURE_H4" --model-type transformer
+expect_msg "rmcs_history_length" "盖章输出含序列键"
+run_expect 0 "check rank-3 transformer（T==history 正例）" \
+    "$PY" "$TOOLS/check_policy_contract.py" "$MODEL_SEQ" --config "$FIXTURE_H4"
+expect_msg "model sequence dim == expected history" "T 等值检查已执行"
+
+cp "$MODEL_SEQ" "$WORK/policy_seq_h5.onnx"
+run_expect 0 "同一模型按 history=5 配置盖章（模拟窗口错配）" \
+    "$PY" "$TOOLS/stamp_layout_metadata.py" --model "$WORK/policy_seq_h5.onnx" \
+    --from-config "$FIXTURE_H5" --model-type transformer
+run_expect 1 "(f) 模型 T=4 != history=5 → 必须 FAIL" \
+    "$PY" "$TOOLS/check_policy_contract.py" "$WORK/policy_seq_h5.onnx" --config "$FIXTURE_H5"
+expect_msg "model sequence dim == expected history" "T 不匹配提示"
+
+cp "$MODEL" "$WORK/policy_mlptype.onnx"
+run_expect 0 "给 rank-2 模型盖 rmcs_model_type=transformer" \
+    "$PY" "$TOOLS/stamp_layout_metadata.py" --model "$WORK/policy_mlptype.onnx" \
+    --from-config "$FIXTURE" --model-type transformer
+run_expect 1 "(g) model_type=transformer 但输入 rank=2 → 必须 FAIL" \
+    "$PY" "$TOOLS/check_policy_contract.py" "$WORK/policy_mlptype.onnx" --config "$FIXTURE"
+expect_msg "input rank/model type" "rank/type 不匹配提示"
+
+echo "== 6. 多输入（policy_server extra_inputs 常量）=="
+FIXTURE_EXTRA="$WORK/x_extra.yaml"
+MODEL_EXTRA="$WORK/policy_extra.onnx"
+{
+    cat "$FIXTURE"
+    cat <<'YAML'
+
+policy_server:
+  ros__parameters:
+    rl_obs_size: 20
+    rl_action_size: 6
+    extra_inputs:
+      mask: [1, 1, 1, 1]
+YAML
+} >"$FIXTURE_EXTRA"
+
+run_expect 0 "gen 多输入夹具（obs + mask:4）" \
+    "$PY" "$HERE/gen_synthetic_policy.py" --obs 20 --act 6 --extra-input mask:4 -o "$MODEL_EXTRA"
+run_expect 0 "盖章多输入夹具" \
+    "$PY" "$TOOLS/stamp_layout_metadata.py" --model "$MODEL_EXTRA" --from-config "$FIXTURE_EXTRA"
+run_expect 0 "(h) 多输入 + extra_inputs 声明匹配 → PASS" \
+    "$PY" "$TOOLS/check_policy_contract.py" "$MODEL_EXTRA" --config "$FIXTURE_EXTRA"
+expect_msg "extra input mask" "额外输入校验已执行"
+
+run_expect 1 "(i) 模型有额外输入但 YAML 无 extra_inputs → FAIL" \
+    "$PY" "$TOOLS/check_policy_contract.py" "$MODEL_EXTRA" --config "$FIXTURE"
+expect_msg "extra_inputs match model" "缺声明提示"
+
+FIXTURE_EXTRA_UNKNOWN="$WORK/x_extra_unknown.yaml"
+{
+    cat "$FIXTURE"
+    cat <<'YAML'
+
+policy_server:
+  ros__parameters:
+    extra_inputs:
+      bogus: [1, 2, 3]
+YAML
+} >"$FIXTURE_EXTRA_UNKNOWN"
+run_expect 1 "(j) YAML 声明了模型没有的额外输入 → FAIL" \
+    "$PY" "$TOOLS/check_policy_contract.py" "$MODEL" --config "$FIXTURE_EXTRA_UNKNOWN"
+expect_msg "extra_inputs match model" "多余声明提示"
+
 echo
 echo "==== 结果：PASS=$PASS FAIL=$FAIL ===="
 [ "$FAIL" = 0 ] || exit 1

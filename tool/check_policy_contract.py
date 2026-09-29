@@ -4,8 +4,10 @@
 Two modes:
 
   * self-check (no --config; used by CI, deployment YAML lives in the RMCS repo):
-      model loads; one input "obs" / one output "actions"; float32; rank 1/2/3;
-      MLP uses rank 2 or rank 3 and Transformer uses rank 3. Layout metadata is OPTIONAL:
+      model loads; primary input "obs" / one output "actions"; float32; rank 1/2/3;
+      MLP uses rank 2 or rank 3 and Transformer uses rank 3. Extra (non-obs)
+      inputs are allowed; with --config they must match policy_server extra_inputs.
+      Layout metadata is OPTIONAL:
       - missing / v1 -> SKIP (stamped layout metadata is optional for model-only self-check)
       - present v2   -> signatures must be internally consistent with the tensor
                         sizes, and policy_layout_hash must match those signatures
@@ -133,7 +135,7 @@ def _check_normalization(report, meta, obs_size):
 
 
 def _dummy_inference(report, model_path, obs_size, act_size, model_type,
-                     input_rank, sequence_length, feature_size):
+                     input_rank, sequence_length, feature_size, extra_specs=None):
     """跑一次零输入推理，确认输出有限、元素数正确（无 onnxruntime 则跳过）。"""
     try:
         import numpy as np
@@ -149,7 +151,15 @@ def _dummy_inference(report, model_path, obs_size, act_size, model_type,
             obs = np.zeros((obs_size,), dtype=np.float32)
         else:
             obs = np.zeros((1, obs_size), dtype=np.float32)
-        actions = session.run(["actions"], {"obs": obs})[0]
+        feed = {"obs": obs}
+        for name, (shape, values) in (extra_specs or {}).items():
+            count = 1
+            for dim in shape:
+                count *= dim
+            if values is None:
+                values = [1.0] * count
+            feed[name] = np.asarray(values, dtype=np.float32).reshape(shape)
+        actions = session.run(["actions"], feed)[0]
     except Exception as exc:
         report.check("dummy inference", False, f"{type(exc).__name__}: {exc}")
         return
@@ -244,24 +254,25 @@ def main() -> None:
     for value in outputs:
         print(f"output : {value.name} {_shape_of(value)}")
 
-    report.check("tensor count/names", len(inputs) == 1 and len(outputs) == 1
-                 and inputs[0].name == "obs" and outputs[0].name == "actions",
-                 f"inputs={[v.name for v in inputs]} outputs={[v.name for v in outputs]}"
-                 if not (len(inputs) == 1 and len(outputs) == 1) else "obs -> actions")
-
-    if not (len(inputs) == 1 and len(outputs) == 1):
-        print("== SUMMARY: FAIL (张量不合法，后续检查跳过) ==")
+    input_names = [value.name for value in inputs]
+    names_ok = (len(outputs) == 1 and outputs[0].name == "actions" and "obs" in input_names)
+    report.check("tensor names", names_ok,
+                 f"inputs={input_names} outputs={[v.name for v in outputs]}")
+    if not names_ok:
+        print("== SUMMARY: FAIL (张量不合法：需要主输入 obs + 唯一输出 actions，后续检查跳过) ==")
         sys.exit(1)
 
-    inp, out = inputs[0], outputs[0]
+    inp = next(value for value in inputs if value.name == "obs")
+    out = outputs[0]
 
     def _dtype_name(value_info):
         elem = value_info.type.tensor_type.elem_type
         return "float32" if elem == TensorProto.FLOAT else TensorProto.DataType.Name(elem).lower()
 
-    report.check("dtype float32", inp.type.tensor_type.elem_type == TensorProto.FLOAT
-                 and out.type.tensor_type.elem_type == TensorProto.FLOAT,
-                 f"obs={_dtype_name(inp)} actions={_dtype_name(out)}")
+    dtype_ok = (all(value.type.tensor_type.elem_type == TensorProto.FLOAT for value in inputs)
+                and out.type.tensor_type.elem_type == TensorProto.FLOAT)
+    report.check("dtype float32", dtype_ok,
+                 f"inputs={[_dtype_name(value) for value in inputs]} actions={_dtype_name(out)}")
     in_shape, out_shape = _shape_of(inp), _shape_of(out)
     meta = {prop.key: prop.value for prop in model.metadata_props}
     declared_type = meta.get("rmcs_model_type", "").strip().lower()
@@ -291,6 +302,75 @@ def main() -> None:
                  f"obs={in_shape[0] if len(in_shape) >= 2 else '<none>'!r} "
                  f"actions={out_shape[0] if len(out_shape) >= 2 else '<none>'!r}（允许 1 或动态维）")
 
+    # 额外输入（如 attention mask）：形状校验 + 与 policy_server extra_inputs 对账
+    extra_shapes = {value.name: _shape_of(value) for value in inputs if value.name != "obs"}
+    declared_extra: dict = {}
+    if args.config:
+        import yaml
+        document = yaml.safe_load(open(args.config, encoding="utf-8")) or {}
+        section = ((document.get("policy_server") or {}).get("ros__parameters") or {})
+        raw_extra = section.get("extra_inputs") or {}
+        if not isinstance(raw_extra, dict):
+            report.check("extra_inputs section", False, f"extra_inputs={raw_extra!r} 必须是映射")
+        else:
+            declared_extra = raw_extra
+    extra_specs: dict = {}
+    if extra_shapes or declared_extra:
+        if args.config:
+            missing = sorted(set(extra_shapes) - set(declared_extra))
+            unknown = sorted(set(declared_extra) - set(extra_shapes))
+            report.check("extra_inputs match model",
+                         not missing and not unknown,
+                         f"模型缺声明={missing} 声明无对应输入={unknown}"
+                         if (missing or unknown) else f"{sorted(extra_shapes)}")
+        else:
+            report.info("extra_inputs",
+                        f"模型额外输入 {sorted(extra_shapes)}（无 --config，仅校验形状，dummy 用 1 填充）")
+        for name, shape in sorted(extra_shapes.items()):
+            ok = True
+            detail = f"{name}{shape}"
+            runtime_shape = []
+            first_dim = 0
+            if len(shape) >= 2:
+                if not (shape[0] == 1 or shape[0] is None or isinstance(shape[0], str)):
+                    ok = False
+                    detail += " batch 维必须为 1 或动态"
+                runtime_shape.append(1)
+                first_dim = 1
+            elements = 1
+            for dim in shape[first_dim:]:
+                if not isinstance(dim, int) or dim <= 0:
+                    ok = False
+                    detail += f" 非 batch 维必须是具体正整数（got {dim!r}）"
+                    break
+                runtime_shape.append(dim)
+                elements *= dim
+            values = None
+            if ok and args.config and name in declared_extra:
+                raw_values = declared_extra[name]
+                if not isinstance(raw_values, list) or not raw_values:
+                    ok = False
+                    detail += " extra_inputs 值必须是非空列表"
+                else:
+                    try:
+                        values = [float(item) for item in raw_values]
+                    except (TypeError, ValueError):
+                        ok = False
+                        values = None
+                        detail += " 含非数值元素"
+                    else:
+                        if any(not math.isfinite(item) for item in values):
+                            ok = False
+                            detail += " 含非有限值"
+                            values = None
+                        elif len(values) != elements:
+                            ok = False
+                            detail += f" 值数量 {len(values)} != 元素数 {elements}"
+                            values = None
+            report.check(f"extra input {name}", ok, detail)
+            if ok:
+                extra_specs[name] = (tuple(runtime_shape), values)
+
     history_length = layout.history_length(args.config, args.node) if args.config else 1
     metadata_sequence = metadata_feature = 0
     for key in ("rmcs_history_length", "rmcs_obs_frame_size"):
@@ -308,16 +388,42 @@ def main() -> None:
         else:
             metadata_feature = value
     config_feature_size = obs_size // history_length if obs_size is not None else None
+    if args.config:
+        if metadata_sequence:
+            report.check("metadata history == config history_length",
+                         metadata_sequence == history_length,
+                         f"rmcs_history_length={metadata_sequence} history_length={history_length}")
+        if metadata_feature and config_feature_size:
+            report.check("metadata frame == config frame size",
+                         metadata_feature == config_feature_size,
+                         f"rmcs_obs_frame_size={metadata_feature} 单帧={config_feature_size}")
+        if args.sequence_length and args.sequence_length != history_length:
+            report.check("--sequence-length == history_length", False,
+                         f"--sequence-length={args.sequence_length} history_length={history_length}")
+        if args.feature_size and config_feature_size and args.feature_size != config_feature_size:
+            report.check("--feature-size == config frame size", False,
+                         f"--feature-size={args.feature_size} 单帧={config_feature_size}")
+
     input_tail = in_shape[0:] if len(in_shape) == 1 else in_shape[1:]
     sequence_length = args.sequence_length or metadata_sequence or (
-        history_length if len(in_shape) == 3 else 1)
+        history_length if len(in_shape) == 3 and args.config else None)
     feature_size = args.feature_size or metadata_feature or (
-        config_feature_size if len(in_shape) == 3 else None)
+        config_feature_size if len(in_shape) == 3 and args.config else None)
     if len(in_shape) == 3:
         declared_sequence, declared_feature = input_tail
         if isinstance(declared_sequence, int) and declared_sequence > 0:
+            if sequence_length is not None:
+                report.check("model sequence dim == expected history",
+                             declared_sequence == sequence_length,
+                             f"model T={declared_sequence} expected={sequence_length}"
+                             "（= --sequence-length/rmcs_history_length/history_length，"
+                             "与运行时 onnx_runtime 同优先级）")
             sequence_length = declared_sequence
         if isinstance(declared_feature, int) and declared_feature > 0:
+            if feature_size is not None:
+                report.check("model feature dim == expected frame",
+                             declared_feature == feature_size,
+                             f"model F={declared_feature} expected={feature_size}")
             feature_size = declared_feature
         model_obs = sequence_length * feature_size if sequence_length and feature_size else None
     else:
@@ -431,7 +537,7 @@ def main() -> None:
 
     _check_normalization(report, meta, obs_size)
     _dummy_inference(report, args.model, obs_size, act_size, model_type, len(in_shape),
-                     sequence_length, feature_size or obs_size)
+                     sequence_length, feature_size or obs_size, extra_specs)
 
     try:
         file_id = layout.model_id(args.model)

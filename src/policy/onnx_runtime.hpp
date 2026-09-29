@@ -2,6 +2,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <map>
 #include <optional>
 #include <span>
 #include <string>
@@ -22,6 +23,9 @@ public:
         std::size_t feature_size = 0;
         std::size_t observation_size = 0;
         std::size_t action_size = 0;
+        // 额外输入张量的常量值（键 = 模型输入名，值 = 展平的元素），
+        // 由 policy_server 的 extra_inputs.<name> YAML 参数提供。
+        std::map<std::string, std::vector<double>> extra_input_values;
     };
 
     struct Info {
@@ -48,12 +52,22 @@ public:
     void run(std::span<const float> input, std::span<float> output);
 
 private:
+    struct ConstantInput {
+        std::string name;
+        std::vector<std::int64_t> shape;
+        std::vector<float> values;
+    };
+
     Ort::Env env_{ORT_LOGGING_LEVEL_WARNING, "rmcs_rl"};
     Ort::AllocatorWithDefaultOptions allocator_;
     Ort::MemoryInfo memory_info_{Ort::MemoryInfo::CreateCpu(OrtArenaAllocator, OrtMemTypeDefault)};
     Ort::Session session_{nullptr};
     std::string input_name_;
     std::string output_name_;
+    std::vector<std::string> input_names_; // 会话输入顺序
+    std::vector<ConstantInput> constants_;
+    // 与 input_names_ 并行：主输入为 -1，其余为 constants_ 下标
+    std::vector<std::int64_t> constant_slot_;
     std::vector<std::int64_t> input_shape_;
     std::vector<float> input_buffer_;
     std::size_t output_size_ = 0;

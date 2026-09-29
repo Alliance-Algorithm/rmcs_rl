@@ -1,13 +1,16 @@
 #include <algorithm>
 #include <array>
 #include <chrono>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
 #include <exception>
+#include <map>
 #include <memory>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -59,6 +62,36 @@ public:
             if (*value < 1)
                 throw std::invalid_argument("policy_server: rl_action_size must be positive");
             config.action_size = static_cast<std::size_t>(*value);
+        }
+        for (const auto& parameter_name : list_parameters({"extra_inputs"}, 1).names) {
+            static constexpr std::string_view kPrefix = "extra_inputs.";
+            if (!parameter_name.starts_with(kPrefix))
+                continue;
+            const auto extra_name = parameter_name.substr(kPrefix.size());
+            if (extra_name.empty())
+                throw std::invalid_argument(
+                    "policy_server: extra_inputs entry must be extra_inputs.<input_name>");
+            const auto parameter = get_parameter(parameter_name);
+            std::vector<double> values;
+            switch (parameter.get_type()) {
+            case rclcpp::ParameterType::PARAMETER_DOUBLE_ARRAY:
+                values = parameter.as_double_array();
+                break;
+            case rclcpp::ParameterType::PARAMETER_INTEGER_ARRAY:
+                for (const auto item : parameter.as_integer_array())
+                    values.push_back(static_cast<double>(item));
+                break;
+            default:
+                throw std::invalid_argument(
+                    "policy_server: " + parameter_name + " must be a numeric list");
+            }
+            if (values.empty())
+                throw std::invalid_argument("policy_server: " + parameter_name + " is empty");
+            for (const double value : values)
+                if (!std::isfinite(value))
+                    throw std::invalid_argument(
+                        "policy_server: " + parameter_name + " contains a non-finite value");
+            config.extra_input_values.emplace(extra_name, std::move(values));
         }
         config.normalization_from_metadata = bool_or(*this, "normalization_from_metadata", true);
         if (const double clip = number_or(*this, "obs_clip", -1.0); clip >= 0.0)

@@ -53,7 +53,8 @@ PolicyModel::PolicyModel(const Config& config)
           config.sequence_length,
           config.feature_size,
           config.observation_size,
-          config.action_size}) {
+          config.action_size,
+          config.extra_input_values}) {
     info_.path = config.path;
     info_.obs_size = runtime_.input_size();
     info_.action_size = runtime_.output_size();
