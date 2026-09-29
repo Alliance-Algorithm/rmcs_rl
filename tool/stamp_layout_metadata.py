@@ -14,6 +14,9 @@
   rmcs_obs_mean/std    可选（--obs-mean/--obs-std，长度必须 == rl_obs_size）
   rmcs_obs_clip        可选单浮点（--obs-clip）
   rmcs_action_clip     可选单浮点（--action-clip）
+  rmcs_model_type      可选结构标识 mlp/transformer/generic（--model-type）
+  rmcs_history_length  可选序列长度（Transformer 或带历史帧 MLP）
+  rmcs_obs_frame_size  可选单帧维度
 
 用法：
   python3 stamp_layout_metadata.py --model policy.onnx --from-config deploy.yaml
@@ -63,6 +66,12 @@ def main() -> None:
     parser.add_argument("--obs-std", default=None, help="经验标准差，逗号分隔，长度同 obs_size")
     parser.add_argument("--obs-clip", type=float, default=None, help="观测 clip（单浮点，可选）")
     parser.add_argument("--action-clip", type=float, default=None, help="动作 clip（单浮点，可选）")
+    parser.add_argument("--model-type", choices=("mlp", "transformer", "generic"), default=None,
+                        help="模型结构标识；不填则由部署端按输入 rank 推断")
+    parser.add_argument("--sequence-length", type=int, default=None,
+                        help="序列长度（缺省从 YAML history_length 取值）")
+    parser.add_argument("--feature-size", type=int, default=None,
+                        help="单帧观测维度（缺省由 rl_obs_size/history_length 推导）")
     args = parser.parse_args()
 
     try:
@@ -81,12 +90,31 @@ def main() -> None:
             if value is not None and (not math.isfinite(value) or value <= 0.0):
                 raise layout.LayoutError(f"{option}={value!r} 必须是有限正数")
 
+        history_length = layout.history_length(args.config, args.node)
+        sequence_length = args.sequence_length if args.sequence_length is not None else (
+            history_length if args.model_type in ("mlp", "transformer") else None)
+        feature_size = args.feature_size if args.feature_size is not None else (
+            obs_size // history_length if args.model_type in ("mlp", "transformer") else None)
+        if feature_size is None and sequence_length is not None and obs_size % sequence_length == 0:
+            feature_size = obs_size // sequence_length
+        if sequence_length is not None and sequence_length < 1:
+            raise layout.LayoutError("--sequence-length 必须 >= 1")
+        if feature_size is not None and feature_size < 1:
+            raise layout.LayoutError("--feature-size 必须 >= 1")
+        if sequence_length is not None and feature_size is None:
+            raise layout.LayoutError("给出 --sequence-length 时必须能推导或指定 --feature-size")
+        if sequence_length is not None and sequence_length * feature_size != obs_size:
+            raise layout.LayoutError(
+                f"sequence_length * feature_size={sequence_length * feature_size} != rl_obs_size={obs_size}")
+
         before = layout.read_metadata(args.model)
         updates = layout.stamp_metadata(
             args.model, obs_sig, act_sig, obs_size, act_size,
             policy_version=args.policy_version,
             obs_mean=obs_mean, obs_std=obs_std,
             obs_clip=args.obs_clip, action_clip=args.action_clip,
+            model_type=args.model_type, sequence_length=sequence_length,
+            feature_size=feature_size,
         )
     except layout.LayoutError as exc:
         print(f"ERROR: {exc}", file=sys.stderr)

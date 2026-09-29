@@ -17,6 +17,11 @@ public:
         std::string path;
         std::string input_name = "obs";
         std::string output_name = "actions";
+        std::string model_type = "auto";
+        std::size_t sequence_length = 0;
+        std::size_t feature_size = 0;
+        std::size_t observation_size = 0;
+        std::size_t action_size = 0;
         bool normalization_from_metadata = true;
         std::optional<double> obs_clip;
         std::optional<double> action_clip;
@@ -29,6 +34,11 @@ public:
         std::string version;
         std::size_t obs_size = 0;
         std::size_t action_size = 0;
+        std::string model_type;
+        std::size_t input_rank = 0;
+        std::size_t output_rank = 0;
+        std::size_t sequence_length = 1;
+        std::size_t feature_size = 0;
         std::uint64_t layout_hash = 0;
         std::uint64_t model_id = 0;
     };

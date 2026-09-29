@@ -52,9 +52,41 @@ ros2 run rmcs_rl policy_server --ros-args --params-file <车辆配置.yaml>
 
 ## 模型与契约
 
-模型输入为 float32 `obs[batch,N]`，输出为 float32 `actions[batch,M]`，batch 为 1 或动态。
+模型结构由 `policy_server.model_type` 或 ONNX metadata `rmcs_model_type` 切换，支持：
+
+- `mlp`：输入可以是 float32 `obs[1,N]`，也可以是带历史帧的 `obs[1,history,feature]`；
+- `transformer`：输入为 float32 `obs[1,history,feature]`；
+- `generic`：保留 rank-1/2/3 的形状适配，供后续单输入结构接入。
+
+输出支持 rank-1/2/3，只要除 batch 外的元素总数等于动作数 `M`。batch 为 1 或动态。
+`auto` 优先读取 `rmcs_model_type`，没有 metadata 时才按 rank-2 推断 MLP、rank-3 推断
+Transformer。真正需要多输入（例如独立 attention mask、position id）的模型需要新增专用
+adapter，当前部署接口会在启动时明确拒绝。
 部署模型须含 `rmcs_obs_layout`、`rmcs_actions_layout`；建议带 `policy_layout_hash` 和版本。
 `history_length × 单帧维数 = rl_obs_size`。归一化均值和标准差必须成对提供，标准差为正数。
+
+带历史帧的模型示例（桥和策略进程都要使用同一历史长度）：
+
+```yaml
+rl_bridge:
+  ros__parameters:
+    history_length: 8
+    rl_obs_size: 208       # 8 × 26
+policy_server:
+  ros__parameters:
+    model_type: "transformer"  # 带历史帧 MLP 这里写 "mlp"
+    sequence_length: 8          # 动态 rank-3 输入时需要
+    feature_size: 26
+    rl_obs_size: 208
+```
+
+模型盖章时可以把结构和序列维度写进 metadata，避免只靠 rank 猜测：
+
+```sh
+python3 src/rmcs_rl/tool/stamp_layout_metadata.py \
+  --model policy.onnx --from-config <车辆配置.yaml> --node rl_bridge \
+  --model-type transformer --sequence-length 8 --feature-size 26
+```
 
 新模型先核对训练的观测顺序、坐标、基准角、缩放和频率，再盖章：
 

@@ -4,8 +4,8 @@
 Two modes:
 
   * self-check (no --config; used by CI, deployment YAML lives in the RMCS repo):
-      model loads; one input "obs" / one output "actions"; float32; rank 2;
-      batch 1 or dynamic; concrete feature dimensions. Layout metadata is OPTIONAL:
+      model loads; one input "obs" / one output "actions"; float32; rank 1/2/3;
+      MLP uses rank 2 or rank 3 and Transformer uses rank 3. Layout metadata is OPTIONAL:
       - missing / v1 -> SKIP (stamped layout metadata is optional for model-only self-check)
       - present v2   -> signatures must be internally consistent with the tensor
                         sizes, and policy_layout_hash must match those signatures
@@ -132,8 +132,9 @@ def _check_normalization(report, meta, obs_size):
         report.check(key, math.isfinite(value) and value > 0.0, f"{key}={text}")
 
 
-def _dummy_inference(report, model_path, obs_size, act_size):
-    """跑一次零输入推理，确认输出有限、形状正确（无 onnxruntime 则跳过）。"""
+def _dummy_inference(report, model_path, obs_size, act_size, model_type,
+                     input_rank, sequence_length, feature_size):
+    """跑一次零输入推理，确认输出有限、元素数正确（无 onnxruntime 则跳过）。"""
     try:
         import numpy as np
         import onnxruntime as ort
@@ -142,16 +143,21 @@ def _dummy_inference(report, model_path, obs_size, act_size):
         return
     try:
         session = ort.InferenceSession(str(model_path), providers=["CPUExecutionProvider"])
-        obs = np.zeros((1, obs_size), dtype=np.float32)
+        if input_rank == 3:
+            obs = np.zeros((1, sequence_length, feature_size), dtype=np.float32)
+        elif input_rank == 1:
+            obs = np.zeros((obs_size,), dtype=np.float32)
+        else:
+            obs = np.zeros((1, obs_size), dtype=np.float32)
         actions = session.run(["actions"], {"obs": obs})[0]
     except Exception as exc:
         report.check("dummy inference", False, f"{type(exc).__name__}: {exc}")
         return
     finite = bool(np.isfinite(actions).all())
-    shape_ok = list(actions.shape) == [1, act_size]
+    shape_ok = int(np.prod(actions.shape, dtype=np.int64)) == act_size
     report.check(
         "dummy inference", finite and shape_ok,
-        f"actions{list(actions.shape)} finite={finite} "
+        f"actions{list(actions.shape)} elements={actions.size} finite={finite} "
         f"range=[{actions.min():.4f},{actions.max():.4f}]",
     )
 
@@ -171,6 +177,12 @@ def main() -> None:
                         help="期望的观测尺寸（缺省取模型形状）")
     parser.add_argument("--act", type=int, default=None,
                         help="期望的动作尺寸（缺省取模型形状）")
+    parser.add_argument("--model-type", choices=("auto", "mlp", "transformer", "generic"),
+                        default="auto", help="模型结构（auto 按 metadata/输入 rank 推断）")
+    parser.add_argument("--sequence-length", type=int, default=None,
+                        help="Transformer 序列长度（动态输入或无 YAML 时使用）")
+    parser.add_argument("--feature-size", type=int, default=None,
+                        help="Transformer 单帧维度（动态输入或无 YAML 时使用）")
     parser.add_argument("--expect-model-id", default=None,
                         help="可选：期望的 model_id（16 位 hex），用于部署对账")
     args = parser.parse_args()
@@ -251,23 +263,80 @@ def main() -> None:
                  and out.type.tensor_type.elem_type == TensorProto.FLOAT,
                  f"obs={_dtype_name(inp)} actions={_dtype_name(out)}")
     in_shape, out_shape = _shape_of(inp), _shape_of(out)
-    report.check("rank 2", len(in_shape) == 2 and len(out_shape) == 2,
-                 f"obs={in_shape} actions={out_shape}")
-    if len(in_shape) != 2 or len(out_shape) != 2:
-        print("== SUMMARY: FAIL (秩不为 2，后续检查跳过) ==")
+    meta = {prop.key: prop.value for prop in model.metadata_props}
+    declared_type = meta.get("rmcs_model_type", "").strip().lower()
+    report.check("model_type metadata", declared_type in ("", "mlp", "transformer", "generic"),
+                 f"rmcs_model_type={declared_type or '<missing>'}")
+    if declared_type and args.model_type not in ("auto", "generic"):
+        report.check("model_type parameter/metadata", args.model_type == declared_type,
+                     f"parameter={args.model_type} metadata={declared_type}")
+    model_type = declared_type if args.model_type == "auto" and declared_type else args.model_type
+    if model_type == "auto":
+        model_type = {1: "generic", 2: "mlp", 3: "transformer"}.get(len(in_shape), "generic")
+    rank_ok = ((model_type == "mlp" and len(in_shape) in (2, 3))
+               or (model_type == "transformer" and len(in_shape) == 3)
+               or (model_type == "generic" and 1 <= len(in_shape) <= 3))
+    report.check("input rank/model type", rank_ok,
+                 f"model_type={model_type} obs_rank={len(in_shape)} actions_rank={len(out_shape)}")
+    if not rank_ok:
+        print("== SUMMARY: FAIL (输入 rank 与模型结构不匹配，后续检查跳过) ==")
         sys.exit(1)
 
-    batch_ok = all(
-        dim == 1 or dim is None or isinstance(dim, str)
-        for dim in (in_shape[0], out_shape[0])
-    )
+    batch_ok = all(dim == 1 or dim is None or isinstance(dim, str)
+                   for dim in ((in_shape[0],) if len(in_shape) >= 2 else ()))
+    if len(out_shape) >= 2:
+        batch_ok = batch_ok and (out_shape[0] == 1 or out_shape[0] is None
+                                 or isinstance(out_shape[0], str))
     report.check("batch dimension", batch_ok,
-                 f"obs={in_shape[0]!r} actions={out_shape[0]!r}（允许 1 或动态维）")
-    model_obs, model_act = in_shape[1], out_shape[1]
-    if not isinstance(model_obs, int) or not isinstance(model_act, int) \
-            or model_obs <= 0 or model_act <= 0:
-        report.check("concrete obs/action feature size", False,
-                     f"obs={in_shape} actions={out_shape}（特征维必须是正整数）")
+                 f"obs={in_shape[0] if len(in_shape) >= 2 else '<none>'!r} "
+                 f"actions={out_shape[0] if len(out_shape) >= 2 else '<none>'!r}（允许 1 或动态维）")
+
+    history_length = layout.history_length(args.config, args.node) if args.config else 1
+    metadata_sequence = metadata_feature = 0
+    for key in ("rmcs_history_length", "rmcs_obs_frame_size"):
+        text = meta.get(key)
+        if text is None:
+            continue
+        try:
+            value = int(text)
+        except ValueError:
+            report.check(key, False, f"{key}={text!r} 不是正整数")
+            continue
+        report.check(key, value > 0, f"{key}={value}")
+        if key == "rmcs_history_length":
+            metadata_sequence = value
+        else:
+            metadata_feature = value
+    config_feature_size = obs_size // history_length if obs_size is not None else None
+    input_tail = in_shape[0:] if len(in_shape) == 1 else in_shape[1:]
+    sequence_length = args.sequence_length or metadata_sequence or (
+        history_length if len(in_shape) == 3 else 1)
+    feature_size = args.feature_size or metadata_feature or (
+        config_feature_size if len(in_shape) == 3 else None)
+    if len(in_shape) == 3:
+        declared_sequence, declared_feature = input_tail
+        if isinstance(declared_sequence, int) and declared_sequence > 0:
+            sequence_length = declared_sequence
+        if isinstance(declared_feature, int) and declared_feature > 0:
+            feature_size = declared_feature
+        model_obs = sequence_length * feature_size if sequence_length and feature_size else None
+    else:
+        model_obs = input_tail[0] if len(input_tail) == 1 else None
+    output_tail = out_shape[0:] if len(out_shape) == 1 else out_shape[1:]
+    model_act = 1
+    dynamic_output = False
+    for dim in output_tail:
+        if isinstance(dim, int) and dim > 0:
+            model_act *= dim
+        else:
+            dynamic_output = True
+    if dynamic_output:
+        model_act = act_size
+    concrete_ok = (isinstance(model_obs, int) and model_obs > 0
+                   and isinstance(model_act, int) and model_act > 0)
+    report.check("concrete obs/action size", concrete_ok,
+                 f"obs={model_obs} actions={model_act} shape obs={in_shape} actions={out_shape}")
+    if not concrete_ok:
         print(f"== SUMMARY: {'PASS' if report.ok else 'FAIL'} ==")
         sys.exit(0 if report.ok else 1)
 
@@ -279,11 +348,10 @@ def main() -> None:
         report.info("model sizes", f"obs={model_obs} actions={model_act}（取自模型）")
 
     report.check("obs feature shape", model_obs == obs_size,
-                 f"{in_shape} feature={model_obs} expected={obs_size}")
+                 f"{in_shape} flattened={model_obs} expected={obs_size}")
     report.check("actions feature shape", model_act == act_size,
-                 f"{out_shape} feature={model_act} expected={act_size}")
+                 f"{out_shape} flattened={model_act} expected={act_size}")
 
-    meta = {prop.key: prop.value for prop in model.metadata_props}
     obs_meta, act_meta = meta.get("rmcs_obs_layout"), meta.get("rmcs_actions_layout")
     version_line = meta.get("policy_version")
     if version_line:
@@ -362,7 +430,8 @@ def main() -> None:
                      else f"模型={declared_hash!r} 期望={layout.hex16(digest)}")
 
     _check_normalization(report, meta, obs_size)
-    _dummy_inference(report, args.model, obs_size, act_size)
+    _dummy_inference(report, args.model, obs_size, act_size, model_type, len(in_shape),
+                     sequence_length, feature_size or obs_size)
 
     try:
         file_id = layout.model_id(args.model)
