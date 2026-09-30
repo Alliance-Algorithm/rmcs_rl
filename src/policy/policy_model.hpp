@@ -27,7 +27,7 @@ public:
         std::optional<double> obs_clip;
         std::optional<double> action_clip;
         // 键 = 额外输入张量名，值 = 展平常量（来自 policy_server extra_inputs.<name>）
-        std::map<std::string, std::vector<double>> extra_input_values;
+        std::map<std::string, OnnxRuntime::ExtraInputValues> extra_input_values;
     };
 
     struct Info {

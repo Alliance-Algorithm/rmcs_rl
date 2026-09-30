@@ -3,9 +3,11 @@
 #include <cstddef>
 #include <cstdint>
 #include <map>
+#include <memory>
 #include <optional>
 #include <span>
 #include <string>
+#include <variant>
 #include <vector>
 
 #include <onnxruntime_cxx_api.h>
@@ -14,6 +16,9 @@ namespace rmcs_rl {
 
 class OnnxRuntime {
 public:
+    using ExtraInputValues = std::variant<
+        std::vector<double>, std::vector<std::int64_t>, std::vector<bool>>;
+
     struct Config {
         std::string model_path;
         std::string input_name = "obs";
@@ -25,7 +30,7 @@ public:
         std::size_t action_size = 0;
         // 额外输入张量的常量值（键 = 模型输入名，值 = 展平的元素），
         // 由 policy_server 的 extra_inputs.<name> YAML 参数提供。
-        std::map<std::string, std::vector<double>> extra_input_values;
+        std::map<std::string, ExtraInputValues> extra_input_values;
     };
 
     struct Info {
@@ -42,7 +47,16 @@ public:
     OnnxRuntime(
         const std::string& model_path, const std::string& input_name,
         const std::string& output_name)
-        : OnnxRuntime(Config{model_path, input_name, output_name}) {}
+        : OnnxRuntime(Config{
+              .model_path = model_path,
+              .input_name = input_name,
+              .output_name = output_name,
+              .model_type = "auto",
+              .sequence_length = 0,
+              .feature_size = 0,
+              .observation_size = 0,
+              .action_size = 0,
+              .extra_input_values = {}}) {}
 
     [[nodiscard]] std::size_t input_size() const { return input_buffer_.size(); }
     [[nodiscard]] std::size_t output_size() const { return output_size_; }
@@ -55,7 +69,11 @@ private:
     struct ConstantInput {
         std::string name;
         std::vector<std::int64_t> shape;
-        std::vector<float> values;
+        ONNXTensorElementDataType type = ONNX_TENSOR_ELEMENT_DATA_TYPE_UNDEFINED;
+        std::size_t element_count = 0;
+        std::vector<float> float_values;
+        std::vector<std::int64_t> int64_values;
+        std::unique_ptr<bool[]> bool_values;
     };
 
     Ort::Env env_{ORT_LOGGING_LEVEL_WARNING, "rmcs_rl"};

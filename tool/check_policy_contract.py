@@ -4,9 +4,10 @@
 Two modes:
 
   * self-check (no --config; used by CI, deployment YAML lives in the RMCS repo):
-      model loads; primary input "obs" / one output "actions"; float32; rank 1/2/3;
+      model loads; primary input "obs" / one output "actions" are float32; rank 1/2/3;
       MLP uses rank 2 or rank 3 and Transformer uses rank 3. Extra (non-obs)
-      inputs are allowed; with --config they must match policy_server extra_inputs.
+      inputs may be float32, int64, or bool; with --config they must match
+      policy_server extra_inputs.
       Layout metadata is OPTIONAL:
       - missing / v1 -> SKIP (stamped layout metadata is optional for model-only self-check)
       - present v2   -> signatures must be internally consistent with the tensor
@@ -152,13 +153,14 @@ def _dummy_inference(report, model_path, obs_size, act_size, model_type,
         else:
             obs = np.zeros((1, obs_size), dtype=np.float32)
         feed = {"obs": obs}
-        for name, (shape, values) in (extra_specs or {}).items():
+        for name, (shape, values, dtype) in (extra_specs or {}).items():
             count = 1
             for dim in shape:
                 count *= dim
             if values is None:
-                values = [1.0] * count
-            feed[name] = np.asarray(values, dtype=np.float32).reshape(shape)
+                values = [True] * count if dtype == "bool" else [1] * count
+            np_dtype = {"float32": np.float32, "int64": np.int64, "bool": np.bool_}[dtype]
+            feed[name] = np.asarray(values, dtype=np_dtype).reshape(shape)
         actions = session.run(["actions"], feed)[0]
     except Exception as exc:
         report.check("dummy inference", False, f"{type(exc).__name__}: {exc}")
@@ -269,9 +271,13 @@ def main() -> None:
         elem = value_info.type.tensor_type.elem_type
         return "float32" if elem == TensorProto.FLOAT else TensorProto.DataType.Name(elem).lower()
 
-    dtype_ok = (all(value.type.tensor_type.elem_type == TensorProto.FLOAT for value in inputs)
-                and out.type.tensor_type.elem_type == TensorProto.FLOAT)
-    report.check("dtype float32", dtype_ok,
+    primary_dtype_ok = inp.type.tensor_type.elem_type == TensorProto.FLOAT
+    output_dtype_ok = out.type.tensor_type.elem_type == TensorProto.FLOAT
+    extra_dtype_ok = all(value.type.tensor_type.elem_type in (
+        TensorProto.FLOAT, TensorProto.INT64, TensorProto.BOOL)
+                         for value in inputs if value.name != "obs")
+    dtype_ok = primary_dtype_ok and output_dtype_ok and extra_dtype_ok
+    report.check("dtype", dtype_ok,
                  f"inputs={[_dtype_name(value) for value in inputs]} actions={_dtype_name(out)}")
     in_shape, out_shape = _shape_of(inp), _shape_of(out)
     meta = {prop.key: prop.value for prop in model.metadata_props}
@@ -346,6 +352,10 @@ def main() -> None:
                 runtime_shape.append(dim)
                 elements *= dim
             values = None
+            dtype = _dtype_name(next(value for value in inputs if value.name == name))
+            if dtype not in ("float32", "int64", "bool"):
+                ok = False
+                detail += f" dtype={dtype}（运行时仅支持 float32/int64/bool）"
             if ok and args.config and name in declared_extra:
                 raw_values = declared_extra[name]
                 if not isinstance(raw_values, list) or not raw_values:
@@ -353,13 +363,27 @@ def main() -> None:
                     detail += " extra_inputs 值必须是非空列表"
                 else:
                     try:
-                        values = [float(item) for item in raw_values]
-                    except (TypeError, ValueError):
+                        if dtype == "float32":
+                            if any(isinstance(item, bool) for item in raw_values):
+                                raise ValueError
+                            values = [float(item) for item in raw_values]
+                        elif dtype == "int64":
+                            if any(isinstance(item, bool) for item in raw_values):
+                                raise ValueError
+                            values = [int(item) for item in raw_values]
+                            if any(isinstance(item, float) and item != int(item)
+                                   for item in raw_values):
+                                raise ValueError
+                        else:
+                            if any(not isinstance(item, bool) for item in raw_values):
+                                raise ValueError
+                            values = list(raw_values)
+                    except (TypeError, ValueError, OverflowError):
                         ok = False
                         values = None
-                        detail += " 含非数值元素"
+                        detail += f" 不符合 {dtype} 元素类型"
                     else:
-                        if any(not math.isfinite(item) for item in values):
+                        if dtype == "float32" and any(not math.isfinite(item) for item in values):
                             ok = False
                             detail += " 含非有限值"
                             values = None
@@ -369,7 +393,26 @@ def main() -> None:
                             values = None
             report.check(f"extra input {name}", ok, detail)
             if ok:
-                extra_specs[name] = (tuple(runtime_shape), values)
+                extra_specs[name] = (tuple(runtime_shape), values, dtype)
+
+    layout_sequence = layout_feature = 0
+    obs_layout_text = meta.get("rmcs_obs_layout", "")
+    if obs_layout_text.startswith("v3-history="):
+        try:
+            header, separator, entries = obs_layout_text.partition("|")
+            if not separator or not entries:
+                raise ValueError("缺少观测词条")
+            layout_sequence = int(header.removeprefix("v3-history="))
+            if layout_sequence < 1:
+                raise ValueError("history 必须为正整数")
+            layout_observation = layout.obs_signature_dim(obs_layout_text)
+            layout_feature = layout_observation // layout_sequence
+        except (ValueError, layout.LayoutError) as exc:
+            report.check("rmcs_obs_layout dimensions", False, str(exc))
+            layout_sequence = layout_feature = 0
+    if len(in_shape) == 3:
+        report.check("rank-3 layout history", layout_sequence > 0 and layout_feature > 0,
+                     f"layout T={layout_sequence} F={layout_feature}")
 
     history_length = layout.history_length(args.config, args.node) if args.config else 1
     metadata_sequence = metadata_feature = 0
@@ -389,6 +432,14 @@ def main() -> None:
             metadata_feature = value
     config_feature_size = obs_size // history_length if obs_size is not None else None
     if args.config:
+        if layout_sequence:
+            report.check("layout history == config history_length",
+                         layout_sequence == history_length,
+                         f"layout={layout_sequence} history_length={history_length}")
+        if layout_feature and config_feature_size:
+            report.check("layout frame == config frame size",
+                         layout_feature == config_feature_size,
+                         f"layout={layout_feature} 单帧={config_feature_size}")
         if metadata_sequence:
             report.check("metadata history == config history_length",
                          metadata_sequence == history_length,
@@ -403,11 +454,23 @@ def main() -> None:
         if args.feature_size and config_feature_size and args.feature_size != config_feature_size:
             report.check("--feature-size == config frame size", False,
                          f"--feature-size={args.feature_size} 单帧={config_feature_size}")
+    if layout_sequence and metadata_sequence:
+        report.check("metadata history == layout history", metadata_sequence == layout_sequence,
+                     f"rmcs_history_length={metadata_sequence} layout={layout_sequence}")
+    if layout_feature and metadata_feature:
+        report.check("metadata frame == layout frame", metadata_feature == layout_feature,
+                     f"rmcs_obs_frame_size={metadata_feature} layout={layout_feature}")
+    if layout_sequence and args.sequence_length:
+        report.check("--sequence-length == layout history", args.sequence_length == layout_sequence,
+                     f"--sequence-length={args.sequence_length} layout={layout_sequence}")
+    if layout_feature and args.feature_size:
+        report.check("--feature-size == layout frame", args.feature_size == layout_feature,
+                     f"--feature-size={args.feature_size} layout={layout_feature}")
 
     input_tail = in_shape[0:] if len(in_shape) == 1 else in_shape[1:]
-    sequence_length = args.sequence_length or metadata_sequence or (
+    sequence_length = args.sequence_length or metadata_sequence or layout_sequence or (
         history_length if len(in_shape) == 3 and args.config else None)
-    feature_size = args.feature_size or metadata_feature or (
+    feature_size = args.feature_size or metadata_feature or layout_feature or (
         config_feature_size if len(in_shape) == 3 and args.config else None)
     if len(in_shape) == 3:
         declared_sequence, declared_feature = input_tail

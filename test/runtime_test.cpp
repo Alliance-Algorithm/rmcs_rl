@@ -171,6 +171,28 @@ TEST(PolicyModel, RejectsSequenceHistoryMetadataMismatch) {
     EXPECT_THROW(PolicyModel{config}, std::invalid_argument);
 }
 
+TEST(PolicyModel, RejectsSequenceLayoutHistoryMismatch) {
+    PolicyModel::Config config;
+    config.path = RMCS_RL_SEQ_LAYOUT_MISMATCH_FIXTURE;
+    EXPECT_THROW(PolicyModel{config}, std::invalid_argument);
+}
+
+TEST(PolicyModel, LoadsSequenceUsingRequiredLayoutOnly) {
+    PolicyModel::Config config;
+    config.path = RMCS_RL_SEQ_LAYOUT_ONLY_FIXTURE;
+    PolicyModel model{config};
+    EXPECT_EQ(model.info().sequence_length, 2u);
+    EXPECT_EQ(model.info().feature_size, 3u);
+}
+
+TEST(PolicyModel, LoadsDynamicSequenceUsingRequiredLayoutOnly) {
+    PolicyModel::Config config;
+    config.path = RMCS_RL_SEQ_LAYOUT_DYNAMIC_FIXTURE;
+    PolicyModel model{config};
+    EXPECT_EQ(model.info().sequence_length, 2u);
+    EXPECT_EQ(model.info().feature_size, 3u);
+}
+
 TEST(PolicyModel, RejectsTransformerTypeOnRank2Input) {
     PolicyModel::Config config;
     config.path = RMCS_RL_IDENTITY_FIXTURE;
@@ -181,7 +203,7 @@ TEST(PolicyModel, RejectsTransformerTypeOnRank2Input) {
 TEST(PolicyModel, FeedsExtraInputConstants) {
     PolicyModel::Config config;
     config.path = RMCS_RL_EXTRA_FIXTURE;
-    config.extra_input_values["offset"] = {10.0};
+    config.extra_input_values["offset"] = std::vector<double>{10.0};
     PolicyModel model{config};
     ASSERT_EQ(model.info().obs_size, 2u);
     ASSERT_EQ(model.info().action_size, 2u);
@@ -200,15 +222,35 @@ TEST(PolicyModel, RejectsMissingExtraInputDeclaration) {
 TEST(PolicyModel, RejectsExtraInputWithoutMatchingModelInput) {
     PolicyModel::Config config;
     config.path = RMCS_RL_EXTRA_FIXTURE;
-    config.extra_input_values["offset"] = {10.0};
-    config.extra_input_values["bogus"] = {1.0};
+    config.extra_input_values["offset"] = std::vector<double>{10.0};
+    config.extra_input_values["bogus"] = std::vector<double>{1.0};
     EXPECT_THROW(PolicyModel{config}, std::invalid_argument);
 }
 
 TEST(PolicyModel, RejectsWrongExtraInputValueCount) {
     PolicyModel::Config config;
     config.path = RMCS_RL_EXTRA_FIXTURE;
-    config.extra_input_values["offset"] = {1.0, 2.0};
+    config.extra_input_values["offset"] = std::vector<double>{1.0, 2.0};
+    EXPECT_THROW(PolicyModel{config}, std::invalid_argument);
+}
+
+TEST(PolicyModel, FeedsTypedExtraInputConstants) {
+    PolicyModel::Config config;
+    config.path = RMCS_RL_TYPED_EXTRA_FIXTURE;
+    config.extra_input_values["position_ids"] = std::vector<std::int64_t>{10, 20};
+    config.extra_input_values["attention_mask"] = std::vector<bool>{true, false};
+    PolicyModel model{config};
+    std::array<double, 2> action{};
+    std::string error;
+    ASSERT_TRUE(model.run(std::array{1., 2.}, action, error)) << error;
+    EXPECT_EQ(action, (std::array{12.0, 22.0}));
+}
+
+TEST(PolicyModel, RejectsWrongTypedExtraInputConstants) {
+    PolicyModel::Config config;
+    config.path = RMCS_RL_TYPED_EXTRA_FIXTURE;
+    config.extra_input_values["position_ids"] = std::vector<bool>{true, false};
+    config.extra_input_values["attention_mask"] = std::vector<bool>{true, false};
     EXPECT_THROW(PolicyModel{config}, std::invalid_argument);
 }
 

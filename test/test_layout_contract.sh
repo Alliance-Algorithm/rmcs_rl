@@ -288,6 +288,21 @@ run_expect 1 "(j) YAML 声明了模型没有的额外输入 → FAIL" \
     "$PY" "$TOOLS/check_policy_contract.py" "$MODEL" --config "$FIXTURE_EXTRA_UNKNOWN"
 expect_msg "extra_inputs match model" "多余声明提示"
 
+run_expect 0 "typed extra_inputs（int64 + bool）自检 → PASS" \
+    "$PY" "$TOOLS/check_policy_contract.py" \
+    "$PKG/test/data/typed_extra_input_identity.onnx" --obs 2 --act 2
+expect_msg "dtype" "typed extra_inputs 类型校验"
+
+run_expect 0 "仅布局签名解析动态 rank-3 → PASS" \
+    "$PY" "$TOOLS/check_policy_contract.py" \
+    "$PKG/test/data/seq_layout_dynamic.onnx"
+expect_msg "rank-3 layout history" "动态序列由布局解析"
+
+run_expect 1 "模型 T 与布局 history 不符 → FAIL" \
+    "$PY" "$TOOLS/check_policy_contract.py" \
+    "$PKG/test/data/seq_layout_mismatch.onnx"
+expect_msg "metadata history == layout history" "布局与序列 metadata 不一致"
+
 echo
 echo "==== 结果：PASS=$PASS FAIL=$FAIL ===="
 [ "$FAIL" = 0 ] || exit 1

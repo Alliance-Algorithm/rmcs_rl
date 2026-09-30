@@ -2,9 +2,12 @@
 
 #include <algorithm>
 #include <cctype>
+#include <charconv>
 #include <cmath>
+#include <limits>
 #include <numeric>
 #include <stdexcept>
+#include <string_view>
 
 namespace rmcs_rl {
 namespace {
@@ -35,6 +38,59 @@ bool batch_dimension_ok(std::int64_t dimension) {
     // ONNX uses -1 for a dynamic dimension. Symbolic dimensions are returned
     // as -1 by the C++ API, so this also covers named batch dimensions.
     return dimension == 1 || dimension == -1;
+}
+
+struct LayoutDimensions {
+    std::size_t history = 0;
+    std::size_t feature = 0;
+    std::size_t observation = 0;
+};
+
+std::optional<LayoutDimensions> layout_dimensions(const std::optional<std::string>& value) {
+    if (!value || value->empty())
+        return std::nullopt;
+    constexpr std::string_view prefix = "v3-history=";
+    const std::string_view signature = *value;
+    if (!signature.starts_with(prefix))
+        return std::nullopt;
+
+    const auto header_end = signature.find('|', prefix.size());
+    if (header_end == std::string_view::npos)
+        throw std::invalid_argument("rmcs_obs_layout is missing observation entries");
+    const auto history_text = signature.substr(prefix.size(), header_end - prefix.size());
+    LayoutDimensions result;
+    const auto [history_end, history_error] = std::from_chars(
+        history_text.data(), history_text.data() + history_text.size(), result.history);
+    if (history_error != std::errc{}
+        || history_end != history_text.data() + history_text.size() || result.history == 0)
+        throw std::invalid_argument("rmcs_obs_layout history must be a positive integer");
+
+    std::size_t begin = header_end + 1;
+    while (begin < signature.size()) {
+        const auto end = signature.find('|', begin);
+        const auto entry = signature.substr(
+            begin, end == std::string_view::npos ? std::string_view::npos : end - begin);
+        const auto at = entry.rfind('@');
+        if (at == std::string_view::npos || at + 1 == entry.size())
+            throw std::invalid_argument("rmcs_obs_layout entry is missing @dim");
+        std::size_t dimension = 0;
+        const auto dim_text = entry.substr(at + 1);
+        const auto [dim_end, dim_error] = std::from_chars(
+            dim_text.data(), dim_text.data() + dim_text.size(), dimension);
+        if (dim_error != std::errc{} || dim_end != dim_text.data() + dim_text.size()
+            || dimension == 0)
+            throw std::invalid_argument("rmcs_obs_layout entry dimension must be positive");
+        if (dimension > std::numeric_limits<std::size_t>::max() - result.feature)
+            throw std::invalid_argument("rmcs_obs_layout dimensions overflow");
+        result.feature += dimension;
+        if (end == std::string_view::npos)
+            break;
+        begin = end + 1;
+    }
+    if (result.feature == 0 || result.history > std::numeric_limits<std::size_t>::max() / result.feature)
+        throw std::invalid_argument("rmcs_obs_layout dimensions overflow");
+    result.observation = result.history * result.feature;
+    return result;
 }
 
 } // namespace
@@ -83,26 +139,18 @@ OnnxRuntime::OnnxRuntime(const Config& config)
         throw std::invalid_argument(
             "output tensor must be named '" + output_name_ + "', got '" + actual_output.get()
             + "'");
-    for (std::size_t index = 0; index < input_count; ++index) {
-        const auto input_type = session_.GetInputTypeInfo(index);
-        if (input_type.GetONNXType() != ONNX_TYPE_TENSOR)
-            throw std::invalid_argument(
-                "input '" + input_names_[index] + "' must be a tensor");
-        const auto input_info = input_type.GetTensorTypeAndShapeInfo();
-        if (input_info.GetElementType() != ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT)
-            throw std::invalid_argument(
-                "input '" + input_names_[index] + "' element type must be float32");
-    }
-
     // Keep TypeInfo alive while reading the TensorTypeAndShapeInfo. The
     // latter is a view into TypeInfo in ONNX Runtime; chaining a temporary
     // here can read freed type metadata on some runtime builds.
     const auto input_type = session_.GetInputTypeInfo(primary_index);
     const auto output_type = session_.GetOutputTypeInfo(0);
+    if (input_type.GetONNXType() != ONNX_TYPE_TENSOR || output_type.GetONNXType() != ONNX_TYPE_TENSOR)
+        throw std::invalid_argument("obs and actions must be tensors");
     const auto input_info = input_type.GetTensorTypeAndShapeInfo();
     const auto output_info = output_type.GetTensorTypeAndShapeInfo();
-    if (output_info.GetElementType() != ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT)
-        throw std::invalid_argument("tensor element type must be float32");
+    if (input_info.GetElementType() != ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT
+        || output_info.GetElementType() != ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT)
+        throw std::invalid_argument("obs and actions element types must be float32");
 
     const auto raw_input_shape = input_info.GetShape();
     const auto raw_output_shape = output_info.GetShape();
@@ -149,9 +197,30 @@ OnnxRuntime::OnnxRuntime(const Config& config)
 
     const auto metadata_sequence = parse_positive(metadata("rmcs_history_length"), "rmcs_history_length");
     const auto metadata_feature = parse_positive(metadata("rmcs_obs_frame_size"), "rmcs_obs_frame_size");
-    std::size_t sequence = config.sequence_length != 0 ? config.sequence_length : metadata_sequence;
-    std::size_t feature = config.feature_size != 0 ? config.feature_size : metadata_feature;
-    const auto expected_observation = config.observation_size;
+    const auto layout = layout_dimensions(metadata("rmcs_obs_layout"));
+    if (raw_input_shape.size() == 3 && !layout)
+        throw std::invalid_argument("rank-3 model requires an rmcs_obs_layout v3-history signature");
+    if (layout && metadata_sequence != 0 && metadata_sequence != layout->history)
+        throw std::invalid_argument("rmcs_history_length does not match rmcs_obs_layout");
+    if (layout && metadata_feature != 0 && metadata_feature != layout->feature)
+        throw std::invalid_argument("rmcs_obs_frame_size does not match rmcs_obs_layout");
+    if (layout && config.sequence_length != 0 && config.sequence_length != layout->history)
+        throw std::invalid_argument("sequence_length does not match rmcs_obs_layout");
+    if (layout && config.feature_size != 0 && config.feature_size != layout->feature)
+        throw std::invalid_argument("feature_size does not match rmcs_obs_layout");
+    std::size_t sequence = config.sequence_length != 0
+                               ? config.sequence_length
+                               : metadata_sequence != 0 ? metadata_sequence
+                                                        : layout ? layout->history : 0;
+    std::size_t feature = config.feature_size != 0
+                              ? config.feature_size
+                              : metadata_feature != 0 ? metadata_feature
+                                                      : layout ? layout->feature : 0;
+    std::size_t expected_observation = config.observation_size;
+    if (expected_observation == 0 && layout)
+        expected_observation = layout->observation;
+    if (layout && expected_observation != layout->observation)
+        throw std::invalid_argument("observation_size does not match rmcs_obs_layout dimensions");
 
     input_shape_.resize(raw_input_shape.size());
     if (raw_input_shape.size() == 1) {
@@ -215,7 +284,7 @@ OnnxRuntime::OnnxRuntime(const Config& config)
 
     // Extra (non-obs) inputs: every one needs a constant from extra_inputs.*,
     // and every declared constant must match a model input.
-    std::map<std::string, std::vector<double>> remaining = config.extra_input_values;
+    auto remaining = config.extra_input_values;
     constant_slot_.assign(input_count, -1);
     for (std::size_t index = 0; index < input_count; ++index) {
         if (index == primary_index)
@@ -226,7 +295,7 @@ OnnxRuntime::OnnxRuntime(const Config& config)
                 "model input '" + input_names_[index]
                 + "' has no constant value; declare it under policy_server extra_inputs."
                    "<name> in the vehicle YAML");
-        const std::vector<double> source = found->second;
+        const auto source = std::move(found->second);
         remaining.erase(found);
 
         const auto extra_type = session_.GetInputTypeInfo(index);
@@ -234,9 +303,12 @@ OnnxRuntime::OnnxRuntime(const Config& config)
             throw std::invalid_argument(
                 "extra input '" + input_names_[index] + "' must be a tensor");
         const auto extra_info = extra_type.GetTensorTypeAndShapeInfo();
-        if (extra_info.GetElementType() != ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT)
+        const auto extra_element_type = extra_info.GetElementType();
+        if (extra_element_type != ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT
+            && extra_element_type != ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64
+            && extra_element_type != ONNX_TENSOR_ELEMENT_DATA_TYPE_BOOL)
             throw std::invalid_argument(
-                "extra input '" + input_names_[index] + "' element type must be float32");
+                "extra input '" + input_names_[index] + "' element type must be float32, int64, or bool");
         const auto raw_shape = extra_info.GetShape();
         if (raw_shape.empty() || raw_shape.size() > 3)
             throw std::invalid_argument(
@@ -244,6 +316,7 @@ OnnxRuntime::OnnxRuntime(const Config& config)
 
         ConstantInput constant;
         constant.name = input_names_[index];
+        constant.type = extra_element_type;
         std::size_t elements = 1;
         std::size_t first_dim = 0;
         if (raw_shape.size() >= 2) {
@@ -262,16 +335,60 @@ OnnxRuntime::OnnxRuntime(const Config& config)
             constant.shape.push_back(raw_shape[dim]);
             elements *= static_cast<std::size_t>(raw_shape[dim]);
         }
-        if (source.size() != elements)
+        if (std::visit([](const auto& values) { return values.size(); }, source) != elements)
             throw std::invalid_argument(
                 "extra input '" + constant.name + "' needs " + std::to_string(elements)
-                + " values, got " + std::to_string(source.size()));
-        constant.values.reserve(elements);
-        for (const double value : source) {
-            if (!std::isfinite(value))
+                + " values, got "
+                + std::to_string(std::visit([](const auto& values) { return values.size(); }, source)));
+        constant.element_count = elements;
+        if (extra_element_type == ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT) {
+            constant.float_values.reserve(elements);
+            if (const auto* floats = std::get_if<std::vector<double>>(&source)) {
+                for (const double value : *floats) {
+                    const float converted = static_cast<float>(value);
+                    if (!std::isfinite(converted))
+                        throw std::invalid_argument(
+                            "extra input '" + constant.name + "' contains a non-finite or out-of-range float32 value");
+                    constant.float_values.push_back(converted);
+                }
+            } else if (const auto* integers = std::get_if<std::vector<std::int64_t>>(&source)) {
+                for (const auto value : *integers) {
+                    const float converted = static_cast<float>(value);
+                    if (!std::isfinite(converted))
+                        throw std::invalid_argument(
+                            "extra input '" + constant.name + "' contains an out-of-range float32 value");
+                    constant.float_values.push_back(converted);
+                }
+            } else {
                 throw std::invalid_argument(
-                    "extra input '" + constant.name + "' contains a non-finite value");
-            constant.values.push_back(static_cast<float>(value));
+                    "extra input '" + constant.name + "' needs a float or integer list");
+            }
+        } else if (extra_element_type == ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64) {
+            if (const auto* integers = std::get_if<std::vector<std::int64_t>>(&source)) {
+                constant.int64_values = *integers;
+            } else if (const auto* floats = std::get_if<std::vector<double>>(&source)) {
+                constant.int64_values.reserve(elements);
+                for (const double value : *floats) {
+                    const auto promoted = static_cast<long double>(value);
+                    if (!std::isfinite(value) || std::trunc(value) != value
+                        || promoted < static_cast<long double>(std::numeric_limits<std::int64_t>::min())
+                        || promoted > static_cast<long double>(std::numeric_limits<std::int64_t>::max()))
+                        throw std::invalid_argument(
+                            "extra input '" + constant.name + "' contains a non-integral or out-of-range int64 value");
+                    constant.int64_values.push_back(static_cast<std::int64_t>(value));
+                }
+            } else {
+                throw std::invalid_argument(
+                    "extra input '" + constant.name + "' needs an integer or integral float list for int64 tensor");
+            }
+        } else {
+            const auto* booleans = std::get_if<std::vector<bool>>(&source);
+            if (!booleans)
+                throw std::invalid_argument(
+                    "extra input '" + constant.name + "' needs a bool list for bool tensor");
+            constant.bool_values = std::make_unique<bool[]>(elements);
+            for (std::size_t value_index = 0; value_index < elements; ++value_index)
+                constant.bool_values[value_index] = (*booleans)[value_index];
         }
         constant_slot_[index] = static_cast<std::int64_t>(constants_.size());
         constants_.push_back(std::move(constant));
@@ -332,9 +449,19 @@ void OnnxRuntime::run(std::span<const float> input, std::span<float> output) {
                 input_shape_.size()));
         } else {
             auto& constant = constants_[static_cast<std::size_t>(constant_slot_[index])];
-            input_tensors.push_back(Ort::Value::CreateTensor<float>(
-                memory_info_, constant.values.data(), constant.values.size(), constant.shape.data(),
-                constant.shape.size()));
+            if (constant.type == ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT) {
+                input_tensors.push_back(Ort::Value::CreateTensor<float>(
+                    memory_info_, constant.float_values.data(), constant.element_count,
+                    constant.shape.data(), constant.shape.size()));
+            } else if (constant.type == ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64) {
+                input_tensors.push_back(Ort::Value::CreateTensor<std::int64_t>(
+                    memory_info_, constant.int64_values.data(), constant.element_count,
+                    constant.shape.data(), constant.shape.size()));
+            } else {
+                input_tensors.push_back(Ort::Value::CreateTensor<bool>(
+                    memory_info_, constant.bool_values.get(), constant.element_count,
+                    constant.shape.data(), constant.shape.size()));
+            }
         }
     }
     const char* output_names[] = {output_name_.c_str()};

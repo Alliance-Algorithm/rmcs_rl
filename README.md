@@ -62,25 +62,26 @@ ros2 run rmcs_rl policy_server --ros-args --params-file <车辆配置.yaml>
 `auto` 优先读取 `rmcs_model_type`，没有 metadata 时才按 rank-2 推断 MLP、rank-3 推断
 Transformer。
 
-多输入模型（例如独立 attention mask）除 `obs` 外的输入必须是常量张量，在
-`policy_server` 段用 `extra_inputs.<输入名>: [元素列表]` 声明；启动时校验名字对齐、
-元素数量与形状一致、数值有限，缺声明或声明了模型没有的输入都会拒绝；
+多输入模型（例如独立 attention mask 或 position id）除 `obs` 外的输入必须是常量张量，在
+`policy_server` 段用 `extra_inputs.<输入名>: [元素列表]` 声明；启动时根据 ONNX 输入类型
+创建 `float32`、`int64` 或 `bool` 张量，并校验名字、元素数量和形状；缺声明、类型不匹配
+或声明了模型没有的输入都会拒绝；
 输出仍必须是唯一的 `actions`。
 
 ```yaml
 policy_server:
   ros__parameters:
     extra_inputs:
-      attn_mask: [1, 1, 1, 1]   # 展平常量，长度 = 模型该输入非 batch 维元素数
+      attn_mask: [true, true, true, true] # bool mask；也支持 int64 position id
 ```
 
 部署模型须含 `rmcs_obs_layout`、`rmcs_actions_layout`；建议带 `policy_layout_hash` 和版本。
 `history_length × 单帧维数 = rl_obs_size`。归一化均值和标准差必须成对提供，标准差为正数。
 
-rank-3 模型的序列切分受强制约束：模型的 `T == history_length`、`F == 单帧维数`。
-盖章默认把 `rmcs_history_length`、`rmcs_obs_frame_size` 从 YAML 写入 metadata；
-契约工具与 policy_server 启动时按 `--sequence-length/rmcs_history_length/history_length`
-（参数 > metadata > 模型声明）逐级等值校验，任一级不符即拒绝。
+rank-3 模型的序列切分受强制约束：模型的 `T == v3-history`、`F == rl_obs_size / history_length`，
+其中 `v3-history` 来自必需的 `rmcs_obs_layout`，并且最终还会由动作消息的 layout hash 与
+`rl_bridge` 再次核对。`rmcs_history_length`、`rmcs_obs_frame_size` 和 `sequence_length` 是
+启动时的辅助维度声明，缺失或不一致都会拒绝；它们不能替代布局签名。
 
 带历史帧的模型示例（桥和策略进程都要使用同一历史长度）：
 
@@ -97,7 +98,8 @@ policy_server:
     rl_obs_size: 208
 ```
 
-盖章默认写入序列键（`rmcs_history_length`/`rmcs_obs_frame_size`，取自 YAML）；
+盖章默认写入序列键（`rmcs_history_length`/`rmcs_obs_frame_size`，取自 YAML）；部署端还会
+从必需的 `rmcs_obs_layout` 中读取 `v3-history`，防止只依赖可选 metadata。
 `rmcs_model_type` 可选，缺省由部署端按输入 rank 推断：
 
 ```sh
@@ -145,8 +147,8 @@ colcon test --merge-install --packages-select rmcs_rl rmcs_core
 PYTHON=<带 onnx、onnxruntime、PyYAML 的 Python> bash src/rmcs_rl/test/test_layout_contract.sh
 ```
 
-C++ 回归覆盖推理归一化、历史帧、rank-3 序列输入、extra_inputs 常量喂入与错配拒绝、
+C++ 回归覆盖推理归一化、历史帧、rank-3 序列输入、float32/int64/bool extra_inputs 常量喂入与错配拒绝、
 跨线程动作快照；Python 回归覆盖布局解析、盖章、T==history 强制、model_type/rank 匹配、
 多输入声明对账及错误契约拒绝。夹具由 `test/gen_seq_fixtures.py`、
-`test/gen_extra_input_fixture.py` 确定性生成后提交。
+`test/gen_extra_input_fixture.py` 和 `test/gen_typed_extra_input_fixture.py` 确定性生成后提交。
 车辆包保留 DM 使能、帧解码、闭链几何、Body IMU 以及 MuJoCo 查看器回归。

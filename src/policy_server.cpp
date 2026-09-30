@@ -12,6 +12,7 @@
 #include <string>
 #include <string_view>
 #include <utility>
+#include <variant>
 #include <vector>
 
 #include <ament_index_cpp/get_package_share_directory.hpp>
@@ -72,25 +73,28 @@ public:
                 throw std::invalid_argument(
                     "policy_server: extra_inputs entry must be extra_inputs.<input_name>");
             const auto parameter = get_parameter(parameter_name);
-            std::vector<double> values;
+            OnnxRuntime::ExtraInputValues values;
             switch (parameter.get_type()) {
             case rclcpp::ParameterType::PARAMETER_DOUBLE_ARRAY:
                 values = parameter.as_double_array();
                 break;
             case rclcpp::ParameterType::PARAMETER_INTEGER_ARRAY:
-                for (const auto item : parameter.as_integer_array())
-                    values.push_back(static_cast<double>(item));
+                values = parameter.as_integer_array();
+                break;
+            case rclcpp::ParameterType::PARAMETER_BOOL_ARRAY:
+                values = parameter.as_bool_array();
                 break;
             default:
                 throw std::invalid_argument(
-                    "policy_server: " + parameter_name + " must be a numeric list");
+                    "policy_server: " + parameter_name + " must be a float, integer, or bool list");
             }
-            if (values.empty())
+            if (std::visit([](const auto& items) { return items.empty(); }, values))
                 throw std::invalid_argument("policy_server: " + parameter_name + " is empty");
-            for (const double value : values)
-                if (!std::isfinite(value))
-                    throw std::invalid_argument(
-                        "policy_server: " + parameter_name + " contains a non-finite value");
+            if (const auto* floats = std::get_if<std::vector<double>>(&values))
+                for (const double value : *floats)
+                    if (!std::isfinite(value))
+                        throw std::invalid_argument(
+                            "policy_server: " + parameter_name + " contains a non-finite value");
             config.extra_input_values.emplace(extra_name, std::move(values));
         }
         config.normalization_from_metadata = bool_or(*this, "normalization_from_metadata", true);

@@ -100,7 +100,11 @@ if(BUILD_TESTING)
         RMCS_RL_IDENTITY_FIXTURE="${PROJECT_SOURCE_DIR}/test/data/normalized_identity.onnx"
         RMCS_RL_SEQ_FIXTURE="${PROJECT_SOURCE_DIR}/test/data/seq_identity.onnx"
         RMCS_RL_SEQ_MISMATCH_FIXTURE="${PROJECT_SOURCE_DIR}/test/data/seq_history_mismatch.onnx"
-        RMCS_RL_EXTRA_FIXTURE="${PROJECT_SOURCE_DIR}/test/data/extra_input_identity.onnx")
+        RMCS_RL_SEQ_LAYOUT_MISMATCH_FIXTURE="${PROJECT_SOURCE_DIR}/test/data/seq_layout_mismatch.onnx"
+        RMCS_RL_SEQ_LAYOUT_ONLY_FIXTURE="${PROJECT_SOURCE_DIR}/test/data/seq_layout_only.onnx"
+        RMCS_RL_SEQ_LAYOUT_DYNAMIC_FIXTURE="${PROJECT_SOURCE_DIR}/test/data/seq_layout_dynamic.onnx"
+        RMCS_RL_EXTRA_FIXTURE="${PROJECT_SOURCE_DIR}/test/data/extra_input_identity.onnx"
+        RMCS_RL_TYPED_EXTRA_FIXTURE="${PROJECT_SOURCE_DIR}/test/data/typed_extra_input_identity.onnx")
 endif()
 
 ament_export_dependencies(rosidl_default_runtime)
