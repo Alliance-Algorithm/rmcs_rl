@@ -198,8 +198,9 @@ OnnxRuntime::OnnxRuntime(const Config& config)
     const auto metadata_sequence = parse_positive(metadata("rmcs_history_length"), "rmcs_history_length");
     const auto metadata_feature = parse_positive(metadata("rmcs_obs_frame_size"), "rmcs_obs_frame_size");
     const auto layout = layout_dimensions(metadata("rmcs_obs_layout"));
-    if (raw_input_shape.size() == 3 && !layout)
-        throw std::invalid_argument("rank-3 model requires an rmcs_obs_layout v3-history signature");
+    if (raw_input_shape.size() == 3 && !layout && (config.sequence_length == 0 || config.feature_size == 0))
+        throw std::invalid_argument(
+            "rank-3 model without metadata requires sequence_length and feature_size");
     if (layout && metadata_sequence != 0 && metadata_sequence != layout->history)
         throw std::invalid_argument("rmcs_history_length does not match rmcs_obs_layout");
     if (layout && metadata_feature != 0 && metadata_feature != layout->feature)

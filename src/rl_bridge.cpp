@@ -261,14 +261,6 @@ private:
                     "(policy process and bridge disagree; refusing to output actions)",
                     hex16(snapshot.layout_hash).c_str(), hex16(layout_hash_).c_str());
             }
-        } else if (
-            config_.expected_model_id != 0 && snapshot.model_id != config_.expected_model_id) {
-            if (contract_ok_) {
-                contract_ok_ = false;
-                RCLCPP_FATAL(
-                    get_logger(), "model mismatch: action model_id=%s != expected_model_id=%s",
-                    hex16(snapshot.model_id).c_str(), hex16(config_.expected_model_id).c_str());
-            }
         }
     }
 

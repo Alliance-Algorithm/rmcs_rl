@@ -133,7 +133,7 @@ public:
 private:
     void on_observation(msg::Observation::UniquePtr message) {
         const auto& info = model_->info();
-        if (message->layout_hash != info.layout_hash) {
+        if (info.layout_hash != 0 && message->layout_hash != info.layout_hash) {
             if (!layout_mismatch_logged_) {
                 layout_mismatch_logged_ = true;
                 RCLCPP_ERROR(
@@ -154,7 +154,9 @@ private:
         }
         action.header.stamp = get_clock()->now();
         action.obs_seq = message->obs_seq;
-        action.layout_hash = info.layout_hash;
+        // The bridge is the source of truth for the YAML-defined layout when a model has no
+        // stamped metadata. Preserve the observation contract on the action message.
+        action.layout_hash = message->layout_hash;
         action.model_id = info.model_id;
         action_publisher_->publish(action);
         const auto elapsed =

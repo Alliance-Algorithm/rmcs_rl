@@ -24,7 +24,6 @@ struct BridgeConfig {
     double policy_rate = 50.0;
     double max_action_age = 0.04;
     std::chrono::nanoseconds pub_period{};
-    std::uint64_t expected_model_id = 0;
     InvalidMode invalid_mode = InvalidMode::kNaN;
     std::string enable_path;
     bool enable_default = false;

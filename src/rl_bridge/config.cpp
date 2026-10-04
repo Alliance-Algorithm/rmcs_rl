@@ -82,8 +82,6 @@ BridgeConfig load_bridge_config(rclcpp::Node& node) {
     config.max_action_age = number_or(node, "max_action_age", 2.0 / config.policy_rate);
     if (!(config.max_action_age > 0.0) || !is_finite(config.max_action_age))
         throw std::invalid_argument("RlBridge: max_action_age must be finite and > 0");
-    config.expected_model_id =
-        parse_u64(string_or(node, "expected_model_id", "0"), "expected_model_id");
 
     const std::string invalid = string_or(node, "invalid_value", "nan");
     if (invalid == "nan")

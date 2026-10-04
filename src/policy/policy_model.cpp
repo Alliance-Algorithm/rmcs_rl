@@ -64,27 +64,16 @@ PolicyModel::PolicyModel(const Config& config)
     info_.sequence_length = runtime_.info().sequence_length;
     info_.feature_size = runtime_.info().feature_size;
     std::string error;
-    if (!model_id_of_file(config.path, info_.model_id, error))
-        throw std::runtime_error(error);
+    // Model identity and layout metadata are intentionally optional. The bridge owns the
+    // observation/action contract from YAML; the policy server only validates tensor sizes.
+    model_id_of_file(config.path, info_.model_id, error);
 
     info_.obs_signature = runtime_.metadata("rmcs_obs_layout").value_or("");
     info_.actions_signature = runtime_.metadata("rmcs_actions_layout").value_or("");
     info_.version = runtime_.metadata("policy_version").value_or("");
-    if (info_.obs_signature.empty() || info_.actions_signature.empty())
-        throw std::invalid_argument(
-            "model is missing rmcs_obs_layout / rmcs_actions_layout; "
-            "stamp it with tool/stamp_layout_metadata.py before deploying");
-    info_.layout_hash = rmcs_rl::layout_hash(
-        info_.obs_signature, info_.actions_signature, info_.obs_size, info_.action_size);
-    if (const auto declared = runtime_.metadata("policy_layout_hash");
-        declared && !declared->empty()) {
-        std::size_t consumed = 0;
-        const auto hash = std::stoull(*declared, &consumed, 16);
-        if (consumed != declared->size() || hash != info_.layout_hash)
-            throw std::invalid_argument(
-                "policy_layout_hash does not match layout metadata: expected "
-                + hex16(info_.layout_hash));
-    }
+    if (!info_.obs_signature.empty() && !info_.actions_signature.empty())
+        info_.layout_hash = rmcs_rl::layout_hash(
+            info_.obs_signature, info_.actions_signature, info_.obs_size, info_.action_size);
 
     load_normalization(config);
     obs_buffer_.resize(info_.obs_size);
