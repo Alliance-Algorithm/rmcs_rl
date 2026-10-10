@@ -98,9 +98,40 @@ policy_server:
     rl_obs_size: 208
 ```
 
-盖章默认写入序列键（`rmcs_history_length`/`rmcs_obs_frame_size`，取自 YAML）；部署端还会
-从必需的 `rmcs_obs_layout` 中读取 `v3-history`，防止只依赖可选 metadata。
-`rmcs_model_type` 可选，缺省由部署端按输入 rank 推断：
+### 模型盖章
+
+部署模型必须含 `rmcs_obs_layout`、`rmcs_actions_layout`，建议同时带 `policy_layout_hash`
+和版本。盖章按**当前 YAML** 生成签名，所以顺序是先核对训练布局、再盖章、再同步 YAML、
+最后复验。
+
+**1. 装依赖（一次性）**：需要一个带 `onnx` 与 `PyYAML` 的 Python。没有就运行：
+
+```sh
+bash src/rmcs_rl/tool/install_model_tools.sh
+```
+
+它创建 `/opt/rmcs-tools/venv`；已有环境则 `export RMCS_ONNX_PYTHON=<venv>/bin/python` 直接跳过安装。
+`stamp_model.sh` 自己会依次找 `RMCS_ONNX_PYTHON`、该 venv、`python3`；下面直接调用
+`python3` 的脚本若系统解释器没装 `onnx`，改用 `<venv>/bin/python`。
+
+**2. 核对训练布局**：逐条确认观测顺序、坐标、基准角、缩放和频率与当前 YAML 一致。
+YAML 写错会盖出「自洽但错误」的签名，后续校验照样通过，所以这一步不能省。
+
+**3. 盖章**：推荐用一键脚本。它先提示模型布局与 YAML 是否一致（不一致只警告不阻断），
+盖完立即复验，最后打印要手工改的 YAML 两行：
+
+```sh
+bash src/rmcs_rl/tool/stamp_model.sh <模型.onnx> --config <车辆配置.yaml> --version <版本>
+```
+
+模型放在 `src/rmcs_rl/models/` 下时只写文件名；`--config` 缺省为
+`src/rmcs_bringup/config/wheel-leg-infantry-rl.yaml`，`--node` 缺省 `rl_bridge`。
+带历史帧或特殊结构时补 `--model-type mlp|transformer|generic`、`--sequence-length N`、
+`--feature-size N`。脚本只盖 metadata，不改计算图/权重，也不改 YAML——YAML 由你手工改最安全。
+
+只需写 metadata、不自动复验时用底层脚本。盖章默认写入序列键（`rmcs_history_length`/
+`rmcs_obs_frame_size`，取自 YAML）；部署端还会从必需的 `rmcs_obs_layout` 中读取
+`v3-history`，防止只依赖可选 metadata。`rmcs_model_type` 可选，缺省由部署端按输入 rank 推断：
 
 ```sh
 python3 src/rmcs_rl/tool/stamp_layout_metadata.py \
@@ -108,22 +139,21 @@ python3 src/rmcs_rl/tool/stamp_layout_metadata.py \
   --model-type transformer
 ```
 
-新模型先核对训练的观测顺序、坐标、基准角、缩放和频率，再盖章：
+**4. 同步 YAML 两处**：按工具输出手工改 `policy_server.rl_model_path` 与
+`rl_bridge.expected_model_id`，不要让脚本改配置文件。
 
-```sh
-bash src/rmcs_rl/tool/stamp_model.sh <模型.onnx> --config <车辆配置.yaml> --version <版本>
-```
-
-按工具输出同步 `policy_server.rl_model_path`、`rl_bridge.expected_model_id`，然后验证：
+**5. 复验**：
 
 ```sh
 python3 src/rmcs_rl/tool/check_policy_contract.py <模型.onnx> --config <车辆配置.yaml> --node rl_bridge --expect-model-id <ID>
 ```
 
-盖章只写元数据；布局匹配不能证明训练侧的坐标或动作含义正确。
-更新模型或配置后重启 RMCS。模型或布局不匹配会锁存拒绝动作，需要重启恢复。
+**6. 重启 RMCS**：更新模型或配置后必须重启。模型或布局不匹配会锁存拒绝动作，需要重启恢复。
 
-当前部署使用 `models/deformable_sps_V1.onnx`；其 `rmcs_obs_layout`、
+盖章只写元数据；布局匹配不能证明训练侧的坐标或动作含义正确。
+
+当前部署使用 `models/deformable_v2_transformer.onnx`（8 帧历史 × 32 维单帧，输入 rank-3
+`obs[1,8,32]`，`rmcs_model_type=transformer`）；其 `rmcs_obs_layout`、
 `rmcs_actions_layout`、`policy_layout_hash` 和 `policy_version` 已按
 `deformable-infantry-omni-rl.yaml` 盖章。盖章只确认运行时布局契约，不能只按张量维数
 推断训练侧的坐标或动作含义；更新模型或 YAML 后必须重新盖章并同步 `expected_model_id`。
