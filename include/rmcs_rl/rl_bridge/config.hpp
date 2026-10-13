@@ -24,10 +24,12 @@ struct BridgeConfig {
     double policy_rate = 50.0;
     double max_action_age = 0.04;
     std::chrono::nanoseconds pub_period{};
+    std::chrono::nanoseconds history_period{};
     InvalidMode invalid_mode = InvalidMode::kNaN;
     std::string enable_path;
     bool enable_default = false;
     std::string reset_path;
+    std::string flat_hold_path;
 };
 
 BridgeConfig load_bridge_config(rclcpp::Node& node);

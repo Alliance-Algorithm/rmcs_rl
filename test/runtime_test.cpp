@@ -10,6 +10,7 @@
 
 #include <gtest/gtest.h>
 #include <rmcs_rl/rl_bridge/action_channel.hpp>
+#include <rmcs_rl/rl_bridge/action_feedback_history.hpp>
 #include <rmcs_rl/rl_bridge/observation_history.hpp>
 #include <rmcs_rl/rl_bridge/observation_timeline.hpp>
 
@@ -26,6 +27,58 @@ TEST(ObservationHistory, PreservesFrameSizeOrderAndReset) {
     history.reset();
     EXPECT_EQ(history.append(std::array{7.0, 8.0}), (std::vector{7., 8., 7., 8., 7., 8.}));
     EXPECT_THROW(history.append(std::array{1.0}), std::invalid_argument);
+}
+
+TEST(ActionFeedbackHistory, KeepsTenMillisecondPriorActionAndClearsOnReset) {
+    using namespace std::chrono_literals;
+    const ActionFeedbackHistory::Clock::time_point start{};
+    ActionFeedbackHistory feedback{1};
+    feedback.store(start, std::array{1.0});
+    EXPECT_EQ(feedback.sample(start + 5ms, 10ms), (std::vector{0.0}));
+    feedback.store(start + 5ms, std::array{2.0});
+    EXPECT_EQ(feedback.sample(start + 10ms, 10ms), (std::vector{1.0}));
+    feedback.store(start + 10ms, std::array{3.0});
+    EXPECT_EQ(feedback.sample(start + 15ms, 10ms), (std::vector{2.0}));
+    feedback.store(start + 5ms, std::array{999.0}); // delayed response cannot rewind state
+    EXPECT_EQ(feedback.sample(start + 20ms, 10ms), (std::vector{3.0}));
+    feedback.reset();
+    EXPECT_EQ(feedback.sample(start + 30ms, 10ms), (std::vector{0.0}));
+    EXPECT_THROW(feedback.store(start, std::array{1.0, 2.0}), std::invalid_argument);
+}
+
+TEST(ObservationHistory, FasterInferencePreservesTrainingTimeSpan) {
+    using namespace std::chrono_literals;
+    const ObservationHistory::Clock::time_point start{};
+    for (const std::size_t length : {5u, 8u}) {
+        ObservationHistory history{1, length, 10ms};
+        for (int ms = 0; ms <= 100; ms += 5) {
+            const auto& values = history.append(std::array{double(ms)}, start + std::chrono::milliseconds(ms));
+            for (std::size_t i = 0; i < length; ++i)
+                EXPECT_DOUBLE_EQ(values[i], std::max(0.0, double(ms) - 10.0 * (length - 1 - i)));
+        }
+        history.reset();
+        const auto& values = history.append(std::array{42.0}, start + 1s);
+        for (double value : values)
+            EXPECT_DOUBLE_EQ(value, 42.0);
+        EXPECT_THROW(history.append(std::array{1.0}, start + 1s), std::invalid_argument);
+        const auto& after_gap = history.append(std::array{99.0}, start + 2s);
+        for (double value : after_gap)
+            EXPECT_DOUBLE_EQ(value, 99.0);
+    }
+}
+
+TEST(ObservationTimeline, SchedulingJitterDoesNotAccumulate) {
+    using namespace std::chrono_literals;
+    ObservationTimeline timeline;
+    const ObservationTimeline::Clock::time_point start{};
+    timeline.publish(start, 5ms);
+    EXPECT_TRUE(timeline.due(start + 6ms, 5ms));
+    timeline.publish(start + 6ms, 5ms);
+    EXPECT_FALSE(timeline.due(start + 9ms, 5ms));
+    EXPECT_TRUE(timeline.due(start + 10ms, 5ms));
+    timeline.publish(start + 21ms, 5ms);
+    EXPECT_FALSE(timeline.due(start + 24ms, 5ms));
+    EXPECT_TRUE(timeline.due(start + 25ms, 5ms));
 }
 
 TEST(ObservationTimeline, RejectsPreResetAndOlderActions) {
