@@ -16,8 +16,8 @@ class PolicyModel {
 public:
     struct Config {
         std::string path;
-        std::string input_name = "obs";
-        std::string output_name = "actions";
+        std::string input_name;
+        std::string output_name;
         std::string model_type = "auto";
         std::size_t sequence_length = 0;
         std::size_t feature_size = 0;
@@ -32,9 +32,6 @@ public:
 
     struct Info {
         std::string path;
-        std::string obs_signature;
-        std::string actions_signature;
-        std::string version;
         std::size_t obs_size = 0;
         std::size_t action_size = 0;
         std::string model_type;
@@ -42,8 +39,6 @@ public:
         std::size_t output_rank = 0;
         std::size_t sequence_length = 1;
         std::size_t feature_size = 0;
-        std::uint64_t layout_hash = 0;
-        std::uint64_t model_id = 0;
     };
 
     explicit PolicyModel(const Config& config);

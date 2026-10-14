@@ -3,8 +3,6 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
-#include <fstream>
-#include <span>
 #include <string>
 #include <string_view>
 
@@ -41,31 +39,6 @@ inline std::uint64_t layout_hash(
     canonical.append("x");
     canonical.append(std::to_string(actions_size));
     return fnv1a64(canonical);
-}
-
-inline bool model_id_of_file(const std::string& path, std::uint64_t& out, std::string& error) {
-    std::ifstream stream{path, std::ios::binary};
-    if (!stream) {
-        error = "cannot open model file '" + path + "'";
-        return false;
-    }
-    std::uint64_t hash = kFnv1a64Offset;
-    std::string buffer(64 * 1024, '\0');
-    while (stream) {
-        stream.read(buffer.data(), static_cast<std::streamsize>(buffer.size()));
-        const auto read = static_cast<std::size_t>(stream.gcount());
-        if (read == 0)
-            break;
-        for (std::size_t i = 0; i < read; ++i)
-            hash = (hash ^ static_cast<std::uint64_t>(static_cast<unsigned char>(buffer[i])))
-                 * kFnv1a64Prime;
-    }
-    if (stream.bad()) {
-        error = "failed while reading model file '" + path + "'";
-        return false;
-    }
-    out = hash;
-    return true;
 }
 
 } // namespace rmcs_rl

@@ -1,184 +1,55 @@
 # rmcs_rl
 
-RMCS 的 RL 部署包。控制进程通过组件接口组装观测，独立策略进程执行 ONNX 推理；
-车辆侧消费器负责动作语义、模式切换、限位和电机控制。
+RMCS RL deployment package, referenced by RMCS as `rmcs_ws/src/rmcs_rl` submodule.
 
-## 职责与源码
+## Components
 
-| 层 | 文件 | 职责 |
+| Deployment | Components | Responsibility |
 | --- | --- | --- |
-| 控制桥 | `src/rl_bridge.cpp` | 组件接口、观测发布、动作时效与契约门控 |
-| 桥配置 | `src/rl_bridge/config.cpp` | 参数、维数、词条布局的启动检查 |
-| 观测与历史 | `src/rl_bridge/observation.cpp`、`observation_history.cpp`、`observation_timeline.hpp` | 单帧观测、历史堆叠、序号时效与复位 |
-| 动作通道 | `src/rl_bridge/action_channel.cpp` | ROS 回调与控制循环之间传递完整快照，控制循环不等待锁 |
-| ROS 策略服务 | `src/policy_server.cpp` | 订阅观测、发布动作和可选状态 |
-| 策略模型 | `src/policy/policy_model.cpp` | 元数据、模型 ID、归一化、裁剪、有限值检查 |
-| 推理后端 | `src/policy/onnx_runtime.cpp` | ONNX Runtime 会话、张量形状及执行 |
-| 子进程管理 | `src/policy_server_launcher.cpp` | 启停、退出回收、延时重启 |
-| 参数解析 | `src/parameters.cpp` | 上述组件共用的类型及数值检查 |
+| deformable | `rmcs_rl::RlBridge`, `rmcs_rl::PolicyServerLauncher` | YAML observation/history assembly, asynchronous inference, action freshness and process lifecycle |
+| wheel-leg | `rmcs::rl::RlController` | Fixed wheel-leg observations, direct inference, preparation, feedback PD and recovery |
 
-组件保持 RMCS 的 `.cpp` 类布局，构造函数直接注册输出。观测输入类型依赖其他组件的
-输出表，在 `before_pairing()` 中解析。非模板模型实现位于 `.cpp`，私有头文件放在
-`src/policy/`；控制桥不链接 ONNX Runtime。
+Vehicle hardware, remote commands, deformable action consumption and suspension arbitration
+remain in `rmcs_core`. Vehicle configurations belong to `rmcs_bringup/config`.
 
-## 车辆控制链
+## Replace a model
 
-| 车辆 | 配置（位于 rmcs_bringup/config） | 消费及控制 |
-| --- | --- | --- |
-| wheel-leg | `wheel-leg-infantry-rl.yaml` | `WheelLegRlImu` → 桥 → `WheelLegRlConsumer` → 配对角度环 → 速度 PID → DM MIT 力矩 |
-| deformable | `deformable-infantry-omni-rl.yaml` | 桥 → `DeformableRlSuspension` → `DeformableSuspensionArbiter` → 关节控制器 |
+Change `policy_server.rl_model_path` for deformable or `rl_controller.model_path` for wheel-leg
+in the vehicle YAML, then restart. Relative paths resolve against the installed `rmcs_rl`
+share directory; absolute paths are also supported. No stamping, model ID or file hash is required.
 
-wheel-leg 的 IMU 观测使用 Body xyz；关节 offset、配对选弧和机械限位由硬件及车辆控制层管理。
-deformable 使用 RF、LF、LB、RB 的策略动作顺序，消费器根据标定把 RL 坐标转换为物理角；
-RL 未就绪时仲裁器使用传统姿态目标。双下复位经组件接口清除历史、动作及控制状态。
+The loader reads ONNX tensor names, types and shapes. Single-input/single-output tensor names
+are automatic. Multiple inputs require an explicit `input_name` and configured `extra_inputs`.
+The deformable launcher obtains observation count, action count, history length and feature count
+from the bridge's component interfaces, so these dimensions need not be duplicated in the policy
+server block. Standalone policy-server use must supply the equivalent dimensions.
 
-## 构建与启动
+Startup checks tensor types, batch/rank, observation/history dimensions, action count and a trial
+inference. Model initialization failures include the resolved path and incompatibility reason.
+The launcher waits for readiness and propagates initialization failures rather than repeatedly
+restarting a misconfigured model. Runtime process exits retain the configured respawn behavior.
 
-在 ROS 工作区内：
+Compatible internal network changes need only a new path. A changed observation/action contract
+also needs a matching vehicle configuration. Tensor shape cannot establish feature order, axes,
+units or action meaning. Observation normalization metadata is optional numerical preprocessing,
+not a model identity gate; existing normalization is preserved.
 
-```sh
-colcon build --merge-install --symlink-install --packages-select rmcs_rl rmcs_core rmcs_bringup
-source install/setup.bash
-```
+## Layout and reset
 
-使用对应车辆的 bringup 配置启动 RMCS；配置中的 `PolicyServerLauncher` 自动启动策略进程。
-需要独立调试策略进程时，将 launcher 的 `autostart` 设为 false，再运行：
+`src/policy` contains the process-based inference implementation. `src/rl_bridge` contains bridge
+configuration, observations/history and cross-thread action snapshots. `src/wheel_leg` contains
+the migrated real-vehicle deployment and its original GPL-3.0-only license; other original sources
+retain their MIT license.
 
-```sh
-ros2 run rmcs_rl policy_server --ros-args --params-file <车辆配置.yaml>
-```
+Internal controller data uses RMCS component interfaces. Bridge sequence IDs remain monotonic
+across reset so delayed actions cannot match a new observation. Reset and control-authority changes
+clear history and action feedback. Wheel-leg reset clears outputs, recovery and policy state.
 
-车辆配置统一放在 `rmcs_bringup/config/`；旧的、不含完整消费链的 `config/executor.yaml` 已移除。
-
-## 模型与契约
-
-模型结构由 `policy_server.model_type` 或 ONNX metadata `rmcs_model_type` 切换，支持：
-
-- `mlp`：输入可以是 float32 `obs[1,N]`，也可以是带历史帧的 `obs[1,history,feature]`；
-- `transformer`：输入为 float32 `obs[1,history,feature]`；
-- `generic`：保留 rank-1/2/3 的形状适配，供后续单输入结构接入。
-
-输出支持 rank-1/2/3，只要除 batch 外的元素总数等于动作数 `M`。batch 为 1 或动态。
-`auto` 优先读取 `rmcs_model_type`，没有 metadata 时才按 rank-2 推断 MLP、rank-3 推断
-Transformer。
-
-多输入模型（例如独立 attention mask 或 position id）除 `obs` 外的输入必须是常量张量，在
-`policy_server` 段用 `extra_inputs.<输入名>: [元素列表]` 声明；启动时根据 ONNX 输入类型
-创建 `float32`、`int64` 或 `bool` 张量，并校验名字、元素数量和形状；缺声明、类型不匹配
-或声明了模型没有的输入都会拒绝；
-输出仍必须是唯一的 `actions`。
-
-```yaml
-policy_server:
-  ros__parameters:
-    extra_inputs:
-      attn_mask: [true, true, true, true] # bool mask；也支持 int64 position id
-```
-
-部署模型须含 `rmcs_obs_layout`、`rmcs_actions_layout`；建议带 `policy_layout_hash` 和版本。
-`history_length × 单帧维数 = rl_obs_size`。归一化均值和标准差必须成对提供，标准差为正数。
-
-rank-3 模型的序列切分受强制约束：模型的 `T == v3-history`、`F == rl_obs_size / history_length`，
-其中 `v3-history` 来自必需的 `rmcs_obs_layout`，并且最终还会由动作消息的 layout hash 与
-`rl_bridge` 再次核对。`rmcs_history_length`、`rmcs_obs_frame_size` 和 `sequence_length` 是
-启动时的辅助维度声明，缺失或不一致都会拒绝；它们不能替代布局签名。
-
-带历史帧的模型示例（桥和策略进程都要使用同一历史长度）：
-
-```yaml
-rl_bridge:
-  ros__parameters:
-    history_length: 8
-    rl_obs_size: 208       # 8 × 26
-policy_server:
-  ros__parameters:
-    model_type: "transformer"  # 带历史帧 MLP 这里写 "mlp"
-    sequence_length: 8          # 动态 rank-3 输入时需要
-    feature_size: 26
-    rl_obs_size: 208
-```
-
-### 模型盖章
-
-部署模型必须含 `rmcs_obs_layout`、`rmcs_actions_layout`，建议同时带 `policy_layout_hash`
-和版本。盖章按**当前 YAML** 生成签名，所以顺序是先核对训练布局、再盖章、再同步 YAML、
-最后复验。
-
-**1. 装依赖（一次性）**：需要一个带 `onnx` 与 `PyYAML` 的 Python。没有就运行：
+## Build
 
 ```sh
-bash src/rmcs_rl/tool/install_model_tools.sh
+colcon build --merge-install --symlink-install --packages-up-to rmcs_rl rmcs_core rmcs_bringup
 ```
 
-它创建 `/opt/rmcs-tools/venv`；已有环境则 `export RMCS_ONNX_PYTHON=<venv>/bin/python` 直接跳过安装。
-`stamp_model.sh` 自己会依次找 `RMCS_ONNX_PYTHON`、该 venv、`python3`；下面直接调用
-`python3` 的脚本若系统解释器没装 `onnx`，改用 `<venv>/bin/python`。
-
-**2. 核对训练布局**：逐条确认观测顺序、坐标、基准角、缩放和频率与当前 YAML 一致。
-YAML 写错会盖出「自洽但错误」的签名，后续校验照样通过，所以这一步不能省。
-
-**3. 盖章**：推荐用一键脚本。它先提示模型布局与 YAML 是否一致（不一致只警告不阻断），
-盖完立即复验，最后打印要手工改的 YAML 两行：
-
-```sh
-bash src/rmcs_rl/tool/stamp_model.sh <模型.onnx> --config <车辆配置.yaml> --version <版本>
-```
-
-模型放在 `src/rmcs_rl/models/` 下时只写文件名；`--config` 缺省为
-`src/rmcs_bringup/config/wheel-leg-infantry-rl.yaml`，`--node` 缺省 `rl_bridge`。
-带历史帧或特殊结构时补 `--model-type mlp|transformer|generic`、`--sequence-length N`、
-`--feature-size N`。脚本只盖 metadata，不改计算图/权重，也不改 YAML——YAML 由你手工改最安全。
-
-只需写 metadata、不自动复验时用底层脚本。盖章默认写入序列键（`rmcs_history_length`/
-`rmcs_obs_frame_size`，取自 YAML）；部署端还会从必需的 `rmcs_obs_layout` 中读取
-`v3-history`，防止只依赖可选 metadata。`rmcs_model_type` 可选，缺省由部署端按输入 rank 推断：
-
-```sh
-python3 src/rmcs_rl/tool/stamp_layout_metadata.py \
-  --model policy.onnx --from-config <车辆配置.yaml> --node rl_bridge \
-  --model-type transformer
-```
-
-**4. 同步 YAML 两处**：按工具输出手工改 `policy_server.rl_model_path` 与
-`rl_bridge.expected_model_id`，不要让脚本改配置文件。
-
-**5. 复验**：
-
-```sh
-python3 src/rmcs_rl/tool/check_policy_contract.py <模型.onnx> --config <车辆配置.yaml> --node rl_bridge --expect-model-id <ID>
-```
-
-**6. 重启 RMCS**：更新模型或配置后必须重启。模型或布局不匹配会锁存拒绝动作，需要重启恢复。
-
-盖章只写元数据；布局匹配不能证明训练侧的坐标或动作含义正确。
-
-当前部署使用 `models/deformable_v2_transformer.onnx`（8 帧历史 × 32 维单帧，输入 rank-3
-`obs[1,8,32]`，`rmcs_model_type=transformer`）；其 `rmcs_obs_layout`、
-`rmcs_actions_layout`、`policy_layout_hash` 和 `policy_version` 已按
-`deformable-infantry-omni-rl.yaml` 盖章。盖章只确认运行时布局契约，不能只按张量维数
-推断训练侧的坐标或动作含义；更新模型或 YAML 后必须重新盖章并同步 `expected_model_id`。
-
-## 运行接口
-
-- `<rl_base>/obs`、`<rl_base>/action`：两个进程间的 ROS 消息。
-- `<rl_base>/policy_status`：可选模型身份和推理耗时信息。
-- 控制进程内部使用组件接口 `<rl_base>/valid`、`healthy`、`action_age` 和配置的动作输出。
-- 动作必须对应最近两次有效观测之一且未超时；复位前的动作不能重新获得控制权。
-- `invalid_value` 可选 `nan`、`zero`、`hold`；实际车辆使用 `"nan"` 让消费器处理失效。
-
-## 工具和测试
-
-`tool/` 仅保留模型校验、盖章和依赖安装工具。离线模型生成及回归放在 `test/`，
-不安装到部署目录；合成模型不用于实车启动。历史临时脚本与生成报告可从 Git 历史获取。
-
-```sh
-colcon build --merge-install --symlink-install --packages-select rmcs_rl rmcs_core --cmake-args -DBUILD_TESTING=ON
-colcon test --merge-install --packages-select rmcs_rl rmcs_core
-PYTHON=<带 onnx、onnxruntime、PyYAML 的 Python> bash src/rmcs_rl/test/test_layout_contract.sh
-```
-
-C++ 回归覆盖推理归一化、历史帧、rank-3 序列输入、float32/int64/bool extra_inputs 常量喂入与错配拒绝、
-跨线程动作快照；Python 回归覆盖布局解析、盖章、T==history 强制、model_type/rank 匹配、
-多输入声明对账及错误契约拒绝。夹具由 `test/gen_seq_fixtures.py`、
-`test/gen_extra_input_fixture.py` 和 `test/gen_typed_extra_input_fixture.py` 确定性生成后提交。
-车辆包保留 DM 使能、帧解码、闭链几何、Body IMU 以及 MuJoCo 查看器回归。
+Legacy stamping utilities, generated test models and commissioning pose-viewer regressions are
+removed. The deployed loader performs compatibility checks at every startup.

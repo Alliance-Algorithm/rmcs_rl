@@ -1,4 +1,9 @@
+<class_libraries>
 <library path="rmcs_rl_bridge">
   <class type="rmcs_rl::RlBridge" base_class_type="rmcs_executor::Component" />
   <class type="rmcs_rl::PolicyServerLauncher" base_class_type="rmcs_executor::Component" />
 </library>
+<library path="rmcs_rl_wheel_leg">
+  <class type="rmcs::rl::RlController" base_class_type="rmcs_executor::Component" />
+</library>
+</class_libraries>

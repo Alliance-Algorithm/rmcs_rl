@@ -58,6 +58,13 @@ public:
             config_.rl_base + "/action_age", action_age_output_,
             std::numeric_limits<double>::quiet_NaN());
         register_output(config_.rl_base + "/obs_seq", obs_seq_output_, std::size_t{0});
+        register_output(
+            config_.rl_base + "/observation_size", observation_size_output_, config_.obs_size);
+        register_output(config_.rl_base + "/action_size", action_size_output_, config_.action_size);
+        register_output(
+            config_.rl_base + "/history_length", history_length_output_, config_.history_length);
+        register_output(
+            config_.rl_base + "/feature_size", feature_size_output_, config_.obs_frame_size);
         own_output_paths_.insert(config_.rl_base + "/valid");
         own_output_paths_.insert(config_.rl_base + "/healthy");
         own_output_paths_.insert(config_.rl_base + "/action_age");
@@ -105,8 +112,8 @@ public:
         const bool enabled = read_enable_();
         double flat_hold_value = 0.0;
         const bool flat_hold = flat_hold_slot_ != kNoSlot
-            && read_double(slots_[flat_hold_slot_], flat_hold_value)
-            && std::isfinite(flat_hold_value) && flat_hold_value != 0.0;
+                            && read_double(slots_[flat_hold_slot_], flat_hold_value)
+                            && std::isfinite(flat_hold_value) && flat_hold_value != 0.0;
         if (enabled != last_enabled_ || flat_hold != last_flat_hold_) {
             reset_runtime_();
             last_enabled_ = enabled;
@@ -147,8 +154,9 @@ public:
             if (config_.history_period.count() == 0) {
                 last_actions_ = snapshot.action;
             } else if (snapshot.obs_seq != last_feedback_obs_seq_) {
-                const auto observation_time = now - std::chrono::duration_cast<std::chrono::nanoseconds>(
-                    std::chrono::duration<double>(age));
+                const auto observation_time = now
+                                            - std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                                  std::chrono::duration<double>(age));
                 action_feedback_.store(observation_time, snapshot.action);
                 last_feedback_obs_seq_ = snapshot.obs_seq;
             }
@@ -243,8 +251,8 @@ private:
                 output_map, slots_, "reset interface");
         if (!config_.flat_hold_path.empty())
             flat_hold_slot_ = acquire_slot(
-                *this, config_.flat_hold_path, {Binding::kBool, Binding::kDouble}, true,
-                output_map, slots_, "flat hold interface");
+                *this, config_.flat_hold_path, {Binding::kBool, Binding::kDouble}, true, output_map,
+                slots_, "flat hold interface");
     }
 
     void maybe_handle_reset_() {
@@ -365,6 +373,10 @@ private:
     OutputInterface<double> healthy_output_{};
     OutputInterface<double> action_age_output_{};
     OutputInterface<std::size_t> obs_seq_output_{};
+    OutputInterface<std::size_t> observation_size_output_;
+    OutputInterface<std::size_t> action_size_output_;
+    OutputInterface<std::size_t> history_length_output_;
+    OutputInterface<std::size_t> feature_size_output_;
 
     BridgeConfig config_;
     std::unordered_set<std::string> own_output_paths_;

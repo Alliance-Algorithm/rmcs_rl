@@ -11,6 +11,8 @@ if(CMAKE_COMPILER_IS_GNUCXX OR CMAKE_CXX_COMPILER_ID MATCHES "Clang")
 endif()
 
 find_package(ament_cmake_auto REQUIRED)
+find_package(OpenSSL REQUIRED)
+find_package(nlohmann_json REQUIRED)
 ament_auto_find_build_dependencies()
 
 find_package(rosidl_default_generators REQUIRED)
@@ -83,6 +85,14 @@ target_link_libraries(policy_server ${cpp_typesupport_target})
 install(TARGETS policy_server DESTINATION lib/${PROJECT_NAME})
 
 pluginlib_export_plugin_description_file(rmcs_executor plugins.xml)
+
+file(GLOB WHEEL_LEG_SOURCE CONFIGURE_DEPENDS src/wheel_leg/*.cpp)
+ament_auto_add_library(rmcs_rl_wheel_leg SHARED ${WHEEL_LEG_SOURCE})
+target_include_directories(rmcs_rl_wheel_leg PRIVATE ${ONNXRUNTIME_ROOT_DIR}/include)
+target_link_libraries(rmcs_rl_wheel_leg
+    ${ONNXRUNTIME_ROOT_DIR}/lib/libonnxruntime.so OpenSSL::Crypto nlohmann_json::nlohmann_json)
+set_target_properties(rmcs_rl_wheel_leg policy_server PROPERTIES INSTALL_RPATH "$ORIGIN")
+install(DIRECTORY ${ONNXRUNTIME_ROOT_DIR}/lib/ DESTINATION lib FILES_MATCHING PATTERN "*.so*")
 
 install(DIRECTORY models DESTINATION share/${PROJECT_NAME})
 install(DIRECTORY launch DESTINATION share/${PROJECT_NAME})

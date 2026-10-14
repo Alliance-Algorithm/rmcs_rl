@@ -5,6 +5,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <exception>
 #include <map>
 #include <memory>
@@ -14,6 +15,8 @@
 #include <utility>
 #include <variant>
 #include <vector>
+
+#include <unistd.h>
 
 #include <ament_index_cpp/get_package_share_directory.hpp>
 #include <rclcpp/rclcpp.hpp>
@@ -41,8 +44,8 @@ public:
         if (config.path.front() != '/')
             config.path =
                 ament_index_cpp::get_package_share_directory("rmcs_rl") + "/" + config.path;
-        config.input_name = string_or(*this, "input_name", "obs");
-        config.output_name = string_or(*this, "output_name", "actions");
+        config.input_name = string_or(*this, "input_name", "");
+        config.output_name = string_or(*this, "output_name", "");
         config.model_type = string_or(*this, "model_type", "auto");
         if (const auto value = integer_parameter(*this, "sequence_length"); value.has_value()) {
             if (*value < 1)
@@ -102,7 +105,11 @@ public:
             config.obs_clip = clip;
         if (const double clip = number_or(*this, "action_clip", -1.0); clip >= 0.0)
             config.action_clip = clip;
-        model_ = std::make_unique<PolicyModel>(config);
+        try {
+            model_ = std::make_unique<PolicyModel>(config);
+        } catch (const std::exception& error) {
+            throw std::runtime_error("ONNX model '" + config.path + "': " + error.what());
+        }
 
         action_publisher_ = create_publisher<msg::Action>(
             rl_base + "/action", rclcpp::QoS{rclcpp::KeepLast(1)}.best_effort());
@@ -121,28 +128,15 @@ public:
         const auto& info = model_->info();
         RCLCPP_INFO(get_logger(), "policy loaded: %s", info.path.c_str());
         RCLCPP_INFO(
-            get_logger(), "model_id=%s layout_hash=%s version=%s type=%s input_rank=%zu output_rank=%zu obs=%zu action=%zu",
-            hex16(info.model_id).c_str(), hex16(info.layout_hash).c_str(), info.version.c_str(),
+            get_logger(), "type=%s input_rank=%zu output_rank=%zu obs=%zu action=%zu",
             info.model_type.c_str(), info.input_rank, info.output_rank, info.obs_size,
             info.action_size);
-        RCLCPP_INFO(get_logger(), "obs signature: %s", info.obs_signature.c_str());
-        RCLCPP_INFO(get_logger(), "action signature: %s", info.actions_signature.c_str());
         RCLCPP_INFO(get_logger(), "waiting for obs on %s/obs", rl_base.c_str());
     }
 
 private:
     void on_observation(msg::Observation::UniquePtr message) {
         const auto& info = model_->info();
-        if (info.layout_hash != 0 && message->layout_hash != info.layout_hash) {
-            if (!layout_mismatch_logged_) {
-                layout_mismatch_logged_ = true;
-                RCLCPP_ERROR(
-                    get_logger(), "layout_hash mismatch: bridge=%s model=%s; refusing actions",
-                    hex16(message->layout_hash).c_str(), hex16(info.layout_hash).c_str());
-            }
-            return;
-        }
-
         const auto started = std::chrono::steady_clock::now();
         msg::Action action;
         action.action.resize(info.action_size);
@@ -157,7 +151,6 @@ private:
         // The bridge is the source of truth for the YAML-defined layout when a model has no
         // stamped metadata. Preserve the observation contract on the action message.
         action.layout_hash = message->layout_hash;
-        action.model_id = info.model_id;
         action_publisher_->publish(action);
         const auto elapsed =
             std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - started);
@@ -186,9 +179,6 @@ private:
         msg::PolicyStatus status;
         status.header.stamp = get_clock()->now();
         status.model_name = info.path;
-        status.model_id = info.model_id;
-        status.policy_version = info.version;
-        status.layout_hash = info.layout_hash;
         status.obs_size = static_cast<std::uint32_t>(info.obs_size);
         status.action_size = static_cast<std::uint32_t>(info.action_size);
         status.inference_p50_us = percentile(0.50);
@@ -201,7 +191,6 @@ private:
     rclcpp::Publisher<msg::PolicyStatus>::SharedPtr status_publisher_;
     rclcpp::TimerBase::SharedPtr status_timer_;
     std::unique_ptr<PolicyModel> model_;
-    bool layout_mismatch_logged_ = false;
     std::array<double, 256> inference_window_{};
     std::size_t inference_window_cursor_ = 0;
     std::size_t inference_window_count_ = 0;
@@ -211,10 +200,27 @@ private:
 
 int main(int argc, char** argv) {
     rclcpp::init(argc, argv);
+    const char* startup_descriptor = std::getenv("RMCS_RL_STARTUP_FD");
+    int startup_fd = startup_descriptor ? std::atoi(startup_descriptor) : -1;
     try {
         auto node = std::make_shared<rmcs_rl::PolicyServer>();
+        if (startup_fd >= 0) {
+            const char ready = 'R';
+            if (::write(startup_fd, &ready, 1) != 1)
+                throw std::runtime_error("cannot report policy readiness to launcher");
+            ::close(startup_fd);
+            startup_fd = -1;
+        }
         rclcpp::spin(node);
     } catch (const std::exception& error) {
+        if (startup_fd >= 0) {
+            const std::string message = std::string{"E"} + error.what();
+            const auto written =
+                ::write(startup_fd, message.data(), std::min(message.size(), std::size_t{2048}));
+            if (written < 0)
+                std::perror("policy startup error notification");
+            ::close(startup_fd);
+        }
         fprintf(stderr, "[Fatal] policy_server startup failed: %s\n", error.what());
         fflush(stderr);
         rclcpp::shutdown();
