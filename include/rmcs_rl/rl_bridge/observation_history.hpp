@@ -1,8 +1,7 @@
 #pragma once
 
-#include <cstddef>
 #include <chrono>
-#include <deque>
+#include <cstddef>
 #include <span>
 #include <vector>
 
@@ -12,7 +11,8 @@ namespace rmcs_rl {
 class ObservationHistory {
 public:
     using Clock = std::chrono::steady_clock;
-    ObservationHistory(std::size_t frame_size, std::size_t history_length,
+    ObservationHistory(
+        std::size_t frame_size, std::size_t history_length,
         std::chrono::nanoseconds sample_period = {});
     const std::vector<double>& append(std::span<const double> frame);
     const std::vector<double>& append(std::span<const double> frame, Clock::time_point now);
@@ -21,12 +21,12 @@ public:
 private:
     std::size_t frame_size_;
     std::vector<double> values_;
-    struct Sample {
-        Clock::time_point time;
-        std::vector<double> frame;
-    };
+    std::vector<Clock::time_point> sample_times_;
+    std::vector<double> sample_values_;
     std::chrono::nanoseconds sample_period_{};
-    std::deque<Sample> samples_;
+    std::size_t sample_capacity_ = 0;
+    std::size_t sample_count_ = 0;
+    std::size_t next_sample_ = 0;
     bool initialized_ = false;
 };
 

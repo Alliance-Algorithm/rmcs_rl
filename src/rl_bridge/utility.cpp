@@ -135,8 +135,7 @@ double double_token(
         return fallback;
     const double value = parse_double(token->second, key + " in term '" + spec + "'");
     if (!is_finite(value))
-        throw std::invalid_argument(
-            "RlBridge: " + key + " must be finite (term '" + spec + "')");
+        throw std::invalid_argument("RlBridge: " + key + " must be finite (term '" + spec + "')");
     return value;
 }
 
@@ -195,7 +194,7 @@ void parse_index(
 }
 
 std::vector<std::size_t>
-parse_index_list(const std::string& text, std::size_t limit, const std::string& what) {
+    parse_index_list(const std::string& text, std::size_t limit, const std::string& what) {
     std::vector<std::size_t> indices;
     for (const auto& piece : split_by(text, ',')) {
         if (piece.empty())
@@ -205,8 +204,8 @@ parse_index_list(const std::string& text, std::size_t limit, const std::string& 
             const auto index = parse_integer(piece, what);
             if (index < 0 || static_cast<std::size_t>(index) >= limit)
                 throw std::invalid_argument(
-                    "RlBridge: " + what + " index " + std::to_string(index)
-                    + " out of range [0, " + std::to_string(limit) + ")");
+                    "RlBridge: " + what + " index " + std::to_string(index) + " out of range [0, "
+                    + std::to_string(limit) + ")");
             indices.push_back(static_cast<std::size_t>(index));
         } else {
             const auto first = parse_integer(piece.substr(0, range), what);

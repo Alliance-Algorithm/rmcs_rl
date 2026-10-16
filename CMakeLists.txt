@@ -11,20 +11,12 @@ if(CMAKE_COMPILER_IS_GNUCXX OR CMAKE_CXX_COMPILER_ID MATCHES "Clang")
 endif()
 
 find_package(ament_cmake_auto REQUIRED)
+find_package(rmcs_executor REQUIRED)
+find_package(rmcs_description REQUIRED)
+find_package(rmcs_msgs REQUIRED)
 find_package(OpenSSL REQUIRED)
 find_package(nlohmann_json REQUIRED)
 ament_auto_find_build_dependencies()
-
-find_package(rosidl_default_generators REQUIRED)
-
-rosidl_generate_interfaces(${PROJECT_NAME}
-    "msg/Observation.msg"
-    "msg/Action.msg"
-    "msg/PolicyStatus.msg"
-    DEPENDENCIES std_msgs
-)
-
-rosidl_get_typesupport_target(cpp_typesupport_target ${PROJECT_NAME} rosidl_typesupport_cpp)
 
 set(ONNXRUNTIME_VERSION 1.20.0)
 if(NOT DEFINED ONNXRUNTIME_PLATFORM)
@@ -51,52 +43,48 @@ if(NOT EXISTS ${ONNXRUNTIME_ROOT_DIR}/include/onnxruntime_cxx_api.h)
     endif()
 endif()
 
-ament_auto_add_library(rmcs_rl_bridge SHARED
+ament_auto_add_library(rmcs_rl SHARED
+    src/policy/configuration.cpp
+    src/policy/policy_model.cpp
+    src/policy/onnx_runtime.cpp
+    src/policy/policy_worker.cpp
+    src/parameters.cpp
+)
+ament_target_dependencies(rmcs_rl rmcs_executor rmcs_description)
+target_include_directories(rmcs_rl PUBLIC
+    $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/include>
+    $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/src>
+    $<INSTALL_INTERFACE:include/rmcs_rl>
+)
+target_include_directories(rmcs_rl PUBLIC ${ONNXRUNTIME_ROOT_DIR}/include)
+target_link_libraries(rmcs_rl
+    ${ONNXRUNTIME_ROOT_DIR}/lib/libonnxruntime.so OpenSSL::Crypto nlohmann_json::nlohmann_json)
+
+ament_auto_add_library(rmcs_rl_components SHARED
     src/rl_bridge.cpp
     src/rl_bridge/config.cpp
     src/rl_bridge/observation_history.cpp
     src/rl_bridge/utility.cpp
-    src/parameters.cpp
     src/rl_bridge/joint_config.cpp
     src/rl_bridge/term_parser.cpp
     src/rl_bridge/interface_binding.cpp
     src/rl_bridge/observation.cpp
-    src/rl_bridge/action_channel.cpp
-    src/policy_server_launcher.cpp
 )
-target_include_directories(rmcs_rl_bridge PUBLIC
-    $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/include>
-    $<INSTALL_INTERFACE:include/rmcs_rl>
-)
-target_link_libraries(rmcs_rl_bridge ${cpp_typesupport_target})
-
-ament_auto_add_executable(policy_server
-    src/policy_server.cpp
-    src/policy/policy_model.cpp
-    src/policy/onnx_runtime.cpp
-    src/parameters.cpp
-)
-target_include_directories(policy_server PRIVATE
-    ${ONNXRUNTIME_ROOT_DIR}/include
-    ${PROJECT_SOURCE_DIR}/include
-)
-target_link_libraries(policy_server ${ONNXRUNTIME_ROOT_DIR}/lib/libonnxruntime.so)
-target_link_libraries(policy_server ${cpp_typesupport_target})
-install(TARGETS policy_server DESTINATION lib/${PROJECT_NAME})
+target_include_directories(rmcs_rl_components PRIVATE ${PROJECT_SOURCE_DIR}/include ${PROJECT_SOURCE_DIR}/src)
+ament_target_dependencies(rmcs_rl_components rmcs_executor rmcs_description rclcpp)
+target_link_libraries(rmcs_rl_components rmcs_rl)
 
 pluginlib_export_plugin_description_file(rmcs_executor plugins.xml)
 
 file(GLOB WHEEL_LEG_SOURCE CONFIGURE_DEPENDS src/wheel_leg/*.cpp)
 ament_auto_add_library(rmcs_rl_wheel_leg SHARED ${WHEEL_LEG_SOURCE})
-target_include_directories(rmcs_rl_wheel_leg PRIVATE ${ONNXRUNTIME_ROOT_DIR}/include)
-target_link_libraries(rmcs_rl_wheel_leg
-    ${ONNXRUNTIME_ROOT_DIR}/lib/libonnxruntime.so OpenSSL::Crypto nlohmann_json::nlohmann_json)
-set_target_properties(rmcs_rl_wheel_leg policy_server PROPERTIES INSTALL_RPATH "$ORIGIN")
+ament_target_dependencies(rmcs_rl_wheel_leg
+    rmcs_executor rmcs_description rmcs_msgs rmcs_utility rclcpp)
+target_link_libraries(rmcs_rl_wheel_leg rmcs_rl)
+set_target_properties(rmcs_rl rmcs_rl_components rmcs_rl_wheel_leg PROPERTIES INSTALL_RPATH "$ORIGIN")
 install(DIRECTORY ${ONNXRUNTIME_ROOT_DIR}/lib/ DESTINATION lib FILES_MATCHING PATTERN "*.so*")
 
 install(DIRECTORY models DESTINATION share/${PROJECT_NAME})
 install(DIRECTORY launch DESTINATION share/${PROJECT_NAME})
-
-ament_export_dependencies(rosidl_default_runtime)
 
 ament_auto_package(USE_SCOPED_HEADER_INSTALL_DIR)

@@ -1,37 +1,33 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <condition_variable>
 #include <cstddef>
 #include <cstdint>
 #include <limits>
 #include <memory>
+#include <mutex>
+#include <span>
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <thread>
 #include <unordered_set>
 #include <utility>
 #include <vector>
 
 #include <rclcpp/logging.hpp>
 #include <rclcpp/node.hpp>
-#include <rclcpp/publisher.hpp>
-#include <rclcpp/qos.hpp>
-#include <rclcpp/subscription.hpp>
 #include <rmcs_executor/component.hpp>
-#include <rmcs_rl/msg/action.hpp>
-#include <rmcs_rl/msg/observation.hpp>
 
-#include <rmcs_rl/rl_bridge/action_channel.hpp>
-#include <rmcs_rl/rl_bridge/action_feedback_history.hpp>
+#include "policy/policy_worker.hpp"
+#include "rl_bridge/runtime_state.hpp"
 #include <rmcs_rl/rl_bridge/config.hpp>
 #include <rmcs_rl/rl_bridge/interface_binding.hpp>
 #include <rmcs_rl/rl_bridge/joint_config.hpp>
 #include <rmcs_rl/rl_bridge/observation.hpp>
-#include <rmcs_rl/rl_bridge/observation_history.hpp>
-#include <rmcs_rl/rl_bridge/observation_timeline.hpp>
 #include <rmcs_rl/rl_bridge/types.hpp>
 #include <rmcs_rl/rl_bridge/utility.hpp>
-#include <rmcs_rl/rl_layout.hpp>
 
 namespace rmcs_rl {
 
@@ -45,7 +41,12 @@ public:
               rclcpp::NodeOptions{}.automatically_declare_parameters_from_overrides(true))
         , config_(load_bridge_config(*this))
         , history_(config_.obs_frame_size, config_.history_length, config_.history_period)
-        , action_feedback_(config_.action_size) {
+        , action_feedback_(config_.action_size, feedback_capacity_(config_))
+        , worker_(config_.policy_worker)
+        , frame_buffer_(config_.obs_frame_size)
+        , observation_buffer_(config_.obs_size)
+        , result_buffer_{} {
+        result_buffer_.action.reserve(config_.action_size);
 
         for (const auto& term : config_.action_terms) {
             action_outputs_.push_back(std::make_unique<OutputInterface<double>>());
@@ -65,15 +66,13 @@ public:
             config_.rl_base + "/history_length", history_length_output_, config_.history_length);
         register_output(
             config_.rl_base + "/feature_size", feature_size_output_, config_.obs_frame_size);
+        register_output(config_.rl_base + "/performance/inference_us", inference_time_us_, 0.0);
         own_output_paths_.insert(config_.rl_base + "/valid");
         own_output_paths_.insert(config_.rl_base + "/healthy");
         own_output_paths_.insert(config_.rl_base + "/action_age");
         own_output_paths_.insert(config_.rl_base + "/obs_seq");
-        setup_topics_();
         last_actions_.assign(config_.action_size, 0.0);
         written_.assign(config_.action_size, 0.0);
-        action_channel_.resize(config_.action_size);
-        read_snapshot_.action.assign(config_.action_size, 0.0);
     }
 
     void before_pairing(const OutputInfoMap& output_map) override {
@@ -86,23 +85,13 @@ public:
                     "RlBridge: interface \"" + slot.path
                     + "\" is produced by RlBridge itself (self reference)");
 
-        obs_signature_ = obs_layout_signature(config_.obs_terms, config_.history_length);
-        actions_signature_ = actions_layout_signature(config_.action_terms);
-        layout_hash_ = rmcs_rl::layout_hash(
-            obs_signature_, actions_signature_, config_.obs_size, config_.action_size);
-
         log_layout_();
         RCLCPP_INFO(
             get_logger(), "contract: obs_size=%zu action_size=%zu policy_rate=%.3f Hz",
             config_.obs_size, config_.action_size, config_.policy_rate);
         RCLCPP_INFO(
-            get_logger(), "layout_hash=%s (obs/action signatures below)",
-            hex16(layout_hash_).c_str());
-        RCLCPP_INFO(get_logger(), "  obs signature    : %s", obs_signature_.c_str());
-        RCLCPP_INFO(get_logger(), "  action signature : %s", actions_signature_.c_str());
-        RCLCPP_INFO(
-            get_logger(), "topics: %s/obs -> %s/action (best_effort, keep_last=1)",
-            config_.rl_base.c_str(), config_.rl_base.c_str());
+            get_logger(), "in-process policy worker: model=%s, obs=%zu, action=%zu",
+            worker_->info().path.c_str(), worker_->info().obs_size, worker_->info().action_size);
     }
 
     void update() override {
@@ -123,62 +112,78 @@ public:
             reset_action_state(last_actions_, written_);
             history_.reset();
         }
-        if (enabled)
-            maybe_publish_observation_(now);
-
-        ActionSnapshot& snapshot = read_snapshot_;
-        const bool has_snapshot = action_channel_.try_read(snapshot);
-
-        double age = std::numeric_limits<double>::quiet_NaN();
-        bool seq_ok = false;
-        bool finite = true;
-        if (has_snapshot) {
-            age = timeline_.age(snapshot.obs_seq, now);
-            seq_ok = std::isfinite(age);
-            finite = std::all_of(snapshot.action.begin(), snapshot.action.end(), [](double value) {
-                return std::isfinite(value);
-            });
-            check_contract_(snapshot);
-        }
-
-        const bool fresh = has_snapshot && is_finite(age) && age <= config_.max_action_age;
-        const bool valid = enabled && contract_ok_ && has_snapshot && fresh && seq_ok && finite;
-
-        // The action fed into history must match the flat-ground command that is executed.
-        if (valid && flat_hold)
-            std::fill(snapshot.action.begin(), snapshot.action.end(), 0.0);
-        write_actions(
-            valid, snapshot, config_.action_terms, config_.invalid_mode, written_, action_outputs_);
-
-        if (valid) {
-            if (config_.history_period.count() == 0) {
-                last_actions_ = snapshot.action;
-            } else if (snapshot.obs_seq != last_feedback_obs_seq_) {
-                const auto observation_time = now
-                                            - std::chrono::duration_cast<std::chrono::nanoseconds>(
-                                                  std::chrono::duration<double>(age));
-                action_feedback_.store(observation_time, snapshot.action);
-                last_feedback_obs_seq_ = snapshot.obs_seq;
+        if (worker_->try_take(result_buffer_)) {
+            if (result_buffer_.generation == generation_
+                && result_buffer_.sequence > action_sequence_
+                && result_buffer_.sequence <= observation_sequence_ && result_buffer_.success) {
+                action_sequence_ = result_buffer_.sequence;
+                action_generation_ = result_buffer_.generation;
+                action_submitted_at_ = result_buffer_.submitted_at;
+                action_completed_at_ = result_buffer_.completed_at;
+                std::copy(
+                    result_buffer_.action.begin(), result_buffer_.action.end(),
+                    action_buffer_.begin());
+                action_ready_ = true;
+                *inference_time_us_ = result_buffer_.inference_microseconds;
+                if (action_sequence_ != last_feedback_obs_seq_) {
+                    action_feedback_.store(action_submitted_at_, action_buffer_);
+                    last_feedback_obs_seq_ = action_sequence_;
+                }
+            } else if (result_buffer_.generation == generation_ && !result_buffer_.success) {
+                worker_failed_ = true;
+                action_ready_ = false;
+                RCLCPP_ERROR_THROTTLE(
+                    get_logger(), *get_clock(), 1000, "RL inference failed: %s",
+                    result_buffer_.error.c_str());
             }
         }
+        const bool has_snapshot = action_ready_;
+
+        const double age = has_snapshot
+                             ? std::chrono::duration<double>(now - action_submitted_at_).count()
+                             : std::numeric_limits<double>::quiet_NaN();
+        const bool seq_ok = has_snapshot && action_generation_ == generation_
+                         && action_sequence_ <= observation_sequence_;
+        const bool finite =
+            has_snapshot
+            && std::all_of(action_buffer_.begin(), action_buffer_.end(), [](double value) {
+                   return std::isfinite(value);
+               });
+
+        const bool fresh = has_snapshot && is_finite(age) && age <= config_.inference_timeout;
+        const bool valid = enabled && !worker_failed_ && has_snapshot && fresh && seq_ok && finite;
+
+        // The action fed into history must match the flat-ground command that is executed.
+        if (valid && flat_hold) {
+            std::fill(action_buffer_.begin(), action_buffer_.end(), 0.0);
+            if (action_sequence_ != last_feedback_obs_seq_) {
+                action_feedback_.store(action_submitted_at_, action_buffer_);
+                last_feedback_obs_seq_ = action_sequence_;
+            }
+        }
+        write_actions(
+            valid, std::span<const double>{action_buffer_}, config_.action_terms,
+            config_.invalid_mode, written_, action_outputs_);
 
         *valid_output_ = valid ? 1.0 : 0.0;
-        *healthy_output_ = (contract_ok_ && fresh) ? 1.0 : 0.0;
+        *healthy_output_ = (worker_->healthy() && !worker_failed_ && fresh) ? 1.0 : 0.0;
         *action_age_output_ = age;
-        *obs_seq_output_ = timeline_.sequence();
+        *obs_seq_output_ = observation_sequence_;
+
+        if (enabled && timeline_.due(now, config_.pub_period))
+            maybe_submit_observation_(now);
 
         if (last_valid_ && !valid)
             reset_runtime_();
         if (valid != last_valid_) {
             if (valid) {
                 RCLCPP_INFO(
-                    get_logger(), "valid=1 (obs_seq=%llu model_id=%s action_age=%.4f s)",
-                    static_cast<unsigned long long>(snapshot.obs_seq),
-                    hex16(snapshot.model_id).c_str(), age);
+                    get_logger(), "valid=1 (obs_seq=%llu action_age=%.4f s)",
+                    static_cast<unsigned long long>(action_sequence_), age);
             } else {
                 RCLCPP_WARN(
                     get_logger(), "valid=0: %s",
-                    invalid_reason(enabled, contract_ok_, has_snapshot, fresh, seq_ok, finite)
+                    invalid_reason(enabled, !worker_failed_, has_snapshot, fresh, seq_ok, finite)
                         .c_str());
             }
             last_valid_ = valid;
@@ -186,12 +191,13 @@ public:
     }
 
 private:
-    void setup_topics_() {
-        obs_publisher_ = create_publisher<rmcs_rl::msg::Observation>(
-            config_.rl_base + "/obs", rclcpp::QoS{rclcpp::KeepLast(1)}.best_effort());
-        action_subscription_ = create_subscription<rmcs_rl::msg::Action>(
-            config_.rl_base + "/action", rclcpp::QoS{rclcpp::KeepLast(1)}.best_effort(),
-            [this](rmcs_rl::msg::Action::UniquePtr message) { on_action_(std::move(message)); });
+    static std::size_t feedback_capacity_(const BridgeConfig& config) {
+        if (config.history_period.count() == 0)
+            return 2;
+        const auto delay_samples = static_cast<std::size_t>(std::ceil(
+            static_cast<double>(config.pub_period.count())
+            / static_cast<double>(config.history_period.count())));
+        return config.history_length + delay_samples + 4;
     }
 
     void bind_observation_slots_(const OutputInfoMap& output_map) {
@@ -265,16 +271,18 @@ private:
         }
     }
 
-    void maybe_publish_observation_(std::chrono::steady_clock::time_point now) {
-        if (!timeline_.due(now, config_.pub_period))
-            return;
-
-        std::vector<double> obs;
+    void maybe_submit_observation_(std::chrono::steady_clock::time_point now) {
         if (config_.history_period.count() > 0)
             last_actions_ = action_feedback_.sample(now, config_.history_period);
         if (build_observation(
-                config_.obs_terms, slots_, last_actions_, config_.obs_frame_size, obs)) {
-            publish_observation_(history_.append(obs, now), now);
+                config_.obs_terms, slots_, last_actions_, config_.obs_frame_size, frame_buffer_)) {
+            const auto& stacked = history_.append(frame_buffer_, now);
+            observation_sequence_ = ++next_observation_sequence_;
+            timeline_.publish(now, config_.pub_period);
+            std::copy(stacked.begin(), stacked.end(), observation_buffer_.begin());
+            worker_->submit(
+                std::span<const double>{observation_buffer_}, observation_sequence_, generation_,
+                now);
         } else {
             reset_runtime_();
             ++obs_invalid_count_;
@@ -293,19 +301,6 @@ private:
         if (!read_double(slots_[enable_slot_], raw))
             return config_.enable_default;
         return std::isfinite(raw) && raw != 0.0;
-    }
-
-    void check_contract_(const ActionSnapshot& snapshot) {
-        if (snapshot.layout_hash != layout_hash_) {
-            if (contract_ok_) {
-                contract_ok_ = false;
-                RCLCPP_FATAL(
-                    get_logger(),
-                    "contract mismatch: action layout_hash=%s != bridge layout_hash=%s "
-                    "(policy process and bridge disagree; refusing to output actions)",
-                    hex16(snapshot.layout_hash).c_str(), hex16(layout_hash_).c_str());
-            }
-        }
     }
 
     void log_layout_() const {
@@ -338,32 +333,17 @@ private:
         }
     }
 
-    void publish_observation_(
-        const std::vector<double>& obs, std::chrono::steady_clock::time_point now) {
-        rmcs_rl::msg::Observation message;
-        message.header.stamp = get_clock()->now();
-        message.obs_seq = timeline_.publish(now, config_.pub_period);
-        message.layout_hash = layout_hash_;
-        message.obs = obs;
-        obs_publisher_->publish(message);
-    }
-
-    void on_action_(rmcs_rl::msg::Action::UniquePtr message) {
-        if (message->action.size() != config_.action_size) {
-            RCLCPP_ERROR_THROTTLE(
-                get_logger(), *get_clock(), 1000, "ignoring action with %zu values (expected %zu)",
-                message->action.size(), config_.action_size);
-            return;
-        }
-        action_channel_.store(*message);
-    }
-
     void reset_runtime_() {
+        ++generation_;
+        action_ready_ = false;
+        observation_sequence_ = next_observation_sequence_;
+        worker_failed_ = false;
         reset_action_state(last_actions_, written_);
         history_.reset();
         action_feedback_.reset();
         last_feedback_obs_seq_ = 0;
         timeline_.reset();
+        std::fill(action_buffer_.begin(), action_buffer_.end(), 0.0);
     }
 
     std::vector<Slot> slots_;
@@ -377,6 +357,7 @@ private:
     OutputInterface<std::size_t> action_size_output_;
     OutputInterface<std::size_t> history_length_output_;
     OutputInterface<std::size_t> feature_size_output_;
+    OutputInterface<double> inference_time_us_;
 
     BridgeConfig config_;
     std::unordered_set<std::string> own_output_paths_;
@@ -385,29 +366,32 @@ private:
     std::size_t reset_slot_ = kNoSlot;
     std::size_t flat_hold_slot_ = kNoSlot;
 
-    std::string obs_signature_;
-    std::string actions_signature_;
-    std::uint64_t layout_hash_ = 0;
-
     std::vector<double> last_actions_;
     std::vector<double> written_;
     ObservationHistory history_;
     ActionFeedbackHistory action_feedback_;
+    std::shared_ptr<PolicyWorker> worker_;
+    ObservationTimeline timeline_;
+    std::vector<double> frame_buffer_;
+    std::vector<double> observation_buffer_;
+    std::vector<double> action_buffer_;
+    PolicyWorker::Result result_buffer_;
     std::uint64_t last_feedback_obs_seq_ = 0;
 
-    ObservationTimeline timeline_;
+    std::uint64_t generation_ = 0;
+    std::uint64_t next_observation_sequence_ = 0;
+    std::uint64_t observation_sequence_ = 0;
+    std::uint64_t action_sequence_ = 0;
+    std::uint64_t action_generation_ = 0;
+    std::chrono::steady_clock::time_point action_submitted_at_{};
+    std::chrono::steady_clock::time_point action_completed_at_{};
     std::uint64_t last_reset_count_ = 0;
     std::uint64_t obs_invalid_count_ = 0;
-    bool contract_ok_ = true;
+    bool worker_failed_ = false;
+    bool action_ready_ = false;
     bool last_valid_ = false;
     bool last_enabled_ = false;
     bool last_flat_hold_ = false;
-
-    ActionChannel action_channel_;
-    ActionSnapshot read_snapshot_;
-
-    rclcpp::Publisher<rmcs_rl::msg::Observation>::SharedPtr obs_publisher_;
-    rclcpp::Subscription<rmcs_rl::msg::Action>::SharedPtr action_subscription_;
 };
 
 } // namespace rmcs_rl

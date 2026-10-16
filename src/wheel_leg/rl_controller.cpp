@@ -10,13 +10,14 @@
 #include <pluginlib/class_list_macros.hpp>
 
 namespace rmcs::rl {
-
 namespace {
 bool almost_integer(double value) {
     return std::isfinite(value) && value >= 1.0 && std::abs(value - std::round(value)) < 1e-6;
 }
 
 } // namespace
+
+RlController::~RlController() = default;
 
 bool accepts_motion_command(
     bool jump, double height, rmcs_msgs::ChassisMode mode,
@@ -94,11 +95,14 @@ void RlController::latch_fault_(
 }
 
 void RlController::enter_(State next, bool force_reset) {
+    const State previous = state_;
     if (state_ == next && !force_reset)
         return;
     if (next == State::kIdle && recovery_.phase() == RecoveryPhase::kFailed)
         recovery_failure_latched_ = recovery_.failure();
     state_ = next;
+    if (next != State::kRl || previous != State::kRl)
+        reset_policy_generation_();
     prepare_stable_since_.reset();
     if (next != State::kRl) {
         clear_outputs_();
@@ -173,6 +177,12 @@ void RlController::enter_(State next, bool force_reset) {
     }
 }
 
+void RlController::reset_policy_generation_() {
+    ++policy_generation_;
+    policy_result_pending_ = false;
+    accepted_policy_sequence_ = submitted_policy_sequence_;
+}
+
 void RlController::update_state_output_() {
     *recovery_sensors_valid_output_ = (state_ == State::kPrepare || state_ == State::kRl)
                                    && recovery_sensor_status_.valid && feedback_valid_
@@ -222,27 +232,67 @@ void RlController::update_state_output_() {
 bool RlController::evaluate_policy_(std::size_t tick, bool recovering) {
     const bool native = policy_profile_.name == kV6PolicyProfile.name;
     const bool shadow = recovering && (native || recovery_command_.phase != RecoveryPhase::kBlend);
-    if (!assemble_observation_(recovering)) {
+    if (policy_worker_->try_take(policy_result_)) {
+        if (policy_result_.generation == policy_generation_) {
+            policy_result_pending_ = false;
+            if (!policy_result_.success) {
+                node::error("ONNX inference failed: {}", policy_result_.error);
+                return false;
+            }
+            if (policy_result_.sequence <= accepted_policy_sequence_
+                || Clock::now() - policy_result_.submitted_at
+                       > std::chrono::duration<double>{2.0 / inference_frequency_}) {
+                node::error("ONNX inference result is stale");
+                return false;
+            }
+            PolicyAction action;
+            std::copy(policy_result_.action.begin(), policy_result_.action.end(), action.begin());
+            const bool result_shadow = policy_result_.context != 0;
+            const auto processed = process_action_(action, result_shadow);
+            *inference_time_us_ = policy_result_.inference_microseconds;
+            if (!processed) {
+                node::error("Policy action rejected: {}", processed.error());
+                return false;
+            }
+            accepted_policy_sequence_ = policy_result_.sequence;
+            schedule_.last_policy_tick = tick;
+            for (std::size_t i = 0; i < observation_outputs_.size(); ++i)
+                *observation_outputs_[i] = pending_policy_observation_[i];
+            if (!result_shadow || native)
+                for (std::size_t i = 0; i < action_outputs_.size(); ++i)
+                    *action_outputs_[i] = native ? policy_action_[i] : previous_action_[i];
+        }
+    }
+
+    if (policy_result_pending_
+        && Clock::now() - policy_submitted_at_
+               > std::chrono::duration<double>{2.0 / inference_frequency_}) {
+        policy_result_pending_ = false;
+        if (!assemble_observation_(recovering))
+            return false;
+        std::copy(observation_.begin(), observation_.end(), pending_policy_observation_.begin());
+        policy_submitted_at_ = Clock::now();
+        policy_result_pending_ = policy_worker_->submit(
+            std::span<const float>{pending_policy_observation_}, ++submitted_policy_sequence_,
+            policy_generation_, policy_submitted_at_, shadow ? 1 : 0);
+    }
+    if (policy_profile_.name == kV6PolicyProfile.name && recovery_started_
+        && joint_reference_recovery_ && !advance_joint_reference_recovery_())
+        return false;
+    if (!policy_worker_->healthy()) {
+        node::error("RL inference worker failed: {}", policy_worker_->error());
         return false;
     }
-    const auto inference_start = Clock::now();
-    const auto inference =
-        policy_->run(observation_).and_then([this, shadow](const PolicyAction& raw) {
-            return process_action_(raw, shadow);
-        });
-    *inference_time_us_ =
-        std::chrono::duration<double, std::micro>{Clock::now() - inference_start}.count();
-    if (!inference) {
-        node::error("ONNX inference failed: {}", inference.error());
-        return false;
+    if (!policy_result_pending_) {
+        if (!assemble_observation_(recovering))
+            return false;
+        std::copy(observation_.begin(), observation_.end(), pending_policy_observation_.begin());
+        const auto submitted_at = Clock::now();
+        policy_result_pending_ = policy_worker_->submit(
+            std::span<const float>{pending_policy_observation_}, ++submitted_policy_sequence_,
+            policy_generation_, submitted_at, shadow ? 1 : 0);
     }
-    schedule_.last_policy_tick = tick;
-    for (std::size_t i = 0; i < observation_outputs_.size(); ++i)
-        *observation_outputs_[i] = observation_[i];
-    if (!shadow || native)
-        for (std::size_t i = 0; i < action_outputs_.size(); ++i)
-            *action_outputs_[i] = native ? policy_action_[i] : previous_action_[i];
-    return true;
+    return policy_targets_valid_ || (state_ == State::kPrepare && !recovery_started_);
 }
 
 void RlController::update() {

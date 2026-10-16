@@ -5,7 +5,10 @@
 #include <unordered_set>
 #include <utility>
 
+#include "policy/configuration.hpp"
+#include "policy/policy_worker.hpp"
 #include <rmcs_rl/parameters.hpp>
+#include <rmcs_rl/rl_bridge/observation_history.hpp>
 #include <rmcs_rl/rl_bridge/term_parser.hpp>
 #include <rmcs_rl/rl_bridge/utility.hpp>
 
@@ -81,7 +84,8 @@ BridgeConfig load_bridge_config(rclcpp::Node& node) {
         std::chrono::duration<double>(1.0 / config.policy_rate));
     const double history_rate = number_or(node, "history_rate", config.policy_rate);
     if (!is_finite(history_rate) || history_rate <= 0.0 || history_rate > config.policy_rate)
-        throw std::invalid_argument("RlBridge: history_rate must be finite, positive and <= policy_rate");
+        throw std::invalid_argument(
+            "RlBridge: history_rate must be finite, positive and <= policy_rate");
     if (history_rate != config.policy_rate)
         config.history_period = std::chrono::duration_cast<std::chrono::nanoseconds>(
             std::chrono::duration<double>(1.0 / history_rate));
@@ -107,6 +111,11 @@ BridgeConfig load_bridge_config(rclcpp::Node& node) {
     config.enable_default = bool_or(node, "enable_default", false);
     config.reset_path = string_or(node, "reset_interface", "");
     config.flat_hold_path = string_or(node, "flat_hold_interface", "");
+    config.inference_timeout = number_or(node, "inference_timeout", 2.0 / config.policy_rate);
+    if (!is_finite(config.inference_timeout) || config.inference_timeout <= 0.0)
+        throw std::invalid_argument("RlBridge: inference_timeout must be finite and > 0");
+    config.policy_worker = std::make_shared<PolicyWorker>(load_policy_config(
+        node, config.obs_size, config.action_size, config.history_length, config.obs_frame_size));
     return config;
 }
 

@@ -9,26 +9,13 @@
 #include <vector>
 
 #include "onnx_runtime.hpp"
+#include <rmcs_rl/policy_config.hpp>
 
 namespace rmcs_rl {
 
 class PolicyModel {
 public:
-    struct Config {
-        std::string path;
-        std::string input_name;
-        std::string output_name;
-        std::string model_type = "auto";
-        std::size_t sequence_length = 0;
-        std::size_t feature_size = 0;
-        std::size_t observation_size = 0;
-        std::size_t action_size = 0;
-        bool normalization_from_metadata = true;
-        std::optional<double> obs_clip;
-        std::optional<double> action_clip;
-        // 键 = 额外输入张量名，值 = 展平常量（来自 policy_server extra_inputs.<name>）
-        std::map<std::string, OnnxRuntime::ExtraInputValues> extra_input_values;
-    };
+    using Config = PolicyConfig;
 
     struct Info {
         std::string path;

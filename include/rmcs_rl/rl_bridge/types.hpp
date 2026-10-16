@@ -90,11 +90,4 @@ struct Slot {
     std::unique_ptr<rmcs_executor::Component::InputInterface<Eigen::Quaterniond>> quaternion_value;
 };
 
-struct ActionSnapshot {
-    std::uint64_t obs_seq = 0;
-    std::uint64_t layout_hash = 0;
-    std::uint64_t model_id = 0;
-    std::vector<double> action;
-};
-
 } // namespace rmcs_rl

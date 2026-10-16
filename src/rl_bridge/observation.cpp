@@ -134,25 +134,4 @@ bool build_observation(
     return true;
 }
 
-std::string obs_layout_signature(const std::vector<ObsTerm>& terms, std::size_t history_length) {
-    std::string signature = "v3-history=" + std::to_string(history_length);
-    for (const auto& term : terms) {
-        signature += "|" + term.id;
-        if (term.scale != 1.0)
-            signature += "*" + format_number(term.scale);
-        signature += "@" + std::to_string(term.dim);
-    }
-    return signature;
-}
-
-std::string actions_layout_signature(const std::vector<ActionTerm>& terms) {
-    std::string signature = "v2";
-    for (const auto& term : terms) {
-        signature += "|#" + std::to_string(term.index) + ":" + term.id;
-        if (term.scale != 1.0)
-            signature += "*" + format_number(term.scale);
-    }
-    return signature;
-}
-
 } // namespace rmcs_rl

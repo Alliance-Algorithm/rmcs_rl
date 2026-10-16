@@ -203,8 +203,7 @@ OnnxRuntime::OnnxRuntime(const Config& config)
         if (found == remaining.end())
             throw std::invalid_argument(
                 "model input '" + input_names_[index]
-                + "' has no constant value; declare it under policy_server extra_inputs."
-                  "<name> in the vehicle YAML");
+                + "' has no constant value; declare extra_inputs.<name> in the vehicle YAML");
         const auto source = std::move(found->second);
         remaining.erase(found);
 

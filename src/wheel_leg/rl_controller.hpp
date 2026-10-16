@@ -1,5 +1,6 @@
 #pragma once
 
+#include "../policy/policy_worker.hpp"
 #include "closed_chain_support_observer.hpp"
 #include "control_interval.hpp"
 #include "joint_reference_recovery_controller.hpp"
@@ -13,7 +14,6 @@
 #include <cstddef>
 #include <cstdint>
 #include <expected>
-#include <memory>
 #include <optional>
 #include <source_location>
 #include <string>
@@ -46,7 +46,7 @@ class RlController final
     , public rmcs_utility::NodeMixin {
 public:
     RlController();
-    ~RlController() override = default;
+    ~RlController() override;
 
     void before_updating() override;
     void update() override;
@@ -73,6 +73,7 @@ private:
     };
 
     void enter_(State next, bool force_reset = false);
+    void reset_policy_generation_();
     void latch_fault_(
         std::optional<RecoveryFailure> reason = std::nullopt,
         std::source_location location = std::source_location::current());
@@ -154,7 +155,14 @@ private:
     OutputInterface<double> pd_time_us_;
     std::array<OutputInterface<double>, ObservationLayout::kSize> observation_outputs_;
     std::array<OutputInterface<double>, PolicyAction{}.size()> action_outputs_;
-    std::unique_ptr<OnnxPolicy> policy_;
+    rmcs_rl::PolicyWorker::Result policy_result_;
+    PolicyObservation pending_policy_observation_{};
+    std::unique_ptr<rmcs_rl::PolicyWorker> policy_worker_;
+    std::uint64_t policy_generation_ = 0;
+    std::uint64_t submitted_policy_sequence_ = 0;
+    std::uint64_t accepted_policy_sequence_ = 0;
+    bool policy_result_pending_ = false;
+    std::chrono::steady_clock::time_point policy_submitted_at_{};
     PolicyProfile policy_profile_ = kV6PolicyProfile;
     rclcpp::node_interfaces::OnSetParametersCallbackHandle::SharedPtr parameter_guard_;
 

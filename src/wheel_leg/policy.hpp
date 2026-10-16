@@ -2,7 +2,6 @@
 
 #include <array>
 #include <cstddef>
-#include <expected>
 #include <memory>
 #include <string>
 #include <string_view>
@@ -149,19 +148,5 @@ inline constexpr auto kObservationNames = std::to_array<std::string_view>({
     "context/jump_elapsed",
 });
 static_assert(kObservationNames.size() == ObservationLayout::kSize);
-
-class OnnxPolicy {
-public:
-    explicit OnnxPolicy(const std::string& model_path);
-    ~OnnxPolicy();
-    OnnxPolicy(const OnnxPolicy&) = delete;
-    OnnxPolicy& operator=(const OnnxPolicy&) = delete;
-
-    std::expected<PolicyAction, std::string> run(const PolicyObservation& observation);
-
-private:
-    struct Impl;
-    std::unique_ptr<Impl> impl_;
-};
 
 } // namespace rmcs::rl

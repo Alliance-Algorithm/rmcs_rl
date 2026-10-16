@@ -3,14 +3,18 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <string>
 #include <vector>
 
 #include <rclcpp/node.hpp>
+#include <rmcs_rl/policy_config.hpp>
 #include <rmcs_rl/rl_bridge/joint_config.hpp>
 #include <rmcs_rl/rl_bridge/types.hpp>
 
 namespace rmcs_rl {
+
+class PolicyWorker;
 
 struct BridgeConfig {
     JointConfig joint_config;
@@ -30,6 +34,8 @@ struct BridgeConfig {
     bool enable_default = false;
     std::string reset_path;
     std::string flat_hold_path;
+    double inference_timeout = 0.0;
+    std::shared_ptr<PolicyWorker> policy_worker;
 };
 
 BridgeConfig load_bridge_config(rclcpp::Node& node);

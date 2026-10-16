@@ -1,3 +1,4 @@
+#include "policy/configuration.hpp"
 #include "rl_controller.hpp"
 
 #include <algorithm>
@@ -518,24 +519,23 @@ RlController::RlController()
         recovery_observer_.emplace(mechanism, observer_config);
     }
 
-    const std::string model_path = get_parameter_or<std::string>(
-        "model_path", get_parameter_or<std::string>("rl_model_path", ""));
-    if (model_path.empty())
-        throw std::invalid_argument("wheel-leg RL requires a non-empty model_path in vehicle YAML");
-    if (!model_path.empty()) {
-        auto path = std::filesystem::path{model_path};
-        if (!path.is_absolute())
-            path = std::filesystem::path{ament_index_cpp::get_package_share_directory("rmcs_rl")}
-                 / path;
-        policy_ = std::make_unique<OnnxPolicy>(path.string());
+    const auto policy_config = rmcs_rl::load_policy_config(
+        *this, PolicyObservation{}.size(), PolicyAction{}.size(),
+        static_cast<std::size_t>(get_parameter_or("rl_history_length", 1)),
+        static_cast<std::size_t>(
+            get_parameter_or("rl_feature_size", static_cast<int>(PolicyObservation{}.size()))));
+    policy_worker_ = std::make_unique<rmcs_rl::PolicyWorker>(policy_config);
+    {
+        const auto& path = policy_worker_->info().path;
         RCLCPP_INFO(
             get_logger(),
             "ONNX model %s, %s control, %.0fHz policy / %.0fHz feedback PD / "
             "%.0fHz recovery",
-            path.string().c_str(), std::string{policy_profile_.name}.c_str(), inference_frequency_,
+            path.c_str(), std::string{policy_profile_.name}.c_str(), inference_frequency_,
             pd_frequency_, recovery_frequency_);
-        policy_ready_ = true;
     }
+    policy_result_.action.reserve(PolicyAction{}.size());
+    policy_ready_ = true;
     // Configuration is copied into fixed control-loop state at construction.
     // Reject edits that would otherwise change ROS metadata without changing it.
     parameter_guard_ = add_on_set_parameters_callback([](const std::vector<rclcpp::Parameter>&) {
