@@ -263,6 +263,7 @@ bool RlController::evaluate_policy_(std::size_t tick, bool recovering) {
 }
 
 void RlController::accept_policy_result_(std::size_t tick) {
+    const bool native = policy_profile_.name == kV6PolicyProfile.name;
     if (policy_worker_->try_take(policy_result_)) {
         if (policy_result_.generation == policy_generation_) {
             policy_result_pending_ = false;
