@@ -757,7 +757,10 @@ def write_metadata(model_path, updates: Dict[str, object]) -> None:
 def stamp_metadata(model_path, obs_sig: str, act_sig: str, obs_size: int, act_size: int,
                    policy_version: Optional[str] = None,
                    obs_mean=None, obs_std=None,
-                   obs_clip=None, action_clip=None) -> Dict[str, str]:
+                   obs_clip=None, action_clip=None,
+                   model_type: Optional[str] = None,
+                   sequence_length: Optional[int] = None,
+                   feature_size: Optional[int] = None) -> Dict[str, str]:
     """按规范串盖章：返回实际写入的 metadata（含 policy_layout_hash）。"""
     updates = {
         "rmcs_obs_layout": obs_sig,
@@ -774,6 +777,12 @@ def stamp_metadata(model_path, obs_sig: str, act_sig: str, obs_size: int, act_si
         updates["rmcs_obs_clip"] = format_scale(obs_clip)
     if action_clip is not None:
         updates["rmcs_action_clip"] = format_scale(action_clip)
+    if model_type:
+        updates["rmcs_model_type"] = str(model_type).lower()
+    if sequence_length is not None:
+        updates["rmcs_history_length"] = str(int(sequence_length))
+    if feature_size is not None:
+        updates["rmcs_obs_frame_size"] = str(int(feature_size))
     write_metadata(model_path, updates)
     return updates
 

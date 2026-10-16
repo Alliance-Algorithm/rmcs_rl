@@ -11,10 +11,14 @@ public:
     using Clock = std::chrono::steady_clock;
 
     bool due(Clock::time_point now, std::chrono::nanoseconds period) const {
-        return !started_ || now - current_time_ >= period;
+        return !started_ || now - scheduled_time_ >= period;
     }
 
-    std::uint64_t publish(Clock::time_point now) {
+    std::uint64_t publish(Clock::time_point now, std::chrono::nanoseconds period = {}) {
+        if (!started_ || period.count() <= 0)
+            scheduled_time_ = now;
+        else
+            scheduled_time_ += period * ((now - scheduled_time_) / period);
         previous_valid_ = started_;
         previous_time_ = current_time_;
         current_time_ = now;
@@ -34,6 +38,7 @@ public:
         // Keep IDs monotonic so a delayed action cannot match a new frame after reset.
         started_ = previous_valid_ = false;
         current_time_ = previous_time_ = {};
+        scheduled_time_ = {};
     }
 
     [[nodiscard]] std::uint64_t sequence() const { return sequence_; }
@@ -41,6 +46,7 @@ public:
 private:
     Clock::time_point current_time_{};
     Clock::time_point previous_time_{};
+    Clock::time_point scheduled_time_{};
     std::uint64_t sequence_ = 0;
     bool started_ = false;
     bool previous_valid_ = false;

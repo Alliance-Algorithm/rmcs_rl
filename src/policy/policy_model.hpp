@@ -2,6 +2,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <map>
 #include <optional>
 #include <span>
 #include <string>
@@ -17,9 +18,16 @@ public:
         std::string path;
         std::string input_name = "obs";
         std::string output_name = "actions";
+        std::string model_type = "auto";
+        std::size_t sequence_length = 0;
+        std::size_t feature_size = 0;
+        std::size_t observation_size = 0;
+        std::size_t action_size = 0;
         bool normalization_from_metadata = true;
         std::optional<double> obs_clip;
         std::optional<double> action_clip;
+        // 键 = 额外输入张量名，值 = 展平常量（来自 policy_server extra_inputs.<name>）
+        std::map<std::string, OnnxRuntime::ExtraInputValues> extra_input_values;
     };
 
     struct Info {
@@ -29,6 +37,11 @@ public:
         std::string version;
         std::size_t obs_size = 0;
         std::size_t action_size = 0;
+        std::string model_type;
+        std::size_t input_rank = 0;
+        std::size_t output_rank = 0;
+        std::size_t sequence_length = 1;
+        std::size_t feature_size = 0;
         std::uint64_t layout_hash = 0;
         std::uint64_t model_id = 0;
     };

@@ -1,14 +1,18 @@
 #include <algorithm>
 #include <array>
 #include <chrono>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
 #include <exception>
+#include <map>
 #include <memory>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <utility>
+#include <variant>
 #include <vector>
 
 #include <ament_index_cpp/get_package_share_directory.hpp>
@@ -39,6 +43,60 @@ public:
                 ament_index_cpp::get_package_share_directory("rmcs_rl") + "/" + config.path;
         config.input_name = string_or(*this, "input_name", "obs");
         config.output_name = string_or(*this, "output_name", "actions");
+        config.model_type = string_or(*this, "model_type", "auto");
+        if (const auto value = integer_parameter(*this, "sequence_length"); value.has_value()) {
+            if (*value < 1)
+                throw std::invalid_argument("policy_server: sequence_length must be positive");
+            config.sequence_length = static_cast<std::size_t>(*value);
+        }
+        if (const auto value = integer_parameter(*this, "feature_size"); value.has_value()) {
+            if (*value < 1)
+                throw std::invalid_argument("policy_server: feature_size must be positive");
+            config.feature_size = static_cast<std::size_t>(*value);
+        }
+        if (const auto value = integer_parameter(*this, "rl_obs_size"); value.has_value()) {
+            if (*value < 1)
+                throw std::invalid_argument("policy_server: rl_obs_size must be positive");
+            config.observation_size = static_cast<std::size_t>(*value);
+        }
+        if (const auto value = integer_parameter(*this, "rl_action_size"); value.has_value()) {
+            if (*value < 1)
+                throw std::invalid_argument("policy_server: rl_action_size must be positive");
+            config.action_size = static_cast<std::size_t>(*value);
+        }
+        for (const auto& parameter_name : list_parameters({"extra_inputs"}, 1).names) {
+            static constexpr std::string_view kPrefix = "extra_inputs.";
+            if (!parameter_name.starts_with(kPrefix))
+                continue;
+            const auto extra_name = parameter_name.substr(kPrefix.size());
+            if (extra_name.empty())
+                throw std::invalid_argument(
+                    "policy_server: extra_inputs entry must be extra_inputs.<input_name>");
+            const auto parameter = get_parameter(parameter_name);
+            OnnxRuntime::ExtraInputValues values;
+            switch (parameter.get_type()) {
+            case rclcpp::ParameterType::PARAMETER_DOUBLE_ARRAY:
+                values = parameter.as_double_array();
+                break;
+            case rclcpp::ParameterType::PARAMETER_INTEGER_ARRAY:
+                values = parameter.as_integer_array();
+                break;
+            case rclcpp::ParameterType::PARAMETER_BOOL_ARRAY:
+                values = parameter.as_bool_array();
+                break;
+            default:
+                throw std::invalid_argument(
+                    "policy_server: " + parameter_name + " must be a float, integer, or bool list");
+            }
+            if (std::visit([](const auto& items) { return items.empty(); }, values))
+                throw std::invalid_argument("policy_server: " + parameter_name + " is empty");
+            if (const auto* floats = std::get_if<std::vector<double>>(&values))
+                for (const double value : *floats)
+                    if (!std::isfinite(value))
+                        throw std::invalid_argument(
+                            "policy_server: " + parameter_name + " contains a non-finite value");
+            config.extra_input_values.emplace(extra_name, std::move(values));
+        }
         config.normalization_from_metadata = bool_or(*this, "normalization_from_metadata", true);
         if (const double clip = number_or(*this, "obs_clip", -1.0); clip >= 0.0)
             config.obs_clip = clip;
@@ -63,9 +121,10 @@ public:
         const auto& info = model_->info();
         RCLCPP_INFO(get_logger(), "policy loaded: %s", info.path.c_str());
         RCLCPP_INFO(
-            get_logger(), "model_id=%s layout_hash=%s version=%s obs=%zu action=%zu",
+            get_logger(), "model_id=%s layout_hash=%s version=%s type=%s input_rank=%zu output_rank=%zu obs=%zu action=%zu",
             hex16(info.model_id).c_str(), hex16(info.layout_hash).c_str(), info.version.c_str(),
-            info.obs_size, info.action_size);
+            info.model_type.c_str(), info.input_rank, info.output_rank, info.obs_size,
+            info.action_size);
         RCLCPP_INFO(get_logger(), "obs signature: %s", info.obs_signature.c_str());
         RCLCPP_INFO(get_logger(), "action signature: %s", info.actions_signature.c_str());
         RCLCPP_INFO(get_logger(), "waiting for obs on %s/obs", rl_base.c_str());
@@ -74,7 +133,7 @@ public:
 private:
     void on_observation(msg::Observation::UniquePtr message) {
         const auto& info = model_->info();
-        if (message->layout_hash != info.layout_hash) {
+        if (info.layout_hash != 0 && message->layout_hash != info.layout_hash) {
             if (!layout_mismatch_logged_) {
                 layout_mismatch_logged_ = true;
                 RCLCPP_ERROR(
@@ -95,7 +154,9 @@ private:
         }
         action.header.stamp = get_clock()->now();
         action.obs_seq = message->obs_seq;
-        action.layout_hash = info.layout_hash;
+        // The bridge is the source of truth for the YAML-defined layout when a model has no
+        // stamped metadata. Preserve the observation contract on the action message.
+        action.layout_hash = message->layout_hash;
         action.model_id = info.model_id;
         action_publisher_->publish(action);
         const auto elapsed =
