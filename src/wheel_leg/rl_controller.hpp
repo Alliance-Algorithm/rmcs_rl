@@ -108,6 +108,7 @@ private:
         process_action_(const PolicyAction& raw, bool shadow_recovery = false);
     void compute_motor_torques_();
     void apply_soft_limits_(Eigen::Vector4d& leg_torque) const;
+    void accept_policy_result_(std::size_t tick);
 
     std::array<InputInterface<double>, 6> angle_inputs_;
     std::array<InputInterface<double>, 6> velocity_inputs_;

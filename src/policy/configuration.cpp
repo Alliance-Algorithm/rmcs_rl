@@ -26,6 +26,9 @@ PolicyConfig load_policy_config(
     config.model_type = string_or(node, "model_type", "auto");
     config.expected_model_spec_sha256 =
         string_or(node, "expected_model_spec_sha256", "");
+    if (config.model_type == "wheel_leg_v7" && config.expected_model_spec_sha256.empty())
+        config.expected_model_spec_sha256 =
+            "0ac82045ab584f20091538aa782d93ea545382dc701faca1f8ae92aeb7cd1997";
     config.expected_leg_winding_version = string_or(node, "leg_winding_version", "");
     config.observation_size = observation_size;
     config.action_size = action_size;

@@ -23,6 +23,7 @@ struct ClosedChainLegGeometry {
 struct RecoveryProfile {
     JointReferenceRecoveryConfig controller;
     std::array<ClosedChainLegGeometry, 2> geometry;
+    std::string model_spec_sha256;
     static RecoveryProfile
         load(const std::filesystem::path& profile, const std::filesystem::path& lookup);
 };

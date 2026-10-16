@@ -122,8 +122,8 @@ void RlController::update_command_reference_() {
     if (heading_hold_enabled_ && !spinning && requested_vx != 0.0 && requested_yaw == 0.0) {
         if (!heading_target_rad_)
             heading_target_rad_ = yaw;
-        const double error = std::atan2(
-            std::sin(*heading_target_rad_ - yaw), std::cos(*heading_target_rad_ - yaw));
+        const double error =
+            std::atan2(std::sin(*heading_target_rad_ - yaw), std::cos(*heading_target_rad_ - yaw));
         desired_yaw = std::clamp(
             heading_hold_gain_ * error, -heading_hold_yaw_rate_max_, heading_hold_yaw_rate_max_);
         *heading_hold_active_output_ = true;
@@ -209,9 +209,8 @@ bool RlController::assemble_observation_(bool shadow_recovery) {
 
     auto observation = std::span{observation_};
     auto command = observation.subspan<ObservationLayout::kCommand, 3>();
-    command[0] = (shadow_recovery || hold_command)
-                   ? 0.0
-                   : std::clamp(vx_reference_, -vx_max_, vx_max_);
+    command[0] =
+        (shadow_recovery || hold_command) ? 0.0 : std::clamp(vx_reference_, -vx_max_, vx_max_);
     command[1] = 0.0; // Both frozen flat actors have no lateral command capability.
     command[2] = (shadow_recovery || hold_command)
                    ? 0.0

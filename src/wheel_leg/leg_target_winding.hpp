@@ -27,7 +27,7 @@ inline constexpr std::string_view leg_target_winding_name(LegTargetWinding versi
     if (version == LegTargetWinding::kPairedBranch107)
         return "paired_branch107_v1";
     return version == LegTargetWinding::kPairedCommon ? "paired_common_v1"
-                                                   : "independent_nearest_v1";
+                                                      : "independent_nearest_v1";
 }
 
 inline LegTargetWinding
@@ -40,7 +40,7 @@ inline LegTargetWinding
         throw std::runtime_error(
             std::string{version} + " requires the continuous root-drive v6 profile");
     return version == "paired_branch107_v1" ? LegTargetWinding::kPairedBranch107
-                                           : LegTargetWinding::kPairedCommon;
+                                            : LegTargetWinding::kPairedCommon;
 }
 
 inline void validate_leg_target_model_spec(
@@ -68,10 +68,10 @@ inline std::array<double, 4> wind_leg_targets(
             const double sign = side == 0 ? 1.0 : -1.0;
             const auto bounds = kBranch107SignedDeltaBoundsRad[side];
             const double mean = (desired[hip] + desired[aux]) / 2;
-            const double delta = std::clamp(
-                sign * (desired[aux] - desired[hip]), bounds[0], bounds[1]);
-            const double turns = std::floor(
-                ((current[hip] * .5 + current[aux] * .5 - mean) / tau) + .5);
+            const double delta =
+                std::clamp(sign * (desired[aux] - desired[hip]), bounds[0], bounds[1]);
+            const double turns =
+                std::floor(((current[hip] * .5 + current[aux] * .5 - mean) / tau) + .5);
             const double common = turns * tau;
             targets[hip] = mean - sign * delta / 2 + common;
             targets[aux] = mean + sign * delta / 2 + common;
@@ -89,8 +89,7 @@ inline std::array<double, 4> wind_leg_targets(
             // Keep double arithmetic in the deployed controller. Both root
             // drives receive one common turn; no relative-angle projection.
             const double offset =
-                ((current[first] - desired[first]) + (current[first + 1] - desired[first + 1]))
-                / 2;
+                ((current[first] - desired[first]) + (current[first + 1] - desired[first + 1])) / 2;
             const double turns = std::floor(offset / tau + .5);
             targets[first] = desired[first] + turns * tau;
             targets[first + 1] = desired[first + 1] + turns * tau;

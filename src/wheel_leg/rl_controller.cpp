@@ -236,49 +236,12 @@ void RlController::update_state_output_() {
 bool RlController::evaluate_policy_(std::size_t tick, bool recovering) {
     const bool native = policy_profile_.name == kV6PolicyProfile.name;
     const bool shadow = recovering && (native || recovery_command_.phase != RecoveryPhase::kBlend);
-    if (policy_worker_->try_take(policy_result_)) {
-        if (policy_result_.generation == policy_generation_) {
-            policy_result_pending_ = false;
-            if (!policy_result_.success) {
-                node::error("ONNX inference failed: {}", policy_result_.error);
-                return false;
-            }
-            if (policy_result_.sequence <= accepted_policy_sequence_
-                || Clock::now() - policy_result_.submitted_at
-                       > std::chrono::duration<double>{2.0 / inference_frequency_}) {
-                node::error("ONNX inference result is stale");
-                return false;
-            }
-            PolicyAction action;
-            std::copy(policy_result_.action.begin(), policy_result_.action.end(), action.begin());
-            const bool result_shadow = policy_result_.context != 0;
-            const auto processed = process_action_(action, result_shadow);
-            *inference_time_us_ = policy_result_.inference_microseconds;
-            if (!processed) {
-                node::error("Policy action rejected: {}", processed.error());
-                return false;
-            }
-            accepted_policy_sequence_ = policy_result_.sequence;
-            schedule_.last_policy_tick = tick;
-            for (std::size_t i = 0; i < observation_outputs_.size(); ++i)
-                *observation_outputs_[i] = pending_policy_observation_[i];
-            if (!result_shadow || native)
-                for (std::size_t i = 0; i < action_outputs_.size(); ++i)
-                    *action_outputs_[i] = native ? policy_action_[i] : previous_action_[i];
-        }
-    }
-
+    accept_policy_result_(tick);
     if (policy_result_pending_
         && Clock::now() - policy_submitted_at_
                > std::chrono::duration<double>{2.0 / inference_frequency_}) {
-        policy_result_pending_ = false;
-        if (!assemble_observation_(recovering))
-            return false;
-        std::copy(observation_.begin(), observation_.end(), pending_policy_observation_.begin());
-        policy_submitted_at_ = Clock::now();
-        policy_result_pending_ = policy_worker_->submit(
-            std::span<const float>{pending_policy_observation_}, ++submitted_policy_sequence_,
-            policy_generation_, policy_submitted_at_, shadow ? 1 : 0);
+        node::error("RL inference exceeded the configured age limit");
+        return false;
     }
     if (policy_profile_.name == kV6PolicyProfile.name && recovery_started_
         && joint_reference_recovery_ && !advance_joint_reference_recovery_())
@@ -297,6 +260,46 @@ bool RlController::evaluate_policy_(std::size_t tick, bool recovering) {
             policy_generation_, submitted_at, shadow ? 1 : 0);
     }
     return policy_targets_valid_ || (state_ == State::kPrepare && !recovery_started_);
+}
+
+void RlController::accept_policy_result_(std::size_t tick) {
+    if (policy_worker_->try_take(policy_result_)) {
+        if (policy_result_.generation == policy_generation_) {
+            policy_result_pending_ = false;
+            if (!policy_result_.success) {
+                node::error("ONNX inference failed: {}", policy_result_.error);
+                fault_latched_ = true;
+                return;
+            }
+            if (policy_result_.sequence <= accepted_policy_sequence_
+                || Clock::now() - policy_result_.submitted_at
+                       > std::chrono::duration<double>{2.0 / inference_frequency_}) {
+                node::error("ONNX inference result is stale");
+                return;
+            }
+            PolicyAction action;
+            std::copy(policy_result_.action.begin(), policy_result_.action.end(), action.begin());
+            const bool result_shadow = policy_result_.context != 0;
+            const auto processed = process_action_(action, result_shadow);
+            *inference_time_us_ = policy_result_.inference_microseconds;
+            if (!processed) {
+                node::error("Policy action rejected: {}", processed.error());
+                fault_latched_ = true;
+                return;
+            }
+            accepted_policy_sequence_ = policy_result_.sequence;
+            schedule_.last_policy_tick = tick;
+            for (std::size_t i = 0; i < observation_outputs_.size(); ++i)
+                *observation_outputs_[i] = pending_policy_observation_[i];
+            if (!result_shadow || native)
+                for (std::size_t i = 0; i < action_outputs_.size(); ++i)
+                    *action_outputs_[i] = native ? policy_action_[i] : previous_action_[i];
+        }
+    }
+    if (!policy_worker_->healthy()) {
+        node::error("RL inference worker failed: {}", policy_worker_->error());
+        fault_latched_ = true;
+    }
 }
 
 void RlController::update() {
@@ -432,6 +435,13 @@ void RlController::update() {
                         : 0.0;
             }
         }
+    }
+    accept_policy_result_(tick);
+    if (fault_latched_) {
+        enter_(State::kIdle);
+        clear_outputs_();
+        update_state_output_();
+        return;
     }
     if (requested == 2 || (state_ != State::kPrepare && state_ != State::kRl))
         enter_(State::kPrepare);

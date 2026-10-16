@@ -381,8 +381,8 @@ RlController::RlController()
                 "height_lookup_path",
                 std::string{"models/wheel_leg/deployment/v7_height_lookup_107.json"});
         }
-        const auto native = RecoveryProfile::load(
-            resolve(recovery_profile_path), resolve(height_lookup_path));
+        const auto native =
+            RecoveryProfile::load(resolve(recovery_profile_path), resolve(height_lookup_path));
         validate_leg_target_recovery_profile(
             leg_target_winding_, recovery_enabled_, native.model_spec_sha256);
         auto recovery_config = native.controller;
@@ -545,14 +545,22 @@ RlController::RlController()
         recovery_observer_.emplace(mechanism, observer_config);
     }
 
-    const auto policy_config = rmcs_rl::load_policy_config(
+    auto policy_config = rmcs_rl::load_policy_config(
         *this, PolicyObservation{}.size(), PolicyAction{}.size(),
         static_cast<std::size_t>(get_parameter_or("rl_history_length", 1)),
         static_cast<std::size_t>(
             get_parameter_or("rl_feature_size", static_cast<int>(PolicyObservation{}.size()))));
+    if (leg_target_winding_ == LegTargetWinding::kPairedBranch107) {
+        policy_config.model_type = "wheel_leg_v7";
+        policy_config.expected_leg_winding_version =
+            std::string{leg_target_winding_name(leg_target_winding_)};
+        if (policy_config.expected_model_spec_sha256.empty())
+            policy_config.expected_model_spec_sha256 = std::string{kBranch107ModelSpecSha256};
+    }
     policy_worker_ = std::make_unique<rmcs_rl::PolicyWorker>(policy_config);
-    validate_leg_target_model_spec(
-        leg_target_winding_, policy_worker_->info().model_spec_sha256, "Wheel-leg ONNX model");
+    if (leg_target_winding_ == LegTargetWinding::kPairedBranch107)
+        validate_leg_target_model_spec(
+            leg_target_winding_, policy_worker_->info().model_spec_sha256, "Wheel-leg ONNX model");
     {
         const auto& path = policy_worker_->info().path;
         RCLCPP_INFO(
@@ -560,8 +568,8 @@ RlController::RlController()
             "ONNX model %s, %s control, winding %s, %.0fHz policy / %.0fHz feedback PD / "
             "%.0fHz recovery",
             path.c_str(), std::string{policy_profile_.name}.c_str(),
-            leg_target_winding_name(leg_target_winding_).data(), inference_frequency_, pd_frequency_,
-            recovery_frequency_);
+            leg_target_winding_name(leg_target_winding_).data(), inference_frequency_,
+            pd_frequency_, recovery_frequency_);
     }
     policy_result_.action.reserve(PolicyAction{}.size());
     policy_ready_ = true;

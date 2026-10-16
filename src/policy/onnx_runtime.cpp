@@ -44,16 +44,17 @@ OnnxRuntime::OnnxRuntime(const Config& config)
     options.SetIntraOpNumThreads(1);
     options.SetInterOpNumThreads(1);
     session_ = Ort::Session{env_, config.model_path.c_str(), options};
-    info_.model_spec_sha256 = metadata("leg_target_model_spec_sha256").value_or(
-        metadata("rmcs_model_spec_sha256").value_or(""));
+    info_.model_spec_sha256 = metadata("leg_target_model_spec_sha256")
+                                  .value_or(metadata("rmcs_model_spec_sha256").value_or(""));
     if (!config.expected_leg_winding_version.empty()
         && metadata("leg_winding_version").value_or("") != config.expected_leg_winding_version)
         throw std::invalid_argument(
             "model leg_winding_version metadata does not match the configured target contract");
     if (requested_type == "wheel_leg_v7") {
-        const auto expected_spec = config.expected_model_spec_sha256.empty()
-                                       ? std::string{"0ac82045ab584f20091538aa782d93ea545382dc701faca1f8ae92aeb7cd1997"}
-                                       : config.expected_model_spec_sha256;
+        const auto expected_spec =
+            config.expected_model_spec_sha256.empty()
+                ? std::string{"0ac82045ab584f20091538aa782d93ea545382dc701faca1f8ae92aeb7cd1997"}
+                : config.expected_model_spec_sha256;
         if (info_.model_spec_sha256 != expected_spec)
             throw std::invalid_argument(
                 "wheel_leg_v7 model_spec_sha256 does not match the deployed paired-107 contract");

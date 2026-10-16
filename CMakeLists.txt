@@ -49,18 +49,6 @@ ament_auto_add_library(rmcs_rl SHARED
     src/policy/onnx_runtime.cpp
     src/policy/policy_worker.cpp
     src/parameters.cpp
-)
-ament_target_dependencies(rmcs_rl rmcs_executor rmcs_description)
-target_include_directories(rmcs_rl PUBLIC
-    $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/include>
-    $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/src>
-    $<INSTALL_INTERFACE:include/rmcs_rl>
-)
-target_include_directories(rmcs_rl PUBLIC ${ONNXRUNTIME_ROOT_DIR}/include)
-target_link_libraries(rmcs_rl
-    ${ONNXRUNTIME_ROOT_DIR}/lib/libonnxruntime.so OpenSSL::Crypto nlohmann_json::nlohmann_json)
-
-ament_auto_add_library(rmcs_rl_components SHARED
     src/rl_bridge.cpp
     src/rl_bridge/config.cpp
     src/rl_bridge/observation_history.cpp
@@ -69,19 +57,28 @@ ament_auto_add_library(rmcs_rl_components SHARED
     src/rl_bridge/term_parser.cpp
     src/rl_bridge/interface_binding.cpp
     src/rl_bridge/observation.cpp
+    src/wheel_leg/action.cpp
+    src/wheel_leg/closed_chain_support_observer.cpp
+    src/wheel_leg/configuration.cpp
+    src/wheel_leg/controller_recovery.cpp
+    src/wheel_leg/joint_reference_recovery_controller.cpp
+    src/wheel_leg/observation.cpp
+    src/wheel_leg/recovery_controller.cpp
+    src/wheel_leg/recovery_observer.cpp
+    src/wheel_leg/recovery_profile.cpp
+    src/wheel_leg/rl_controller.cpp
 )
-target_include_directories(rmcs_rl_components PRIVATE ${PROJECT_SOURCE_DIR}/include ${PROJECT_SOURCE_DIR}/src)
-ament_target_dependencies(rmcs_rl_components rmcs_executor rmcs_description rclcpp)
-target_link_libraries(rmcs_rl_components rmcs_rl)
-
+ament_target_dependencies(rmcs_rl rmcs_executor rmcs_description rmcs_msgs rmcs_utility rclcpp)
+target_include_directories(rmcs_rl PUBLIC
+    $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/include>
+    $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/src>
+    $<INSTALL_INTERFACE:include/rmcs_rl>
+    ${ONNXRUNTIME_ROOT_DIR}/include
+)
+target_link_libraries(rmcs_rl
+    ${ONNXRUNTIME_ROOT_DIR}/lib/libonnxruntime.so OpenSSL::Crypto nlohmann_json::nlohmann_json)
+set_target_properties(rmcs_rl PROPERTIES INSTALL_RPATH "$ORIGIN")
 pluginlib_export_plugin_description_file(rmcs_executor plugins.xml)
-
-file(GLOB WHEEL_LEG_SOURCE CONFIGURE_DEPENDS src/wheel_leg/*.cpp)
-ament_auto_add_library(rmcs_rl_wheel_leg SHARED ${WHEEL_LEG_SOURCE})
-ament_target_dependencies(rmcs_rl_wheel_leg
-    rmcs_executor rmcs_description rmcs_msgs rmcs_utility rclcpp)
-target_link_libraries(rmcs_rl_wheel_leg rmcs_rl)
-set_target_properties(rmcs_rl rmcs_rl_components rmcs_rl_wheel_leg PROPERTIES INSTALL_RPATH "$ORIGIN")
 install(DIRECTORY ${ONNXRUNTIME_ROOT_DIR}/lib/ DESTINATION lib FILES_MATCHING PATTERN "*.so*")
 
 install(DIRECTORY models DESTINATION share/${PROJECT_NAME})
