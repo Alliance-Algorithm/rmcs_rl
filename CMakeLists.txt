@@ -85,6 +85,5 @@ set_target_properties(rmcs_rl rmcs_rl_components rmcs_rl_wheel_leg PROPERTIES IN
 install(DIRECTORY ${ONNXRUNTIME_ROOT_DIR}/lib/ DESTINATION lib FILES_MATCHING PATTERN "*.so*")
 
 install(DIRECTORY models DESTINATION share/${PROJECT_NAME})
-install(DIRECTORY launch DESTINATION share/${PROJECT_NAME})
 
 ament_auto_package(USE_SCOPED_HEADER_INSTALL_DIR)
