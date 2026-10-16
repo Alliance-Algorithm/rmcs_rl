@@ -10,6 +10,7 @@
 
 #include <gtest/gtest.h>
 #include <rmcs_rl/rl_bridge/action_channel.hpp>
+#include <rmcs_rl/rl_bridge/action_feedback_history.hpp>
 #include <rmcs_rl/rl_bridge/observation_history.hpp>
 #include <rmcs_rl/rl_bridge/observation_timeline.hpp>
 
@@ -26,6 +27,58 @@ TEST(ObservationHistory, PreservesFrameSizeOrderAndReset) {
     history.reset();
     EXPECT_EQ(history.append(std::array{7.0, 8.0}), (std::vector{7., 8., 7., 8., 7., 8.}));
     EXPECT_THROW(history.append(std::array{1.0}), std::invalid_argument);
+}
+
+TEST(ActionFeedbackHistory, KeepsTenMillisecondPriorActionAndClearsOnReset) {
+    using namespace std::chrono_literals;
+    const ActionFeedbackHistory::Clock::time_point start{};
+    ActionFeedbackHistory feedback{1};
+    feedback.store(start, std::array{1.0});
+    EXPECT_EQ(feedback.sample(start + 5ms, 10ms), (std::vector{0.0}));
+    feedback.store(start + 5ms, std::array{2.0});
+    EXPECT_EQ(feedback.sample(start + 10ms, 10ms), (std::vector{1.0}));
+    feedback.store(start + 10ms, std::array{3.0});
+    EXPECT_EQ(feedback.sample(start + 15ms, 10ms), (std::vector{2.0}));
+    feedback.store(start + 5ms, std::array{999.0}); // delayed response cannot rewind state
+    EXPECT_EQ(feedback.sample(start + 20ms, 10ms), (std::vector{3.0}));
+    feedback.reset();
+    EXPECT_EQ(feedback.sample(start + 30ms, 10ms), (std::vector{0.0}));
+    EXPECT_THROW(feedback.store(start, std::array{1.0, 2.0}), std::invalid_argument);
+}
+
+TEST(ObservationHistory, FasterInferencePreservesTrainingTimeSpan) {
+    using namespace std::chrono_literals;
+    const ObservationHistory::Clock::time_point start{};
+    for (const std::size_t length : {5u, 8u}) {
+        ObservationHistory history{1, length, 10ms};
+        for (int ms = 0; ms <= 100; ms += 5) {
+            const auto& values = history.append(std::array{double(ms)}, start + std::chrono::milliseconds(ms));
+            for (std::size_t i = 0; i < length; ++i)
+                EXPECT_DOUBLE_EQ(values[i], std::max(0.0, double(ms) - 10.0 * (length - 1 - i)));
+        }
+        history.reset();
+        const auto& values = history.append(std::array{42.0}, start + 1s);
+        for (double value : values)
+            EXPECT_DOUBLE_EQ(value, 42.0);
+        EXPECT_THROW(history.append(std::array{1.0}, start + 1s), std::invalid_argument);
+        const auto& after_gap = history.append(std::array{99.0}, start + 2s);
+        for (double value : after_gap)
+            EXPECT_DOUBLE_EQ(value, 99.0);
+    }
+}
+
+TEST(ObservationTimeline, SchedulingJitterDoesNotAccumulate) {
+    using namespace std::chrono_literals;
+    ObservationTimeline timeline;
+    const ObservationTimeline::Clock::time_point start{};
+    timeline.publish(start, 5ms);
+    EXPECT_TRUE(timeline.due(start + 6ms, 5ms));
+    timeline.publish(start + 6ms, 5ms);
+    EXPECT_FALSE(timeline.due(start + 9ms, 5ms));
+    EXPECT_TRUE(timeline.due(start + 10ms, 5ms));
+    timeline.publish(start + 21ms, 5ms);
+    EXPECT_FALSE(timeline.due(start + 24ms, 5ms));
+    EXPECT_TRUE(timeline.due(start + 25ms, 5ms));
 }
 
 TEST(ObservationTimeline, RejectsPreResetAndOlderActions) {
@@ -145,6 +198,113 @@ TEST(PolicyModel, ParameterClipsOverrideMetadata) {
     std::string error;
     ASSERT_TRUE(model.run(std::array{6.0, -6.0}, action, error)) << error;
     EXPECT_EQ(action, (std::array{3.0, -3.0}));
+}
+
+TEST(PolicyModel, LoadsRank3SequenceInput) {
+    PolicyModel::Config config;
+    config.path = RMCS_RL_SEQ_FIXTURE;
+    PolicyModel model{config};
+    const auto& info = model.info();
+    EXPECT_EQ(info.model_type, "transformer");
+    EXPECT_EQ(info.input_rank, 3u);
+    EXPECT_EQ(info.sequence_length, 2u);
+    EXPECT_EQ(info.feature_size, 3u);
+    ASSERT_EQ(info.obs_size, 6u);
+    ASSERT_EQ(info.action_size, 3u);
+    std::array<double, 3> action{};
+    std::string error;
+    ASSERT_TRUE(model.run(std::array{1., 2., 3., 4., 5., 6.}, action, error)) << error;
+    EXPECT_EQ(action, (std::array{5.0, 7.0, 9.0}));
+    EXPECT_FALSE(model.run(std::array{1., 2., 3.}, action, error));
+}
+
+TEST(PolicyModel, RejectsSequenceHistoryMetadataMismatch) {
+    PolicyModel::Config config;
+    config.path = RMCS_RL_SEQ_MISMATCH_FIXTURE;
+    EXPECT_THROW(PolicyModel{config}, std::invalid_argument);
+}
+
+TEST(PolicyModel, RejectsSequenceLayoutHistoryMismatch) {
+    PolicyModel::Config config;
+    config.path = RMCS_RL_SEQ_LAYOUT_MISMATCH_FIXTURE;
+    EXPECT_THROW(PolicyModel{config}, std::invalid_argument);
+}
+
+TEST(PolicyModel, LoadsSequenceUsingRequiredLayoutOnly) {
+    PolicyModel::Config config;
+    config.path = RMCS_RL_SEQ_LAYOUT_ONLY_FIXTURE;
+    PolicyModel model{config};
+    EXPECT_EQ(model.info().sequence_length, 2u);
+    EXPECT_EQ(model.info().feature_size, 3u);
+}
+
+TEST(PolicyModel, LoadsDynamicSequenceUsingRequiredLayoutOnly) {
+    PolicyModel::Config config;
+    config.path = RMCS_RL_SEQ_LAYOUT_DYNAMIC_FIXTURE;
+    PolicyModel model{config};
+    EXPECT_EQ(model.info().sequence_length, 2u);
+    EXPECT_EQ(model.info().feature_size, 3u);
+}
+
+TEST(PolicyModel, RejectsTransformerTypeOnRank2Input) {
+    PolicyModel::Config config;
+    config.path = RMCS_RL_IDENTITY_FIXTURE;
+    config.model_type = "transformer";
+    EXPECT_THROW(PolicyModel{config}, std::invalid_argument);
+}
+
+TEST(PolicyModel, FeedsExtraInputConstants) {
+    PolicyModel::Config config;
+    config.path = RMCS_RL_EXTRA_FIXTURE;
+    config.extra_input_values["offset"] = std::vector<double>{10.0};
+    PolicyModel model{config};
+    ASSERT_EQ(model.info().obs_size, 2u);
+    ASSERT_EQ(model.info().action_size, 2u);
+    std::array<double, 2> action{};
+    std::string error;
+    ASSERT_TRUE(model.run(std::array{3.0, 6.0}, action, error)) << error;
+    EXPECT_EQ(action, (std::array{13.0, 16.0}));
+}
+
+TEST(PolicyModel, RejectsMissingExtraInputDeclaration) {
+    PolicyModel::Config config;
+    config.path = RMCS_RL_EXTRA_FIXTURE;
+    EXPECT_THROW(PolicyModel{config}, std::invalid_argument);
+}
+
+TEST(PolicyModel, RejectsExtraInputWithoutMatchingModelInput) {
+    PolicyModel::Config config;
+    config.path = RMCS_RL_EXTRA_FIXTURE;
+    config.extra_input_values["offset"] = std::vector<double>{10.0};
+    config.extra_input_values["bogus"] = std::vector<double>{1.0};
+    EXPECT_THROW(PolicyModel{config}, std::invalid_argument);
+}
+
+TEST(PolicyModel, RejectsWrongExtraInputValueCount) {
+    PolicyModel::Config config;
+    config.path = RMCS_RL_EXTRA_FIXTURE;
+    config.extra_input_values["offset"] = std::vector<double>{1.0, 2.0};
+    EXPECT_THROW(PolicyModel{config}, std::invalid_argument);
+}
+
+TEST(PolicyModel, FeedsTypedExtraInputConstants) {
+    PolicyModel::Config config;
+    config.path = RMCS_RL_TYPED_EXTRA_FIXTURE;
+    config.extra_input_values["position_ids"] = std::vector<std::int64_t>{10, 20};
+    config.extra_input_values["attention_mask"] = std::vector<bool>{true, false};
+    PolicyModel model{config};
+    std::array<double, 2> action{};
+    std::string error;
+    ASSERT_TRUE(model.run(std::array{1., 2.}, action, error)) << error;
+    EXPECT_EQ(action, (std::array{12.0, 22.0}));
+}
+
+TEST(PolicyModel, RejectsWrongTypedExtraInputConstants) {
+    PolicyModel::Config config;
+    config.path = RMCS_RL_TYPED_EXTRA_FIXTURE;
+    config.extra_input_values["position_ids"] = std::vector<bool>{true, false};
+    config.extra_input_values["attention_mask"] = std::vector<bool>{true, false};
+    EXPECT_THROW(PolicyModel{config}, std::invalid_argument);
 }
 
 } // namespace

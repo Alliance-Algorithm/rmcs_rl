@@ -5,6 +5,7 @@
 # 用法:
 #   stamp_model.sh <model名或路径> [--version X] [--config <yaml>] [--node rl_bridge]
 #                  [--obs-mean a,b,... --obs-std a,b,...] [--obs-clip V] [--action-clip V]
+#                  [--model-type mlp|transformer|generic] [--sequence-length N --feature-size N]
 #
 # 例:
 #   stamp_model.sh wheel_leg_v3.onnx --version 3.0
@@ -59,7 +60,8 @@ while [[ $# -gt 0 ]]; do
         NODE="${2:?--node 需要值}"
         shift 2
         ;;
-    --obs-mean | --obs-std | --obs-clip | --action-clip)
+    --obs-mean | --obs-std | --obs-clip | --action-clip \
+    | --model-type | --sequence-length | --feature-size)
         EXTRA+=("$1" "${2:?$1 需要值}")
         shift 2
         ;;

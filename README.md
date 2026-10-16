@@ -52,28 +52,111 @@ ros2 run rmcs_rl policy_server --ros-args --params-file <车辆配置.yaml>
 
 ## 模型与契约
 
-模型输入为 float32 `obs[batch,N]`，输出为 float32 `actions[batch,M]`，batch 为 1 或动态。
+模型结构由 `policy_server.model_type` 或 ONNX metadata `rmcs_model_type` 切换，支持：
+
+- `mlp`：输入可以是 float32 `obs[1,N]`，也可以是带历史帧的 `obs[1,history,feature]`；
+- `transformer`：输入为 float32 `obs[1,history,feature]`；
+- `generic`：保留 rank-1/2/3 的形状适配，供后续单输入结构接入。
+
+输出支持 rank-1/2/3，只要除 batch 外的元素总数等于动作数 `M`。batch 为 1 或动态。
+`auto` 优先读取 `rmcs_model_type`，没有 metadata 时才按 rank-2 推断 MLP、rank-3 推断
+Transformer。
+
+多输入模型（例如独立 attention mask 或 position id）除 `obs` 外的输入必须是常量张量，在
+`policy_server` 段用 `extra_inputs.<输入名>: [元素列表]` 声明；启动时根据 ONNX 输入类型
+创建 `float32`、`int64` 或 `bool` 张量，并校验名字、元素数量和形状；缺声明、类型不匹配
+或声明了模型没有的输入都会拒绝；
+输出仍必须是唯一的 `actions`。
+
+```yaml
+policy_server:
+  ros__parameters:
+    extra_inputs:
+      attn_mask: [true, true, true, true] # bool mask；也支持 int64 position id
+```
+
 部署模型须含 `rmcs_obs_layout`、`rmcs_actions_layout`；建议带 `policy_layout_hash` 和版本。
 `history_length × 单帧维数 = rl_obs_size`。归一化均值和标准差必须成对提供，标准差为正数。
 
-新模型先核对训练的观测顺序、坐标、基准角、缩放和频率，再盖章：
+rank-3 模型的序列切分受强制约束：模型的 `T == v3-history`、`F == rl_obs_size / history_length`，
+其中 `v3-history` 来自必需的 `rmcs_obs_layout`，并且最终还会由动作消息的 layout hash 与
+`rl_bridge` 再次核对。`rmcs_history_length`、`rmcs_obs_frame_size` 和 `sequence_length` 是
+启动时的辅助维度声明，缺失或不一致都会拒绝；它们不能替代布局签名。
+
+带历史帧的模型示例（桥和策略进程都要使用同一历史长度）：
+
+```yaml
+rl_bridge:
+  ros__parameters:
+    history_length: 8
+    rl_obs_size: 208       # 8 × 26
+policy_server:
+  ros__parameters:
+    model_type: "transformer"  # 带历史帧 MLP 这里写 "mlp"
+    sequence_length: 8          # 动态 rank-3 输入时需要
+    feature_size: 26
+    rl_obs_size: 208
+```
+
+### 模型盖章
+
+部署模型必须含 `rmcs_obs_layout`、`rmcs_actions_layout`，建议同时带 `policy_layout_hash`
+和版本。盖章按**当前 YAML** 生成签名，所以顺序是先核对训练布局、再盖章、再同步 YAML、
+最后复验。
+
+**1. 装依赖（一次性）**：需要一个带 `onnx` 与 `PyYAML` 的 Python。没有就运行：
+
+```sh
+bash src/rmcs_rl/tool/install_model_tools.sh
+```
+
+它创建 `/opt/rmcs-tools/venv`；已有环境则 `export RMCS_ONNX_PYTHON=<venv>/bin/python` 直接跳过安装。
+`stamp_model.sh` 自己会依次找 `RMCS_ONNX_PYTHON`、该 venv、`python3`；下面直接调用
+`python3` 的脚本若系统解释器没装 `onnx`，改用 `<venv>/bin/python`。
+
+**2. 核对训练布局**：逐条确认观测顺序、坐标、基准角、缩放和频率与当前 YAML 一致。
+YAML 写错会盖出「自洽但错误」的签名，后续校验照样通过，所以这一步不能省。
+
+**3. 盖章**：推荐用一键脚本。它先提示模型布局与 YAML 是否一致（不一致只警告不阻断），
+盖完立即复验，最后打印要手工改的 YAML 两行：
 
 ```sh
 bash src/rmcs_rl/tool/stamp_model.sh <模型.onnx> --config <车辆配置.yaml> --version <版本>
 ```
 
-按工具输出同步 `policy_server.rl_model_path`、`rl_bridge.expected_model_id`，然后验证：
+模型放在 `src/rmcs_rl/models/` 下时只写文件名；`--config` 缺省为
+`src/rmcs_bringup/config/wheel-leg-infantry-rl.yaml`，`--node` 缺省 `rl_bridge`。
+带历史帧或特殊结构时补 `--model-type mlp|transformer|generic`、`--sequence-length N`、
+`--feature-size N`。脚本只盖 metadata，不改计算图/权重，也不改 YAML——YAML 由你手工改最安全。
+
+只需写 metadata、不自动复验时用底层脚本。盖章默认写入序列键（`rmcs_history_length`/
+`rmcs_obs_frame_size`，取自 YAML）；部署端还会从必需的 `rmcs_obs_layout` 中读取
+`v3-history`，防止只依赖可选 metadata。`rmcs_model_type` 可选，缺省由部署端按输入 rank 推断：
+
+```sh
+python3 src/rmcs_rl/tool/stamp_layout_metadata.py \
+  --model policy.onnx --from-config <车辆配置.yaml> --node rl_bridge \
+  --model-type transformer
+```
+
+**4. 同步 YAML 两处**：按工具输出手工改 `policy_server.rl_model_path` 与
+`rl_bridge.expected_model_id`，不要让脚本改配置文件。
+
+**5. 复验**：
 
 ```sh
 python3 src/rmcs_rl/tool/check_policy_contract.py <模型.onnx> --config <车辆配置.yaml> --node rl_bridge --expect-model-id <ID>
 ```
 
-盖章只写元数据；布局匹配不能证明训练侧的坐标或动作含义正确。
-更新模型或配置后重启 RMCS。模型或布局不匹配会锁存拒绝动作，需要重启恢复。
+**6. 重启 RMCS**：更新模型或配置后必须重启。模型或布局不匹配会锁存拒绝动作，需要重启恢复。
 
-当前 `models/deformable_sps_V2.onnx` 缺少 `rmcs_obs_layout` 和 `rmcs_actions_layout`，
-完整契约检查与策略服务会拒绝它。这是已有模型的部署缺口，需核对训练契约后补元数据；
-不能只按张量维数推断其含义。
+盖章只写元数据；布局匹配不能证明训练侧的坐标或动作含义正确。
+
+当前部署使用 `models/deformable_v2_transformer.onnx`（8 帧历史 × 32 维单帧，输入 rank-3
+`obs[1,8,32]`，`rmcs_model_type=transformer`）；其 `rmcs_obs_layout`、
+`rmcs_actions_layout`、`policy_layout_hash` 和 `policy_version` 已按
+`deformable-infantry-omni-rl.yaml` 盖章。盖章只确认运行时布局契约，不能只按张量维数
+推断训练侧的坐标或动作含义；更新模型或 YAML 后必须重新盖章并同步 `expected_model_id`。
 
 ## 运行接口
 
@@ -94,5 +177,8 @@ colcon test --merge-install --packages-select rmcs_rl rmcs_core
 PYTHON=<带 onnx、onnxruntime、PyYAML 的 Python> bash src/rmcs_rl/test/test_layout_contract.sh
 ```
 
-C++ 回归覆盖推理归一化、历史帧与跨线程动作快照；Python 回归覆盖布局解析、盖章及错误契约拒绝。
+C++ 回归覆盖推理归一化、历史帧、rank-3 序列输入、float32/int64/bool extra_inputs 常量喂入与错配拒绝、
+跨线程动作快照；Python 回归覆盖布局解析、盖章、T==history 强制、model_type/rank 匹配、
+多输入声明对账及错误契约拒绝。夹具由 `test/gen_seq_fixtures.py`、
+`test/gen_extra_input_fixture.py` 和 `test/gen_typed_extra_input_fixture.py` 确定性生成后提交。
 车辆包保留 DM 使能、帧解码、闭链几何、Body IMU 以及 MuJoCo 查看器回归。
