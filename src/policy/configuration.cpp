@@ -24,6 +24,9 @@ PolicyConfig load_policy_config(
     config.input_name = string_or(node, "input_name", "");
     config.output_name = string_or(node, "output_name", "");
     config.model_type = string_or(node, "model_type", "auto");
+    config.expected_model_spec_sha256 =
+        string_or(node, "expected_model_spec_sha256", "");
+    config.expected_leg_winding_version = string_or(node, "leg_winding_version", "");
     config.observation_size = observation_size;
     config.action_size = action_size;
     config.sequence_length = sequence_length;

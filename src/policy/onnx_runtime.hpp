@@ -25,6 +25,8 @@ public:
         std::string input_name = "obs";
         std::string output_name = "actions";
         std::string model_type = "auto";
+        std::string expected_model_spec_sha256;
+        std::string expected_leg_winding_version;
         std::size_t sequence_length = 0;
         std::size_t feature_size = 0;
         std::size_t observation_size = 0;
@@ -35,6 +37,7 @@ public:
 
     struct Info {
         std::string model_type;
+        std::string model_spec_sha256;
         std::size_t input_rank = 0;
         std::size_t output_rank = 0;
         std::size_t sequence_length = 1;
@@ -53,6 +56,8 @@ public:
                   .input_name = input_name,
                   .output_name = output_name,
                   .model_type = "auto",
+                  .expected_model_spec_sha256 = "",
+                  .expected_leg_winding_version = "",
                   .sequence_length = 0,
                   .feature_size = 0,
                   .observation_size = 0,

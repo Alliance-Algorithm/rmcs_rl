@@ -9,6 +9,8 @@
 
 #include <pluginlib/class_list_macros.hpp>
 
+#include "leg_target_winding.hpp"
+
 namespace rmcs::rl {
 namespace {
 bool almost_integer(double value) {
@@ -101,6 +103,8 @@ void RlController::enter_(State next, bool force_reset) {
     if (next == State::kIdle && recovery_.phase() == RecoveryPhase::kFailed)
         recovery_failure_latched_ = recovery_.failure();
     state_ = next;
+    if (next != State::kRl)
+        reset_heading_hold_();
     if (next != State::kRl || previous != State::kRl)
         reset_policy_generation_();
     prepare_stable_since_.reset();

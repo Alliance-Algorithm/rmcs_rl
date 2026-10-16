@@ -156,6 +156,12 @@ RlController::RlController()
     register_output("/wheel_leg/rl/v6_takeover/blend_fraction", takeover_blend_output_, 0.0);
     register_output("/wheel_leg/rl/performance/inference_us", inference_time_us_, 0.0);
     register_output("/wheel_leg/rl/performance/pd_us", pd_time_us_, 0.0);
+    register_output("/wheel_leg/rl/heading/active", heading_hold_active_output_, false);
+    register_output("/wheel_leg/rl/heading/yaw", heading_yaw_output_, 0.0);
+    register_output("/wheel_leg/rl/heading/target", heading_target_output_, 0.0);
+    register_output("/wheel_leg/rl/heading/error", heading_error_output_, 0.0);
+    register_output("/wheel_leg/rl/heading/raw_yaw_rate", heading_raw_rate_output_, 0.0);
+    register_output("/wheel_leg/rl/heading/limited_yaw_rate", heading_limited_rate_output_, 0.0);
     for (std::size_t i = 0; i < observation_outputs_.size(); ++i)
         register_output(
             std::string{"/wheel_leg/rl/observation/"} + std::string{kObservationNames[i]},
@@ -180,13 +186,22 @@ RlController::RlController()
         throw std::runtime_error("Unknown wheel-leg control profile: " + profile_name);
 
     policy_profile_.forward_limit = get_parameter_or("vx_max", policy_profile_.forward_limit);
+    vx_max_ = policy_profile_.forward_limit;
     policy_profile_.positive_yaw_limit =
         get_parameter_or("yaw_rate_max", policy_profile_.positive_yaw_limit);
+    yaw_rate_max_ = policy_profile_.positive_yaw_limit;
     // V6 uses symmetric yaw commands; retain the legacy reverse-spin envelope.
     policy_profile_.negative_yaw_limit =
         policy_profile_.name == kV6PolicyProfile.name
             ? policy_profile_.positive_yaw_limit
             : std::min(policy_profile_.negative_yaw_limit, policy_profile_.positive_yaw_limit);
+    leg_target_winding_ = parse_leg_target_winding(
+        get_parameter_or<std::string>("leg_winding_version", "independent_nearest_v1"),
+        policy_profile_.name);
+    heading_hold_enabled_ = get_parameter_or("heading_hold_enabled", true);
+    heading_hold_gain_ = get_parameter_or("heading_hold_gain", 5.0);
+    heading_hold_yaw_rate_max_ =
+        get_parameter_or("heading_hold_yaw_rate_max", 2.0 * std::numbers::pi);
 
     strict_feedback_ = policy_profile_.name == kV6PolicyProfile.name || recovery_enabled_;
     RecoverySensorGuardConfig sensor_config;
@@ -352,13 +367,24 @@ RlController::RlController()
                     / path;
             return path;
         };
-        const auto native = RecoveryProfile::load(
-            resolve(recovery_parameter(
+        auto recovery_profile_path = recovery_parameter(
+            "recovery_profile_path",
+            std::string{"models/wheel_leg/deployment/v6_recovery_profiles_v1.json"});
+        auto height_lookup_path = recovery_parameter(
+            "height_lookup_path",
+            std::string{"models/wheel_leg/deployment/v6_height_lookup_v1.json"});
+        if (leg_target_winding_ == LegTargetWinding::kPairedBranch107) {
+            recovery_profile_path = recovery_parameter(
                 "recovery_profile_path",
-                std::string{"models/wheel_leg/deployment/v6_recovery_profiles_v1.json"})),
-            resolve(recovery_parameter(
+                std::string{"models/wheel_leg/deployment/v7_recovery_profiles_107_v2.json"});
+            height_lookup_path = recovery_parameter(
                 "height_lookup_path",
-                std::string{"models/wheel_leg/deployment/v6_height_lookup_v1.json"})));
+                std::string{"models/wheel_leg/deployment/v7_height_lookup_107.json"});
+        }
+        const auto native = RecoveryProfile::load(
+            resolve(recovery_profile_path), resolve(height_lookup_path));
+        validate_leg_target_recovery_profile(
+            leg_target_winding_, recovery_enabled_, native.model_spec_sha256);
         auto recovery_config = native.controller;
         recovery_config.dt = 1.0 / recovery_frequency_;
         recovery_config.blend_seconds =
@@ -525,14 +551,17 @@ RlController::RlController()
         static_cast<std::size_t>(
             get_parameter_or("rl_feature_size", static_cast<int>(PolicyObservation{}.size()))));
     policy_worker_ = std::make_unique<rmcs_rl::PolicyWorker>(policy_config);
+    validate_leg_target_model_spec(
+        leg_target_winding_, policy_worker_->info().model_spec_sha256, "Wheel-leg ONNX model");
     {
         const auto& path = policy_worker_->info().path;
         RCLCPP_INFO(
             get_logger(),
-            "ONNX model %s, %s control, %.0fHz policy / %.0fHz feedback PD / "
+            "ONNX model %s, %s control, winding %s, %.0fHz policy / %.0fHz feedback PD / "
             "%.0fHz recovery",
-            path.c_str(), std::string{policy_profile_.name}.c_str(), inference_frequency_,
-            pd_frequency_, recovery_frequency_);
+            path.c_str(), std::string{policy_profile_.name}.c_str(),
+            leg_target_winding_name(leg_target_winding_).data(), inference_frequency_, pd_frequency_,
+            recovery_frequency_);
     }
     policy_result_.action.reserve(PolicyAction{}.size());
     policy_ready_ = true;

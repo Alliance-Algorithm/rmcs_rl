@@ -102,10 +102,41 @@ bool RlController::read_model_state_() {
     return feedback_valid_ = q_.allFinite() && dq_.allFinite();
 }
 
+void RlController::reset_heading_hold_() {
+    heading_target_rad_.reset();
+    *heading_hold_active_output_ = false;
+    *heading_yaw_output_ = 0.0;
+    *heading_target_output_ = 0.0;
+    *heading_error_output_ = 0.0;
+    *heading_raw_rate_output_ = 0.0;
+    *heading_limited_rate_output_ = 0.0;
+}
+
 void RlController::update_command_reference_() {
     const double requested_vx = velocity_command_->vector.x();
     const double requested_yaw = velocity_command_->vector.z();
     const bool spinning = rmcs_msgs::is_spining(*chassis_mode_);
+    const Eigen::Vector3d forward = world_base_orientation_() * Eigen::Vector3d::UnitX();
+    const double yaw = std::atan2(forward.y(), forward.x());
+    double desired_yaw = requested_yaw;
+    if (heading_hold_enabled_ && !spinning && requested_vx != 0.0 && requested_yaw == 0.0) {
+        if (!heading_target_rad_)
+            heading_target_rad_ = yaw;
+        const double error = std::atan2(
+            std::sin(*heading_target_rad_ - yaw), std::cos(*heading_target_rad_ - yaw));
+        desired_yaw = std::clamp(
+            heading_hold_gain_ * error, -heading_hold_yaw_rate_max_, heading_hold_yaw_rate_max_);
+        *heading_hold_active_output_ = true;
+        *heading_target_output_ = *heading_target_rad_;
+        *heading_error_output_ = error;
+    } else {
+        reset_heading_hold_();
+    }
+    *heading_yaw_output_ = yaw;
+    *heading_raw_rate_output_ = desired_yaw;
+    desired_yaw = std::clamp(
+        desired_yaw, -policy_profile_.negative_yaw_limit, policy_profile_.positive_yaw_limit);
+    *heading_limited_rate_output_ = desired_yaw;
     constexpr double policy_dt = DeployedPolicyContract::kPolicyPeriodSeconds;
     if (spinning)
         vx_reference_ = 0.0;
@@ -114,7 +145,7 @@ void RlController::update_command_reference_() {
             requested_vx - vx_reference_, -policy_profile_.forward_slew * policy_dt,
             policy_profile_.forward_slew * policy_dt);
     yaw_reference_ += std::clamp(
-        requested_yaw - yaw_reference_, -DeployedPolicyContract::kYawSlew * policy_dt,
+        desired_yaw - yaw_reference_, -DeployedPolicyContract::kYawSlew * policy_dt,
         DeployedPolicyContract::kYawSlew * policy_dt);
 
     // Respect the wheel geometry and the combined command envelope.
@@ -139,8 +170,11 @@ bool RlController::assemble_observation_(bool shadow_recovery) {
     const bool hold_command = recovery_motion_hold_();
     if (!shadow_recovery && !hold_command)
         update_command_reference_();
-    else if (hold_command)
-        vx_reference_ = yaw_reference_ = 0.0;
+    else {
+        reset_heading_hold_();
+        if (hold_command)
+            vx_reference_ = yaw_reference_ = 0.0;
+    }
     const bool height_command_active =
         !shadow_recovery && (policy_profile_.name != kV6PolicyProfile.name || !hold_command);
     if (height_command_is_reference_) {
@@ -175,9 +209,13 @@ bool RlController::assemble_observation_(bool shadow_recovery) {
 
     auto observation = std::span{observation_};
     auto command = observation.subspan<ObservationLayout::kCommand, 3>();
-    command[0] = (shadow_recovery || hold_command) ? 0.0 : vx_reference_;
+    command[0] = (shadow_recovery || hold_command)
+                   ? 0.0
+                   : std::clamp(vx_reference_, -vx_max_, vx_max_);
     command[1] = 0.0; // Both frozen flat actors have no lateral command capability.
-    command[2] = (shadow_recovery || hold_command) ? 0.0 : yaw_reference_;
+    command[2] = (shadow_recovery || hold_command)
+                   ? 0.0
+                   : std::clamp(yaw_reference_, -yaw_rate_max_, yaw_rate_max_);
     observation[ObservationLayout::kHeight] =
         ((shadow_recovery || hold_command) ? DeployedPolicyContract::kNominalHeight
                                            : height_reference_)

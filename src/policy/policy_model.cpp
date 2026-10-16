@@ -47,8 +47,10 @@ PolicyModel::PolicyModel(const Config& config)
           OnnxRuntime::Config{
               config.path, config.input_name, config.output_name, config.model_type,
               config.sequence_length, config.feature_size, config.observation_size,
-              config.action_size, config.extra_input_values}) {
+              config.action_size, config.expected_model_spec_sha256,
+              config.expected_leg_winding_version, config.extra_input_values}) {
     info_.path = config.path;
+    info_.model_spec_sha256 = runtime_.info().model_spec_sha256;
     info_.obs_size = runtime_.input_size();
     info_.action_size = runtime_.output_size();
     info_.model_type = runtime_.info().model_type;

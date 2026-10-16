@@ -4,6 +4,7 @@
 #include "closed_chain_support_observer.hpp"
 #include "control_interval.hpp"
 #include "joint_reference_recovery_controller.hpp"
+#include "leg_target_winding.hpp"
 #include "policy.hpp"
 #include "recovery_controller.hpp"
 #include "recovery_observer.hpp"
@@ -101,6 +102,7 @@ private:
         const Eigen::Vector3d& angular_velocity) const;
     bool recovery_capture_ready_() const;
     void update_command_reference_();
+    void reset_heading_hold_();
     bool assemble_observation_(bool shadow_recovery = false);
     std::expected<void, std::string>
         process_action_(const PolicyAction& raw, bool shadow_recovery = false);
@@ -155,6 +157,9 @@ private:
     OutputInterface<double> pd_time_us_;
     std::array<OutputInterface<double>, ObservationLayout::kSize> observation_outputs_;
     std::array<OutputInterface<double>, PolicyAction{}.size()> action_outputs_;
+    OutputInterface<bool> heading_hold_active_output_;
+    OutputInterface<double> heading_yaw_output_, heading_target_output_, heading_error_output_;
+    OutputInterface<double> heading_raw_rate_output_, heading_limited_rate_output_;
     rmcs_rl::PolicyWorker::Result policy_result_;
     PolicyObservation pending_policy_observation_{};
     std::unique_ptr<rmcs_rl::PolicyWorker> policy_worker_;
@@ -164,6 +169,11 @@ private:
     bool policy_result_pending_ = false;
     std::chrono::steady_clock::time_point policy_submitted_at_{};
     PolicyProfile policy_profile_ = kV6PolicyProfile;
+    LegTargetWinding leg_target_winding_ = LegTargetWinding::kIndependentNearest;
+    std::optional<double> heading_target_rad_;
+    bool heading_hold_enabled_ = true;
+    double heading_hold_gain_ = 5.0;
+    double heading_hold_yaw_rate_max_ = 2.0 * std::numbers::pi;
     rclcpp::node_interfaces::OnSetParametersCallbackHandle::SharedPtr parameter_guard_;
 
     // q_model = J * q_motor + offset; tau_motor = J^T * tau_model.
@@ -246,6 +256,8 @@ private:
     double height_reference_rate_max_ = 0.02;
     double wheel_radius_ = 0.06;
     double wheel_track_ = 0.4373;
+    double vx_max_ = 3.0;
+    double yaw_rate_max_ = 6.283185307179586;
     double inference_frequency_ = DeployedPolicyContract::kPolicyFrequencyHz;
     double pd_frequency_ = DeployedPolicyContract::kControlFrequencyHz;
     double recovery_frequency_ = DeployedPolicyContract::kControlFrequencyHz;

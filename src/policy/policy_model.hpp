@@ -19,6 +19,7 @@ public:
 
     struct Info {
         std::string path;
+        std::string model_spec_sha256;
         std::size_t obs_size = 0;
         std::size_t action_size = 0;
         std::string model_type;
