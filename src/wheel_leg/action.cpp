@@ -14,7 +14,7 @@ std::expected<void, std::string>
     if (raw.size() != policy_io_.action_size)
         return std::unexpected{std::string{"ONNX action size does not match YAML"}};
     Vector6 decoded;
-    auto clipped = policy_action_;
+    std::array<double, 6> clipped{};
     for (std::size_t i = 0; i < policy_io_.action_size; ++i) {
         if (!std::isfinite(raw[i]))
             return std::unexpected{std::string{"ONNX returned a non-finite action"}};
@@ -63,11 +63,11 @@ std::expected<void, std::string>
     if (!targets.allFinite())
         return std::unexpected{
             std::string{"Policy action or soft-limit mapping generated a non-finite target"}};
-    policy_action_ = clipped;
+    std::ranges::copy(clipped, policy_action_.begin());
     for (std::size_t i = 0; i < policy_io_.action_size; ++i)
         *action_target_outputs_[i] = decoded[action_motors_[i]];
     if (!shadow_recovery && !(v6 && recovery_started_))
-        previous_action_ = clipped;
+        std::ranges::copy(clipped, previous_action_.begin());
     policy_targets_ = targets;
     policy_targets_valid_ = true;
     return {};

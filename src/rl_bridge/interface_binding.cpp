@@ -100,10 +100,6 @@ std::size_t acquire_slot(
             + "\" exists but is an Event interface; Normal required (" + context + ")");
     const std::type_info& producer_type = output->second.type.get();
 
-    for (std::size_t i = 0; i < slots.size(); ++i)
-        if (slots[i].path == path && binding_matches_type(slots[i].binding, producer_type))
-            return i;
-
     Binding selected = Binding::kDouble;
     bool found = false;
     for (const auto binding : candidates)
@@ -121,6 +117,10 @@ std::size_t acquire_slot(
             + pretty_type(producer_type) + "\" but the term accepts { " + join(expected, ", ")
             + " }. Either fix the term (take=/transform=) or pin type= explicitly.");
     }
+
+    for (std::size_t i = 0; i < slots.size(); ++i)
+        if (slots[i].path == path && slots[i].binding == selected)
+            return i;
 
     Slot slot;
     slot.path = path;

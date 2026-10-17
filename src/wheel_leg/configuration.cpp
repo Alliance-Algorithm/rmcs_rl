@@ -9,11 +9,11 @@
 #include <stdexcept>
 #include <type_traits>
 #include <utility>
-
-#include <rmcs_rl/rl_bridge/interface_binding.hpp>
 #include <vector>
 
 #include <ament_index_cpp/get_package_share_directory.hpp>
+
+#include <rmcs_rl/rl_bridge/interface_binding.hpp>
 
 namespace rmcs::rl {
 
@@ -252,6 +252,12 @@ RlController::RlController(const rclcpp::NodeOptions& options)
         action_scales_[index] = term.scale;
         register_output(term.output, action_target_outputs_[term.index], 0.0);
     }
+    const auto& left_wheel = policy_io_.action_terms[motor_actions_[4]];
+    const auto& right_wheel = policy_io_.action_terms[motor_actions_[5]];
+    wheel_speed_limit_ = std::min(
+        {-left_wheel.clip_min, left_wheel.clip_max, -right_wheel.clip_min, right_wheel.clip_max});
+    if (wheel_speed_limit_ <= 0.0)
+        throw std::runtime_error("Wheel-leg wheel action bounds must allow both drive directions");
 
     calibration_ready_ = get_parameter_or("calibration_ready", false);
     soft_limits_ready_ = get_parameter_or("soft_limits_ready", false);

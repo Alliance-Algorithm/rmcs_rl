@@ -42,7 +42,6 @@ struct JointReferenceRecoveryConfig {
     Eigen::Vector4d fold = Eigen::Vector4d::Zero();
     Eigen::Vector4d thrust = Eigen::Vector4d::Zero();
     Eigen::Vector4d support = Eigen::Vector4d::Zero();
-    JointReferenceRecoveryVector6 rl_nominal = JointReferenceRecoveryVector6::Zero();
     Eigen::Vector4d root_axis_signs{1.0, 1.0, -1.0, -1.0};
     Eigen::Vector2d wheel_axis_signs{1.0, -1.0};
     double dt = 0.005;

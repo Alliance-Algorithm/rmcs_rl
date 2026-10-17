@@ -15,6 +15,8 @@
 #include <cstddef>
 #include <cstdint>
 #include <expected>
+#include <memory>
+#include <numbers>
 #include <optional>
 #include <source_location>
 #include <span>
@@ -187,6 +189,7 @@ private:
     std::uint64_t accepted_policy_sequence_ = 0;
     bool policy_result_pending_ = false;
     std::chrono::steady_clock::time_point policy_submitted_at_{};
+    std::optional<Clock::time_point> accepted_policy_submitted_at_;
     double inference_timeout_ = 0.04;
     PolicyProfile policy_profile_ = kV6PolicyProfile;
     LegTargetWinding leg_target_winding_ = LegTargetWinding::kIndependentNearest;
@@ -274,6 +277,7 @@ private:
     double height_reference_rate_max_ = 0.02;
     double wheel_radius_ = 0.06;
     double wheel_track_ = 0.4373;
+    double wheel_speed_limit_ = 0.0;
     double vx_max_ = 3.0;
     double yaw_rate_max_ = 6.283185307179586;
     double inference_frequency_ = DeployedPolicyContract::kPolicyFrequencyHz;

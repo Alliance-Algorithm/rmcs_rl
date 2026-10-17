@@ -16,6 +16,11 @@ bool build_observation(
     const auto push = [&obs](
                           std::size_t index, double value, double scale, bool has_clip,
                           double clip_min, double clip_max, bool& ok) {
+        if (!is_finite(value)) {
+            ok = false;
+            obs[index] = value;
+            return;
+        }
         double result = value * scale;
         if (has_clip)
             result = std::clamp(result, clip_min, clip_max);

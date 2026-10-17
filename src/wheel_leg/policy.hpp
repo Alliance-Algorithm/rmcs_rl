@@ -25,11 +25,6 @@ struct DeployedPolicyContract {
     static constexpr double kWheelTorqueLimit = 4.5;
     static constexpr double kHeightMin = 0.23;
     static constexpr double kHeightMax = 0.43;
-    static constexpr float kLegActionLimit = 3.0f;
-    static constexpr float kWheelActionLimit = 9.0f;
-    static constexpr double kLegActionScale = 0.25;
-    static constexpr double kWheelActionScale = 10.0;
-    static constexpr double kWheelSpeedLimit = kWheelActionScale * kWheelActionLimit;
     static constexpr std::array<double, 6> kNominalPosition{
         -0.42, 0.13742282595395358, 0.42, -0.1374155762580851, 0.0, 0.0};
 };

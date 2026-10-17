@@ -66,6 +66,11 @@ PolicyIoConfig load_policy_io_config(rclcpp::Node& node) {
             cursor += term.dim;
         return cursor;
     }();
+    if (const auto declared = integer_parameter(node, "rl_feature_size");
+        declared.has_value() && static_cast<std::size_t>(*declared) != config.obs_frame_size)
+        throw std::invalid_argument(
+            "RlBridge: rl_feature_size=" + std::to_string(*declared)
+            + " but observation_terms declares " + std::to_string(config.obs_frame_size));
     const auto history_length = integer_parameter(node, "history_length").value_or(1);
     if (history_length < 1 || history_length > 64)
         throw std::invalid_argument("RlBridge: history_length must be in [1, 64]");

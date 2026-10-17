@@ -14,6 +14,7 @@
 #include <gtest/gtest.h>
 #include <rclcpp/rclcpp.hpp>
 #include <rmcs_rl/rl_bridge/config.hpp>
+#include <rmcs_rl/rl_bridge/interface_binding.hpp>
 #include <rmcs_rl/rl_bridge/observation_history.hpp>
 
 #include "wheel_leg/rl_controller.hpp"
@@ -57,6 +58,12 @@ struct WheelLegDeploymentTestAccess {
     }
     static bool evaluate(RlController& c) { return c.evaluate_policy_(0, false); }
     static bool fault(RlController& c) { return c.fault_latched_; }
+    static void expire_action(RlController& c) {
+        c.accepted_policy_submitted_at_ =
+            std::chrono::steady_clock::now()
+            - std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+                std::chrono::duration<double>{2 * c.inference_timeout_});
+    }
     static void accept(RlController& c) { c.accept_policy_result_(); }
     static void reset(RlController& c) { c.enter_(State::kIdle, true); }
     static auto& history(RlController& c) { return *c.observation_history_; }
@@ -98,6 +105,7 @@ protected:
         const std::string& profile = "wheel-leg-infantry-recovery.yaml",
         std::vector<rclcpp::Parameter> overrides = {}) {
         auto result = rclcpp::NodeOptions{}.automatically_declare_parameters_from_overrides(true);
+        result.enable_rosout(false);
         result.arguments({"--ros-args", "--params-file", config_path(profile)});
         result.parameter_overrides(std::move(overrides));
         return result;
@@ -139,7 +147,7 @@ TEST_F(WheelLegYaml, ObservationMatchesDeployed35FeaturesAcrossEncoderTurns) {
         EXPECT_NEAR(obs[2], 0.3, 1e-7);
         EXPECT_NEAR(obs[3], 1.525, 1e-7);
         for (int i = 0; i < 3; ++i) {
-            EXPECT_NEAR(obs[4 + i], std::array{0.1, -0.2, 0.3}[i], 1e-7);
+            EXPECT_NEAR(obs[4 + i], (std::array{0.1, -0.2, 0.3}[i]), 1e-7);
             EXPECT_NEAR(obs[7 + i], i == 2 ? -1.0 : 0.0, 1e-7);
         }
         for (int i = 0; i < 4; ++i)
@@ -206,6 +214,16 @@ TEST_F(WheelLegYaml, NonfiniteActionCannotReplaceTheLastTarget) {
 
 TEST_F(WheelLegYaml, StartupRejectsWrongModelShapeAndUnknownActuator) {
     EXPECT_THROW(controller({rclcpp::Parameter{"rl_obs_size", 34}}), std::invalid_argument);
+    EXPECT_THROW(controller({rclcpp::Parameter{"rl_feature_size", 34}}), std::invalid_argument);
+    EXPECT_THROW(
+        controller(
+            {rclcpp::Parameter{"rl_obs_size", 36}, rclcpp::Parameter{"rl_feature_size", 36},
+             rclcpp::Parameter{
+                 "observation_terms",
+                 std::vector<std::string>{"index=0 type=constant "
+                                          "value=0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,"
+                                          "0,0,0,0,0,0,0,0,0,0,0 name=wrong_contract"}}}),
+        std::invalid_argument);
     auto base = controller();
     auto specs = base->get_parameter("action_terms").as_string_array();
     specs[0] = "index=0 output=/wheel_leg/rl/target/nonexistent scale=0.25 clip=-0.75:0.75";
@@ -277,6 +295,51 @@ TEST_F(WheelLegYaml, ResetRejectsAnInferenceThatCompletesFromThePreviousSession)
     }
     EXPECT_FALSE(Access::targets_valid(*c));
     EXPECT_TRUE(Access::outputs_zero(*c));
+}
+
+TEST_F(WheelLegYaml, AcceptedActionExpiresWithoutWaitingForAnotherInference) {
+    auto c = controller();
+    ASSERT_TRUE(Access::action(*c, {0, 0, 0, 0, 1, 2}));
+    Access::expire_action(*c);
+    Access::accept(*c);
+    EXPECT_TRUE(Access::fault(*c));
+}
+
+TEST_F(WheelLegYaml, NonfiniteHistoryCannotBeHiddenByObservationClipping) {
+    auto c = controller();
+    Access::previous(*c)[0] = std::numeric_limits<double>::infinity();
+    EXPECT_FALSE(Access::assemble(*c));
+    Access::previous(*c)[0] = std::numeric_limits<double>::quiet_NaN();
+    EXPECT_FALSE(Access::assemble(*c));
+}
+
+TEST_F(WheelLegYaml, SharedBridgeStillLoadsTheDeformableHistoryContract) {
+    rclcpp::Node node{"rl_bridge", options("deformable-infantry-omni-rl.yaml")};
+    const auto config = rmcs_rl::load_bridge_config(node);
+    EXPECT_EQ(config.obs_frame_size, 32u);
+    EXPECT_EQ(config.history_length, 8u);
+    EXPECT_EQ(config.obs_size, 256u);
+    EXPECT_EQ(config.action_size, 4u);
+    EXPECT_DOUBLE_EQ(config.policy_rate, 200.0);
+    EXPECT_TRUE(config.policy_worker->healthy());
+}
+
+TEST_F(WheelLegYaml, ReusingAnUpstreamSlotStillChecksTheRequestedType) {
+    class InputConsumer : public rmcs_executor::Component {
+    public:
+        void update() override {}
+    } consumer;
+    const rmcs_executor::Component::OutputInfoMap outputs{
+        {"/test/input", {std::cref(typeid(double)), rmcs_executor::InterfaceKind::Normal}}};
+    std::vector<rmcs_rl::Slot> slots;
+    EXPECT_EQ(
+        rmcs_rl::acquire_slot(
+            consumer, "/test/input", {rmcs_rl::Binding::kDouble}, true, outputs, slots, "test"),
+        0u);
+    EXPECT_THROW(
+        rmcs_rl::acquire_slot(
+            consumer, "/test/input", {rmcs_rl::Binding::kVector3}, true, outputs, slots, "test"),
+        std::runtime_error);
 }
 
 TEST_F(WheelLegYaml, ConfiguredHistoryChangesShapeAndResetPrimesWithFreshFrames) {

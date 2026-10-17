@@ -1,11 +1,11 @@
 #include "rl_controller.hpp"
 
-#include <rmcs_rl/rl_bridge/observation.hpp>
-
 #include <algorithm>
 #include <cmath>
 #include <numbers>
 #include <span>
+
+#include <rmcs_rl/rl_bridge/observation.hpp>
 
 namespace rmcs::rl {
 
@@ -151,7 +151,7 @@ void RlController::update_command_reference_() {
     yaw_reference_ = desired_yaw;
 
     // Respect the wheel geometry and the combined command envelope.
-    const double max_linear = DeployedPolicyContract::kWheelSpeedLimit * wheel_radius_;
+    const double max_linear = wheel_speed_limit_ * wheel_radius_;
     const double demand = std::max(
         std::abs(vx_reference_ - wheel_track_ * yaw_reference_ / 2),
         std::abs(vx_reference_ + wheel_track_ * yaw_reference_ / 2));

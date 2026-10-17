@@ -179,6 +179,7 @@ void RlController::enter_(State next, bool force_reset) {
         recovery_started_ = false;
         recovery_upright_seconds_ = 0.0;
         policy_targets_valid_ = false;
+        accepted_policy_submitted_at_.reset();
         jump_was_requested_ = false;
         vx_reference_ = yaw_reference_ = 0.0;
         height_reference_ = height_from_ = height_target_ = DeployedPolicyContract::kNominalHeight;
@@ -317,6 +318,7 @@ void RlController::accept_policy_result_() {
                 || Clock::now() - policy_result_.submitted_at
                        > std::chrono::duration<double>{inference_timeout_}) {
                 node::error("ONNX inference result is stale");
+                fault_latched_ = true;
                 return;
             }
             const bool result_shadow = policy_result_.context != 0;
@@ -328,6 +330,7 @@ void RlController::accept_policy_result_() {
                 return;
             }
             accepted_policy_sequence_ = policy_result_.sequence;
+            accepted_policy_submitted_at_ = policy_result_.submitted_at;
             for (std::size_t i = 0; i < observation_outputs_.size(); ++i)
                 **observation_outputs_[i] = pending_policy_observation_[i];
             if (!result_shadow || native)
@@ -338,6 +341,12 @@ void RlController::accept_policy_result_() {
     }
     if (!policy_worker_->healthy()) {
         node::error("RL inference worker failed: {}", policy_worker_->error());
+        fault_latched_ = true;
+    }
+    if (policy_targets_valid_ && accepted_policy_submitted_at_
+        && Clock::now() - *accepted_policy_submitted_at_
+               > std::chrono::duration<double>{inference_timeout_}) {
+        node::error("Last accepted RL action exceeded inference_timeout");
         fault_latched_ = true;
     }
 }

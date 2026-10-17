@@ -100,8 +100,6 @@ RecoveryProfile RecoveryProfile::load(
         policy_order(profile.at("targets").at("thrust").at("control6_rad")).head<4>();
     controller.root_axis_signs = vector<4>(profile.at("axis_signs"));
     controller.wheel_axis_signs = vector<2>(profile.at("wheel_axis_signs"));
-    controller.rl_nominal = JointReferenceRecoveryVector6{
-        -0.42, 0.13742282595395358, 0.42, -0.1374155762580851, 0.0, 0.0};
     for (std::size_t side = 0; side < 2; ++side) {
         auto& table = result.geometry[side];
         const auto& data = lookup.at("sides").at(side == 0 ? "left" : "right");

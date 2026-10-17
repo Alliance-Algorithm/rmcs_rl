@@ -67,8 +67,7 @@ JointReferenceRecoveryController::JointReferenceRecoveryController(
         || config.prepare_tilt_limit_deg > config.capture_tilt_limit_deg
         || config.capture_tilt_limit_deg >= 90.0 || !config.nominal.allFinite()
         || !config.fold.allFinite() || !config.thrust.allFinite() || !config.support.allFinite()
-        || !config.rl_nominal.allFinite() || !config.root_axis_signs.allFinite()
-        || !config.wheel_axis_signs.allFinite())
+        || !config.root_axis_signs.allFinite() || !config.wheel_axis_signs.allFinite())
         throw std::invalid_argument("Invalid Joint reference recovery configuration");
     for (int i = 0; i < 4; ++i)
         if (std::abs(config.root_axis_signs[i]) != 1.0
