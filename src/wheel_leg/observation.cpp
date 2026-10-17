@@ -1,5 +1,7 @@
 #include "rl_controller.hpp"
 
+#include <rmcs_rl/rl_bridge/observation.hpp>
+
 #include <algorithm>
 #include <cmath>
 #include <numbers>
@@ -119,7 +121,14 @@ void RlController::update_command_reference_() {
     const Eigen::Vector3d forward = world_base_orientation_() * Eigen::Vector3d::UnitX();
     const double yaw = std::atan2(forward.y(), forward.x());
     double desired_yaw = requested_yaw;
-    if (heading_hold_enabled_ && !spinning && requested_vx != 0.0 && requested_yaw == 0.0) {
+    const bool blending = (recovery_started_ && joint_reference_recovery_
+                           && joint_reference_recovery_->command().blending)
+                       || (!recovery_started_ && policy_profile_.name == kV6PolicyProfile.name
+                           && takeover_blend_seconds_ > 0.0 && takeover_blend_fraction_ < 1.0);
+    // The upstream input owns the deadzone and manual turn intent. Capture
+    // once per straight segment, including direct forward/reverse changes.
+    if (heading_hold_enabled_ && !blending && !spinning && requested_vx != 0.0
+        && requested_yaw == 0.0) {
         if (!heading_target_rad_)
             heading_target_rad_ = yaw;
         const double error =
@@ -137,16 +146,9 @@ void RlController::update_command_reference_() {
     desired_yaw = std::clamp(
         desired_yaw, -policy_profile_.negative_yaw_limit, policy_profile_.positive_yaw_limit);
     *heading_limited_rate_output_ = desired_yaw;
-    constexpr double policy_dt = DeployedPolicyContract::kPolicyPeriodSeconds;
-    if (spinning)
-        vx_reference_ = 0.0;
-    else
-        vx_reference_ += std::clamp(
-            requested_vx - vx_reference_, -policy_profile_.forward_slew * policy_dt,
-            policy_profile_.forward_slew * policy_dt);
-    yaw_reference_ += std::clamp(
-        desired_yaw - yaw_reference_, -DeployedPolicyContract::kYawSlew * policy_dt,
-        DeployedPolicyContract::kYawSlew * policy_dt);
+    // Match training: commands reach the actor on the next policy tick.
+    vx_reference_ = spinning ? 0.0 : requested_vx;
+    yaw_reference_ = desired_yaw;
 
     // Respect the wheel geometry and the combined command envelope.
     const double max_linear = DeployedPolicyContract::kWheelSpeedLimit * wheel_radius_;
@@ -182,8 +184,7 @@ bool RlController::assemble_observation_(bool shadow_recovery) {
             // The chassis integrates the height input. Follow that continuous
             // reference without restarting a full transition for every sample.
             // Limit pending commands on release from recovery as well.
-            const double max_step =
-                height_reference_rate_max_ * DeployedPolicyContract::kPolicyPeriodSeconds;
+            const double max_step = height_reference_rate_max_ / inference_frequency_;
             height_reference_ +=
                 std::clamp(*height_command_ - height_reference_, -max_step, max_step);
             height_from_ = height_reference_;
@@ -207,48 +208,21 @@ bool RlController::assemble_observation_(bool shadow_recovery) {
     const Eigen::Vector3d gravity = q_world_base.conjugate() * -Eigen::Vector3d::UnitZ();
     const Eigen::Vector3d omega = imu_to_base_ * *gyro_;
 
-    auto observation = std::span{observation_};
-    auto command = observation.subspan<ObservationLayout::kCommand, 3>();
-    command[0] =
-        (shadow_recovery || hold_command) ? 0.0 : std::clamp(vx_reference_, -vx_max_, vx_max_);
-    command[1] = 0.0; // Both frozen flat actors have no lateral command capability.
-    command[2] = (shadow_recovery || hold_command)
-                   ? 0.0
-                   : std::clamp(yaw_reference_, -yaw_rate_max_, yaw_rate_max_);
-    observation[ObservationLayout::kHeight] =
-        ((shadow_recovery || hold_command) ? DeployedPolicyContract::kNominalHeight
-                                           : height_reference_)
-        * 5.0;
-
-    auto angular_velocity = observation.subspan<ObservationLayout::kAngularVelocity, 3>();
-    auto projected_gravity = observation.subspan<ObservationLayout::kProjectedGravity, 3>();
-    for (int i = 0; i < 3; ++i) {
-        angular_velocity[i] = omega[i] * 0.5;
-        projected_gravity[i] = gravity[i];
+    *policy_command_output_ = Eigen::Vector3d{
+        (shadow_recovery || hold_command) ? 0.0 : vx_reference_, 0.0,
+        (shadow_recovery || hold_command) ? 0.0 : yaw_reference_};
+    *policy_height_output_ = (shadow_recovery || hold_command)
+                               ? DeployedPolicyContract::kNominalHeight
+                               : height_reference_;
+    *policy_gyro_output_ = omega;
+    *policy_gravity_output_ = gravity;
+    for (int i = 0; i < 6; ++i) {
+        *model_angle_outputs_[i] = q_[i];
+        *model_velocity_outputs_[i] = dq_[i];
     }
-
-    auto joint_position = observation.subspan<ObservationLayout::kJointPosition, 6>();
-    std::ranges::fill(joint_position, 0.0f); // wheel positions are deliberately zero
-    for (int i = 0; i < 4; ++i)
-        joint_position[i] = std::remainder(q_[i] - nominal_[i], 2 * std::numbers::pi);
-
-    auto joint_velocity = observation.subspan<ObservationLayout::kJointVelocity, 6>();
-    for (int i = 0; i < 6; ++i)
-        joint_velocity[i] = dq_[i] * 0.1;
-    auto previous_action = observation.subspan<ObservationLayout::kPreviousAction, 6>();
-    // Native recovery stores the effective script/actor reference from the
-    // last control sample of the preceding policy interval.
-    std::ranges::copy(previous_action_, previous_action.begin());
-
-    auto context = observation.subspan<ObservationLayout::kContext, 7>();
-    std::ranges::fill(context, 0.0f);
-    context[ObservationLayout::kNormal] = 1.0f;
-    for (auto& x : observation) {
-        if (!std::isfinite(x))
-            return false;
-        x = std::clamp(x, -100.0f, 100.0f);
-    }
-    return true;
+    return rmcs_rl::build_observation(
+        policy_io_.obs_terms, observation_slots_, previous_action_, policy_io_.obs_frame_size,
+        observation_);
 }
 
 } // namespace rmcs::rl

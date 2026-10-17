@@ -201,48 +201,13 @@ private:
     }
 
     void bind_observation_slots_(const OutputInfoMap& output_map) {
-        for (auto& term : config_.obs_terms) {
-            switch (term.kind) {
-            case TermKind::kConstant:
-            case TermKind::kLastAction: break;
-            case TermKind::kJointPos:
-            case TermKind::kJointVel:
-            case TermKind::kJointTorque: {
-                for (std::size_t j = 0; j < term.joints.size(); ++j) {
-                    const auto& joint = config_.joint_config.names[term.joints[j]];
-                    const char field = term.kind == TermKind::kJointPos ? 'a'
-                                     : term.kind == TermKind::kJointVel ? 'v'
-                                                                        : 't';
-                    const auto path = joint_path(config_.joint_config, joint, field);
-                    term.joint_slots.push_back(acquire_slot(
-                        *this, path, {Binding::kDouble}, true, output_map, slots_, "joint term"));
-                }
-                break;
-            }
-            case TermKind::kPath: {
-                std::vector<Binding> candidates;
-                if (term.has_binding) {
-                    candidates = {term.binding};
-                } else {
-                    switch (term.take) {
-                    case Take::kScalar:
-                        candidates = {
-                            Binding::kDouble, Binding::kBool, Binding::kInt, Binding::kSize};
-                        break;
-                    case Take::kComponent:
-                    case Take::kVector:
-                        candidates = {Binding::kVector3, Binding::kDirectionVector};
-                        break;
-                    case Take::kGravity: candidates = {Binding::kQuaternion}; break;
-                    }
-                }
-                term.slot = acquire_slot(
-                    *this, term.path, candidates, !term.has_default, output_map, slots_,
-                    "observation term");
-                break;
-            }
-            }
-        }
+        bind_observation_terms(
+            config_.obs_terms, config_.joint_config,
+            [this, &output_map](
+                const std::string& path, const std::vector<Binding>& candidates, bool required,
+                const char* context) {
+                return acquire_slot(*this, path, candidates, required, output_map, slots_, context);
+            });
     }
 
     void bind_control_slots_(const OutputInfoMap& output_map) {

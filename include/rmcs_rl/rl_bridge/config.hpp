@@ -16,7 +16,7 @@ namespace rmcs_rl {
 
 class PolicyWorker;
 
-struct BridgeConfig {
+struct PolicyIoConfig {
     JointConfig joint_config;
     std::vector<ObsTerm> obs_terms;
     std::vector<ActionTerm> action_terms;
@@ -29,6 +29,9 @@ struct BridgeConfig {
     double max_action_age = 0.04;
     std::chrono::nanoseconds pub_period{};
     std::chrono::nanoseconds history_period{};
+};
+
+struct BridgeConfig : PolicyIoConfig {
     InvalidMode invalid_mode = InvalidMode::kNaN;
     std::string enable_path;
     bool enable_default = false;
@@ -38,6 +41,7 @@ struct BridgeConfig {
     std::shared_ptr<PolicyWorker> policy_worker;
 };
 
+PolicyIoConfig load_policy_io_config(rclcpp::Node& node);
 BridgeConfig load_bridge_config(rclcpp::Node& node);
 
 } // namespace rmcs_rl

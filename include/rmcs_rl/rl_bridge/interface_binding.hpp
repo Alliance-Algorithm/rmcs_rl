@@ -2,12 +2,14 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <string>
 #include <typeinfo>
 #include <vector>
 
 #include <rmcs_executor/component.hpp>
 
+#include <rmcs_rl/rl_bridge/joint_config.hpp>
 #include <rmcs_rl/rl_bridge/types.hpp>
 
 namespace rmcs_rl {
@@ -23,5 +25,11 @@ std::size_t acquire_slot(
 
 bool read_double(const Slot& slot, double& value);
 bool read_unsigned(const Slot& slot, std::uint64_t& value);
+
+using ObservationSlotResolver =
+    std::function<std::size_t(const std::string&, const std::vector<Binding>&, bool, const char*)>;
+
+void bind_observation_terms(
+    std::vector<ObsTerm>& terms, const JointConfig& joints, const ObservationSlotResolver& resolve);
 
 } // namespace rmcs_rl

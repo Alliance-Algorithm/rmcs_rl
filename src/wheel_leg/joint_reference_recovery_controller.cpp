@@ -622,16 +622,17 @@ JointReferenceRecoveryVector6 JointReferenceRecoveryController::project_feedback
 }
 
 JointReferenceRecoveryVector6 JointReferenceRecoveryController::effective_action_history(
-    const JointReferenceRecoveryVector6& rl_action) const {
+    const JointReferenceRecoveryVector6& rl_action, const JointReferenceRecoveryVector6& nominal,
+    const JointReferenceRecoveryVector6& action_scales) const {
     if (!membership_ || command_.pure_rl)
         return rl_action;
     if (!release_finished_ || command_.failed)
         return JointReferenceRecoveryVector6::Zero();
     Vector6f script = Vector6f::Zero();
-    const Vector4f delta = targets_.head<4>() - config_.rl_nominal.head<4>().cast<float>();
+    const Vector4f delta = targets_.head<4>() - nominal.head<4>().cast<float>();
     for (int i = 0; i < 4; ++i)
-        script[i] = wrapped(delta[i]) / 0.25f;
-    script.tail<2>() = targets_.tail<2>() / 10.0f;
+        script[i] = wrapped(delta[i]) / static_cast<float>(action_scales[i]);
+    script.tail<2>() = targets_.tail<2>().cwiseQuotient(action_scales.tail<2>().cast<float>());
     const float alpha = static_cast<float>(command_.blend);
     return ((1.0f - alpha) * script + alpha * rl_action.cast<float>()).cast<double>();
 }

@@ -13,6 +13,7 @@
 
 #include <rmcs_executor/component.hpp>
 #include <rmcs_rl/rl_bridge/types.hpp>
+#include <rmcs_rl/rl_bridge/utility.hpp>
 
 namespace rmcs_rl {
 
@@ -191,9 +192,7 @@ inline void write_actions(
     for (std::size_t i = 0; i < terms.size(); ++i) {
         double value;
         if (valid) {
-            value = action[i] * terms[i].scale;
-            if (terms[i].has_clip)
-                value = std::clamp(value, terms[i].clip_min, terms[i].clip_max);
+            value = map_action(action[i], terms[i]);
             written[i] = value;
         } else if (invalid_mode == InvalidMode::kNaN) {
             value = std::numeric_limits<double>::quiet_NaN();

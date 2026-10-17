@@ -7,7 +7,10 @@
 #include <numbers>
 #include <ranges>
 #include <stdexcept>
+#include <type_traits>
 #include <utility>
+
+#include <rmcs_rl/rl_bridge/interface_binding.hpp>
 #include <vector>
 
 #include <ament_index_cpp/get_package_share_directory.hpp>
@@ -83,7 +86,23 @@ RecoveryMechanism calibrated_mechanism(rclcpp::Node& node) {
 } // namespace
 
 RlController::RlController()
-    : Node{get_component_name(), node::options()} {
+    : RlController{node::options()} {}
+
+RlController::RlController(const rclcpp::NodeOptions& options)
+    : Node{get_component_name(), options} {
+    policy_io_ = rmcs_rl::load_policy_io_config(*this);
+    if (policy_io_.action_size != kMotorNames.size())
+        throw std::runtime_error("Wheel-leg YAML must map all six physical actuators");
+    observation_history_ = std::make_unique<rmcs_rl::ObservationHistory>(
+        policy_io_.obs_frame_size, policy_io_.history_length, policy_io_.history_period);
+    observation_.resize(policy_io_.obs_frame_size);
+    pending_policy_observation_.resize(policy_io_.obs_frame_size);
+    previous_action_.resize(policy_io_.action_size);
+    policy_action_.resize(policy_io_.action_size);
+    inference_timeout_ = get_parameter_or("inference_timeout", policy_io_.max_action_age);
+    if (!std::isfinite(inference_timeout_) || inference_timeout_ <= 0.0)
+        throw std::runtime_error("Wheel-leg inference_timeout must be finite and positive");
+
     // Existing deployment files keep working while runtime parameters use mechanism names.
     const auto recovery_parameter = [this]<typename T>(const std::string& name, const T& fallback) {
         if (has_parameter(name))
@@ -162,13 +181,77 @@ RlController::RlController()
     register_output("/wheel_leg/rl/heading/error", heading_error_output_, 0.0);
     register_output("/wheel_leg/rl/heading/raw_yaw_rate", heading_raw_rate_output_, 0.0);
     register_output("/wheel_leg/rl/heading/limited_yaw_rate", heading_limited_rate_output_, 0.0);
-    for (std::size_t i = 0; i < observation_outputs_.size(); ++i)
-        register_output(
-            std::string{"/wheel_leg/rl/observation/"} + std::string{kObservationNames[i]},
-            observation_outputs_[i], 0.0);
-    for (std::size_t i = 0; i < action_outputs_.size(); ++i)
+    // Publish calibrated, unscaled inputs. YAML owns feature order, normalization and clipping.
+    register_output(
+        "/wheel_leg/rl/input/command", policy_command_output_, Eigen::Vector3d::Zero().eval());
+    register_output("/wheel_leg/rl/input/height", policy_height_output_, 0.0);
+    register_output(
+        "/wheel_leg/rl/input/angular_velocity", policy_gyro_output_,
+        Eigen::Vector3d::Zero().eval());
+    register_output(
+        "/wheel_leg/rl/input/projected_gravity", policy_gravity_output_,
+        Eigen::Vector3d::Zero().eval());
+    const auto local_slot = [this]<typename T>(const std::string& path, const T& value) {
+        rmcs_rl::Slot slot;
+        slot.path = path;
+        if constexpr (std::is_same_v<T, double>) {
+            slot.binding = rmcs_rl::Binding::kDouble;
+            slot.double_value = std::make_unique<InputInterface<double>>();
+            slot.double_value->bind_directly(value);
+        } else {
+            slot.binding = rmcs_rl::Binding::kVector3;
+            slot.vector3_value = std::make_unique<InputInterface<Eigen::Vector3d>>();
+            slot.vector3_value->bind_directly(value);
+        }
+        observation_slots_.push_back(std::move(slot));
+    };
+    local_slot("/wheel_leg/rl/input/command", *policy_command_output_);
+    local_slot("/wheel_leg/rl/input/height", *policy_height_output_);
+    local_slot("/wheel_leg/rl/input/angular_velocity", *policy_gyro_output_);
+    local_slot("/wheel_leg/rl/input/projected_gravity", *policy_gravity_output_);
+    for (std::size_t i = 0; i < kMotorNames.size(); ++i) {
+        const std::string path = std::string{"/wheel_leg/rl/model/"} + kMotorNames[i];
+        register_output(path + "/angle", model_angle_outputs_[i], 0.0);
+        register_output(path + "/velocity", model_velocity_outputs_[i], 0.0);
+        local_slot(path + "/angle", *model_angle_outputs_[i]);
+        local_slot(path + "/velocity", *model_velocity_outputs_[i]);
         register_output(
             std::string{"/wheel_leg/rl/action/"} + kMotorNames[i], action_outputs_[i], 0.0);
+    }
+    for (const auto& term : policy_io_.obs_terms) {
+        for (std::size_t i = 0; i < term.dim; ++i) {
+            std::string name = term.id;
+            if (term.dim > 1) {
+                if (term.take == rmcs_rl::Take::kVector || term.take == rmcs_rl::Take::kGravity)
+                    name += std::string{"/"} + "xyz"[i];
+                else if (!term.joint_names.empty())
+                    name += "/" + term.joint_names[i];
+                else
+                    name += "/" + std::to_string(i);
+            }
+            observation_outputs_.push_back(std::make_unique<OutputInterface<double>>());
+            register_output("/wheel_leg/rl/observation/" + name, *observation_outputs_.back(), 0.0);
+        }
+    }
+    std::array<bool, 6> mapped{};
+    for (const auto& term : policy_io_.action_terms) {
+        const auto motor = std::ranges::find_if(kMotorNames, [&term](const char* name) {
+            return term.output == std::string{"/wheel_leg/rl/target/"} + name;
+        });
+        if (motor == kMotorNames.end())
+            throw std::runtime_error("Unknown wheel-leg actuator target: " + term.output);
+        const auto index = static_cast<std::size_t>(motor - kMotorNames.begin());
+        if (mapped[index])
+            throw std::runtime_error("Wheel-leg actuator mapped twice: " + term.output);
+        if (!term.has_clip || term.clip_min > 0.0 || term.clip_max < 0.0)
+            throw std::runtime_error(
+                "Wheel-leg action_terms need finite target bounds containing zero");
+        mapped[index] = true;
+        action_motors_[term.index] = index;
+        motor_actions_[index] = term.index;
+        action_scales_[index] = term.scale;
+        register_output(term.output, action_target_outputs_[term.index], 0.0);
+    }
 
     calibration_ready_ = get_parameter_or("calibration_ready", false);
     soft_limits_ready_ = get_parameter_or("soft_limits_ready", false);
@@ -243,8 +326,7 @@ RlController::RlController()
     height_reference_rate_max_ = get_parameter_or("height_reference_rate_max", 0.02);
     wheel_radius_ = get_parameter_or("wheel_radius", 0.06);
     wheel_track_ = get_parameter_or("wheel_track", 0.4373);
-    inference_frequency_ =
-        get_parameter_or("rl_inference_frequency", DeployedPolicyContract::kPolicyFrequencyHz);
+    inference_frequency_ = policy_io_.policy_rate;
     pd_frequency_ = get_parameter_or("pd_frequency", DeployedPolicyContract::kControlFrequencyHz);
     recovery_frequency_ =
         get_parameter_or("recovery_frequency", DeployedPolicyContract::kControlFrequencyHz);
@@ -315,7 +397,17 @@ RlController::RlController()
     const auto hinge_bias = parameter_array<2>(*this, "hinge_bias");
     const auto hinge_min = parameter_array<2>(*this, "hinge_min");
     const auto hinge_max = parameter_array<2>(*this, "hinge_max");
-    const auto nominal = parameter_array<6>(*this, "nominal_model_pos");
+    std::array<double, 6> nominal{};
+    for (std::size_t i = 0; i < kMotorNames.size(); ++i) {
+        const auto joint = policy_io_.joint_config.index.find(kMotorNames[i]);
+        if (joint == policy_io_.joint_config.index.end())
+            throw std::runtime_error("Wheel-leg joint_names must include every physical actuator");
+        const auto position =
+            rmcs_rl::default_joint_pos(*this, policy_io_.joint_config, joint->second);
+        if (!position)
+            throw std::runtime_error(std::string{"Missing default_joint_pos."} + kMotorNames[i]);
+        nominal[i] = *position;
+    }
     const auto imu_alignment = parameter_array<9>(*this, "imu_to_base");
     leg_jacobian_ = Eigen::Map<const Eigen::Matrix<double, 4, 4, Eigen::RowMajor>>{matrix.data()};
     leg_offset_ = Eigen::Map<const Eigen::Vector4d>{offsets.data()};
@@ -546,10 +638,8 @@ RlController::RlController()
     }
 
     auto policy_config = rmcs_rl::load_policy_config(
-        *this, PolicyObservation{}.size(), PolicyAction{}.size(),
-        static_cast<std::size_t>(get_parameter_or("rl_history_length", 1)),
-        static_cast<std::size_t>(
-            get_parameter_or("rl_feature_size", static_cast<int>(PolicyObservation{}.size()))));
+        *this, policy_io_.obs_size, policy_io_.action_size, policy_io_.history_length,
+        policy_io_.obs_frame_size);
     if (leg_target_winding_ == LegTargetWinding::kPairedBranch107) {
         policy_config.model_type = "wheel_leg_v7";
         policy_config.expected_leg_winding_version =
@@ -571,7 +661,7 @@ RlController::RlController()
             leg_target_winding_name(leg_target_winding_).data(), inference_frequency_,
             pd_frequency_, recovery_frequency_);
     }
-    policy_result_.action.reserve(PolicyAction{}.size());
+    policy_result_.action.reserve(policy_io_.action_size);
     policy_ready_ = true;
     // Configuration is copied into fixed control-loop state at construction.
     // Reject edits that would otherwise change ROS metadata without changing it.

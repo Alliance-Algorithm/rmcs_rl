@@ -7,6 +7,52 @@
 
 namespace rmcs_rl {
 
+void bind_observation_terms(
+    std::vector<ObsTerm>& terms, const JointConfig& joints,
+    const ObservationSlotResolver& resolve) {
+    for (auto& term : terms) {
+        switch (term.kind) {
+        case TermKind::kConstant:
+        case TermKind::kLastAction: break;
+        case TermKind::kJointPos:
+        case TermKind::kJointVel:
+        case TermKind::kJointTorque: {
+            // A zero-position term has no feedback dependency.
+            if (term.zero)
+                break;
+            const char field = term.kind == TermKind::kJointPos ? 'a'
+                             : term.kind == TermKind::kJointVel ? 'v'
+                                                                : 't';
+            term.joint_slots.clear();
+            for (const auto index : term.joints)
+                term.joint_slots.push_back(resolve(
+                    joint_path(joints, joints.names[index], field), {Binding::kDouble}, true,
+                    "joint term"));
+            break;
+        }
+        case TermKind::kPath: {
+            std::vector<Binding> candidates;
+            if (term.has_binding) {
+                candidates = {term.binding};
+            } else {
+                switch (term.take) {
+                case Take::kScalar:
+                    candidates = {Binding::kDouble, Binding::kBool, Binding::kInt, Binding::kSize};
+                    break;
+                case Take::kComponent:
+                case Take::kVector:
+                    candidates = {Binding::kVector3, Binding::kDirectionVector};
+                    break;
+                case Take::kGravity: candidates = {Binding::kQuaternion}; break;
+                }
+            }
+            term.slot = resolve(term.path, candidates, !term.has_default, "observation term");
+            break;
+        }
+        }
+    }
+}
+
 const char* binding_name(Binding binding) {
     switch (binding) {
     case Binding::kDouble: return "double";
@@ -93,8 +139,7 @@ std::size_t acquire_slot(
         component.register_input(path, *slot.int_value, required);
         break;
     case Binding::kSize:
-        slot.size_value =
-            std::make_unique<rmcs_executor::Component::InputInterface<std::size_t>>();
+        slot.size_value = std::make_unique<rmcs_executor::Component::InputInterface<std::size_t>>();
         component.register_input(path, *slot.size_value, required);
         break;
     case Binding::kVector3:
@@ -103,8 +148,8 @@ std::size_t acquire_slot(
         component.register_input(path, *slot.vector3_value, required);
         break;
     case Binding::kDirectionVector:
-        slot.direction_vector_value = std::make_unique<
-            rmcs_executor::Component::InputInterface<rmcs_description::BaseLink::DirectionVector>>();
+        slot.direction_vector_value = std::make_unique<rmcs_executor::Component::InputInterface<
+            rmcs_description::BaseLink::DirectionVector>>();
         component.register_input(path, *slot.direction_vector_value, required);
         break;
     case Binding::kQuaternion:

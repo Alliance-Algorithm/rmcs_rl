@@ -23,8 +23,6 @@ struct DeployedPolicyContract {
     static constexpr double kLegTorqueLimit = 40.0;
     static constexpr double kWheelKp = 0.6;
     static constexpr double kWheelTorqueLimit = 4.5;
-    static constexpr double kForwardSlew = 1.5;
-    static constexpr double kYawSlew = 4.0;
     static constexpr double kHeightMin = 0.23;
     static constexpr double kHeightMax = 0.43;
     static constexpr float kLegActionLimit = 3.0f;
@@ -43,7 +41,6 @@ struct LegacyPolicyContract : DeployedPolicyContract {
     static constexpr double kLegKp = 60.0;
     static constexpr double kLegKd = 2.0;
     static constexpr double kWheelKp = 0.2;
-    static constexpr double kForwardSlew = 0.6;
     static constexpr double kHeightMin = kNominalHeight;
     static constexpr double kHeightMax = kNominalHeight;
     static constexpr std::array<double, 6> kNominalPosition{
@@ -54,7 +51,7 @@ struct PolicyProfile {
     std::string_view name;
     std::array<double, 6> nominal;
     double leg_kp, leg_kd, wheel_kp, wheel_torque_limit;
-    double forward_slew, height_min, height_max;
+    double height_min, height_max;
     double forward_limit, negative_yaw_limit, positive_yaw_limit;
     bool recovery_supported;
 };
@@ -66,7 +63,6 @@ inline constexpr PolicyProfile kV6PolicyProfile{
     DeployedPolicyContract::kLegKd,
     DeployedPolicyContract::kWheelKp,
     DeployedPolicyContract::kWheelTorqueLimit,
-    DeployedPolicyContract::kForwardSlew,
     DeployedPolicyContract::kHeightMin,
     DeployedPolicyContract::kHeightMax,
     0.5,
@@ -81,7 +77,6 @@ inline constexpr PolicyProfile kV5PolicyProfile{
     LegacyPolicyContract::kLegKd,
     LegacyPolicyContract::kWheelKp,
     LegacyPolicyContract::kWheelTorqueLimit,
-    LegacyPolicyContract::kForwardSlew,
     LegacyPolicyContract::kHeightMin,
     LegacyPolicyContract::kHeightMax,
     3.0,
@@ -89,64 +84,7 @@ inline constexpr PolicyProfile kV5PolicyProfile{
     12.566370614359172 + 1e-3,
     true};
 
-struct ObservationLayout {
-    static constexpr std::size_t kCommand = 0;
-    static constexpr std::size_t kHeight = kCommand + 3;
-    static constexpr std::size_t kAngularVelocity = kHeight + 1;
-    static constexpr std::size_t kProjectedGravity = kAngularVelocity + 3;
-    static constexpr std::size_t kJointPosition = kProjectedGravity + 3;
-    static constexpr std::size_t kJointVelocity = kJointPosition + 6;
-    static constexpr std::size_t kPreviousAction = kJointVelocity + 6;
-    static constexpr std::size_t kContext = kPreviousAction + 6;
-    static constexpr std::size_t kSize = kContext + 7;
-
-    static constexpr std::size_t kNormal = 0;
-    static constexpr std::size_t kJumpRequest = 4;
-    static constexpr std::size_t kJumpApex = 5;
-    static constexpr std::size_t kJumpElapsed = 6;
-};
-static_assert(ObservationLayout::kSize == 35);
-
-using PolicyObservation = std::array<float, ObservationLayout::kSize>;
+// Six physical actuators; observation shape and actor channel order come from YAML.
 using PolicyAction = std::array<float, 6>;
-
-inline constexpr auto kObservationNames = std::to_array<std::string_view>({
-    "command/forward",
-    "command/lateral",
-    "command/yaw",
-    "height",
-    "angular_velocity/x",
-    "angular_velocity/y",
-    "angular_velocity/z",
-    "projected_gravity/x",
-    "projected_gravity/y",
-    "projected_gravity/z",
-    "joint_position/left_hip",
-    "joint_position/left_knee_drive",
-    "joint_position/right_hip",
-    "joint_position/right_knee_drive",
-    "joint_position/left_wheel",
-    "joint_position/right_wheel",
-    "joint_velocity/left_hip",
-    "joint_velocity/left_knee_drive",
-    "joint_velocity/right_hip",
-    "joint_velocity/right_knee_drive",
-    "joint_velocity/left_wheel",
-    "joint_velocity/right_wheel",
-    "previous_action/left_hip",
-    "previous_action/left_knee_drive",
-    "previous_action/right_hip",
-    "previous_action/right_knee_drive",
-    "previous_action/left_wheel",
-    "previous_action/right_wheel",
-    "context/normal",
-    "context/1",
-    "context/2",
-    "context/3",
-    "context/jump_request",
-    "context/jump_apex",
-    "context/jump_elapsed",
-});
-static_assert(kObservationNames.size() == ObservationLayout::kSize);
 
 } // namespace rmcs::rl

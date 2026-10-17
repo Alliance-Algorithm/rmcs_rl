@@ -9,6 +9,9 @@
 
 namespace rmcs_rl {
 
+struct ActionTerm;
+double map_action(double value, const ActionTerm& term);
+
 std::vector<std::string> split_by(const std::string& text, char delimiter);
 std::vector<std::string> split_whitespace(const std::string& text);
 std::string format_number(double value);
@@ -39,6 +42,6 @@ void parse_index(
     const std::map<std::string, std::string>& tokens, const std::string& spec, bool& has_index,
     std::size_t& index);
 std::vector<std::size_t>
-parse_index_list(const std::string& text, std::size_t limit, const std::string& what);
+    parse_index_list(const std::string& text, std::size_t limit, const std::string& what);
 
 } // namespace rmcs_rl

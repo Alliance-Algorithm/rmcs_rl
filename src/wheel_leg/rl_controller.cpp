@@ -8,6 +8,7 @@
 #include <utility>
 
 #include <pluginlib/class_list_macros.hpp>
+#include <rmcs_rl/rl_bridge/interface_binding.hpp>
 
 #include "leg_target_winding.hpp"
 
@@ -20,6 +21,29 @@ bool almost_integer(double value) {
 } // namespace
 
 RlController::~RlController() = default;
+
+void RlController::before_pairing(const OutputInfoMap& output_map) {
+    rmcs_rl::bind_observation_terms(
+        policy_io_.obs_terms, policy_io_.joint_config,
+        [this, &output_map](
+            const std::string& path, const std::vector<rmcs_rl::Binding>& candidates, bool required,
+            const char* context) {
+            for (std::size_t i = 0; i < observation_slots_.size(); ++i) {
+                const auto& slot = observation_slots_[i];
+                if (slot.path != path)
+                    continue;
+                if (std::ranges::find(candidates, slot.binding) == candidates.end())
+                    throw std::runtime_error("Incompatible wheel-leg observation type: " + path);
+                return i;
+            }
+            if (path.starts_with("/wheel_leg/rl/") || path == "/wheel_leg/enable_request"
+                || path.ends_with("/control_torque"))
+                throw std::runtime_error(
+                    "Wheel-leg observation refers to a control output: " + path);
+            return rmcs_rl::acquire_slot(
+                *this, path, candidates, required, output_map, observation_slots_, context);
+        });
+}
 
 bool accepts_motion_command(
     bool jump, double height, rmcs_msgs::ChassisMode mode,
@@ -114,11 +138,21 @@ void RlController::enter_(State next, bool force_reset) {
         takeover_blend_fraction_ = 0.0;
         *inference_time_us_ = 0.0;
         *pd_time_us_ = 0.0;
-        previous_action_.fill(0);
-        policy_action_.fill(0);
+        std::ranges::fill(previous_action_, 0.0);
+        std::ranges::fill(policy_action_, 0.0);
         for (auto& output : observation_outputs_)
-            *output = 0.0;
+            **output = 0.0;
         for (auto& output : action_outputs_)
+            *output = 0.0;
+        for (auto& output : action_target_outputs_)
+            *output = 0.0;
+        *policy_command_output_ = Eigen::Vector3d::Zero();
+        *policy_height_output_ = 0.0;
+        *policy_gyro_output_ = Eigen::Vector3d::Zero();
+        *policy_gravity_output_ = Eigen::Vector3d::Zero();
+        for (auto& output : model_angle_outputs_)
+            *output = 0.0;
+        for (auto& output : model_velocity_outputs_)
             *output = 0.0;
     }
     if (next == State::kIdle || next == State::kInit) {
@@ -185,6 +219,7 @@ void RlController::reset_policy_generation_() {
     ++policy_generation_;
     policy_result_pending_ = false;
     accepted_policy_sequence_ = submitted_policy_sequence_;
+    observation_history_->reset();
 }
 
 void RlController::update_state_output_() {
@@ -236,16 +271,13 @@ void RlController::update_state_output_() {
 bool RlController::evaluate_policy_(std::size_t tick, bool recovering) {
     const bool native = policy_profile_.name == kV6PolicyProfile.name;
     const bool shadow = recovering && (native || recovery_command_.phase != RecoveryPhase::kBlend);
-    accept_policy_result_(tick);
+    accept_policy_result_();
     if (policy_result_pending_
         && Clock::now() - policy_submitted_at_
-               > std::chrono::duration<double>{2.0 / inference_frequency_}) {
+               > std::chrono::duration<double>{inference_timeout_}) {
         node::error("RL inference exceeded the configured age limit");
         return false;
     }
-    if (policy_profile_.name == kV6PolicyProfile.name && recovery_started_
-        && joint_reference_recovery_ && !advance_joint_reference_recovery_())
-        return false;
     if (!policy_worker_->healthy()) {
         node::error("RL inference worker failed: {}", policy_worker_->error());
         return false;
@@ -253,16 +285,25 @@ bool RlController::evaluate_policy_(std::size_t tick, bool recovering) {
     if (!policy_result_pending_) {
         if (!assemble_observation_(recovering))
             return false;
-        std::copy(observation_.begin(), observation_.end(), pending_policy_observation_.begin());
+        pending_policy_observation_ = observation_;
         const auto submitted_at = Clock::now();
+        const auto& stacked = observation_history_->append(observation_, submitted_at);
         policy_result_pending_ = policy_worker_->submit(
-            std::span<const float>{pending_policy_observation_}, ++submitted_policy_sequence_,
-            policy_generation_, submitted_at, shadow ? 1 : 0);
+            std::span<const double>{stacked}, ++submitted_policy_sequence_, policy_generation_,
+            submitted_at, shadow ? 1 : 0);
+        // Sample observations on the fixed trained cadence; results are applied
+        // when they arrive. The native reference update stays after decoding.
+        if (policy_result_pending_) {
+            policy_submitted_at_ = submitted_at;
+            schedule_.last_policy_tick = tick;
+        }
     }
-    return policy_targets_valid_ || (state_ == State::kPrepare && !recovery_started_);
+    // PREPARE keeps its own bounded PD/script while the first asynchronous
+    // inference is pending. Only a decoded result can authorize actor takeover.
+    return policy_targets_valid_ || state_ == State::kPrepare;
 }
 
-void RlController::accept_policy_result_(std::size_t tick) {
+void RlController::accept_policy_result_() {
     const bool native = policy_profile_.name == kV6PolicyProfile.name;
     if (policy_worker_->try_take(policy_result_)) {
         if (policy_result_.generation == policy_generation_) {
@@ -274,14 +315,12 @@ void RlController::accept_policy_result_(std::size_t tick) {
             }
             if (policy_result_.sequence <= accepted_policy_sequence_
                 || Clock::now() - policy_result_.submitted_at
-                       > std::chrono::duration<double>{2.0 / inference_frequency_}) {
+                       > std::chrono::duration<double>{inference_timeout_}) {
                 node::error("ONNX inference result is stale");
                 return;
             }
-            PolicyAction action;
-            std::copy(policy_result_.action.begin(), policy_result_.action.end(), action.begin());
             const bool result_shadow = policy_result_.context != 0;
-            const auto processed = process_action_(action, result_shadow);
+            const auto processed = process_action_(policy_result_.action, result_shadow);
             *inference_time_us_ = policy_result_.inference_microseconds;
             if (!processed) {
                 node::error("Policy action rejected: {}", processed.error());
@@ -289,12 +328,12 @@ void RlController::accept_policy_result_(std::size_t tick) {
                 return;
             }
             accepted_policy_sequence_ = policy_result_.sequence;
-            schedule_.last_policy_tick = tick;
             for (std::size_t i = 0; i < observation_outputs_.size(); ++i)
-                *observation_outputs_[i] = pending_policy_observation_[i];
+                **observation_outputs_[i] = pending_policy_observation_[i];
             if (!result_shadow || native)
                 for (std::size_t i = 0; i < action_outputs_.size(); ++i)
-                    *action_outputs_[i] = native ? policy_action_[i] : previous_action_[i];
+                    *action_outputs_[i] = native ? policy_action_[motor_actions_[i]]
+                                                 : previous_action_[motor_actions_[i]];
         }
     }
     if (!policy_worker_->healthy()) {
@@ -437,7 +476,7 @@ void RlController::update() {
             }
         }
     }
-    accept_policy_result_(tick);
+    accept_policy_result_();
     if (fault_latched_) {
         enter_(State::kIdle);
         clear_outputs_();
@@ -489,12 +528,12 @@ void RlController::update() {
             }
         } else {
             const bool ready = update_prepare_();
-            if (ready && (requested == 3 || automatic))
+            if (ready && (requested == 3 || automatic) && policy_targets_valid_)
                 enter_(State::kRl);
         }
     }
     const bool recovering = state_ == State::kPrepare && recovery_started_;
-    if (state_ == State::kRl || recovering) {
+    if (state_ == State::kRl || state_ == State::kPrepare) {
         if (schedule_.last_policy_tick == std::numeric_limits<std::size_t>::max()
             || tick - schedule_.last_policy_tick >= schedule_.policy_divisor) {
             if (!evaluate_policy_(tick, recovering)) {

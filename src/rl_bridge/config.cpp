@@ -14,8 +14,8 @@
 
 namespace rmcs_rl {
 
-BridgeConfig load_bridge_config(rclcpp::Node& node) {
-    BridgeConfig config;
+PolicyIoConfig load_policy_io_config(rclcpp::Node& node) {
+    PolicyIoConfig config;
     config.rl_base = string_or(node, "rl_base", "/rl");
     config.joint_config = load_joint_config(node);
     const auto action_specs = string_array_or(node, "action_terms");
@@ -92,6 +92,13 @@ BridgeConfig load_bridge_config(rclcpp::Node& node) {
     config.max_action_age = number_or(node, "max_action_age", 2.0 / config.policy_rate);
     if (!(config.max_action_age > 0.0) || !is_finite(config.max_action_age))
         throw std::invalid_argument("RlBridge: max_action_age must be finite and > 0");
+
+    return config;
+}
+
+BridgeConfig load_bridge_config(rclcpp::Node& node) {
+    BridgeConfig config;
+    static_cast<PolicyIoConfig&>(config) = load_policy_io_config(node);
 
     const std::string invalid = string_or(node, "invalid_value", "nan");
     if (invalid == "nan")

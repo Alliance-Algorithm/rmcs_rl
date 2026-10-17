@@ -8,8 +8,14 @@
 
 #include <eigen3/Eigen/Dense>
 #include <rmcs_description/tf_description.hpp>
+#include <rmcs_rl/rl_bridge/types.hpp>
 
 namespace rmcs_rl {
+
+double map_action(double value, const ActionTerm& term) {
+    value *= term.scale;
+    return term.has_clip ? std::clamp(value, term.clip_min, term.clip_max) : value;
+}
 
 std::vector<std::string> split_by(const std::string& text, char delimiter) {
     std::vector<std::string> parts;

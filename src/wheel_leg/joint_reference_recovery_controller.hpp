@@ -138,8 +138,10 @@ public:
     JointReferenceRecoveryVector6 torques(
         const JointReferenceRecoveryFeedback& feedback,
         const JointReferenceRecoveryVector6& rl_torque) const;
-    JointReferenceRecoveryVector6
-        effective_action_history(const JointReferenceRecoveryVector6& rl_action) const;
+    JointReferenceRecoveryVector6 effective_action_history(
+        const JointReferenceRecoveryVector6& rl_action,
+        const JointReferenceRecoveryVector6& nominal,
+        const JointReferenceRecoveryVector6& action_scales) const;
     static Eigen::Vector4d
         paired_delta(const Eigen::Vector4d& goal, const Eigen::Vector4d& reference);
 

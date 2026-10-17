@@ -39,6 +39,7 @@ bool PolicyWorker::try_take(Result& result) {
     std::swap(result.sequence, result_.sequence);
     std::swap(result.generation, result_.generation);
     std::swap(result.submitted_at, result_.submitted_at);
+    std::swap(result.context, result_.context);
     std::swap(result.completed_at, result_.completed_at);
     std::swap(result.inference_microseconds, result_.inference_microseconds);
     std::swap(result.success, result_.success);

@@ -17,13 +17,17 @@
 #include <expected>
 #include <optional>
 #include <source_location>
+#include <span>
 #include <string>
+#include <vector>
 
 #include <eigen3/Eigen/Dense>
 #include <rclcpp/node.hpp>
 #include <rmcs_description/tf_description.hpp>
 #include <rmcs_executor/component.hpp>
 #include <rmcs_msgs/chassis_mode.hpp>
+#include <rmcs_rl/rl_bridge/config.hpp>
+#include <rmcs_rl/rl_bridge/observation_history.hpp>
 #include <rmcs_utility/rclcpp/node_mixin.hpp>
 
 namespace rmcs::rl {
@@ -47,12 +51,15 @@ class RlController final
     , public rmcs_utility::NodeMixin {
 public:
     RlController();
+    explicit RlController(const rclcpp::NodeOptions& options);
     ~RlController() override;
 
+    void before_pairing(const OutputInfoMap& output_map) override;
     void before_updating() override;
     void update() override;
 
 private:
+    friend struct WheelLegDeploymentTestAccess;
     using Clock = std::chrono::steady_clock;
     using Vector6 = Eigen::Matrix<double, 6, 1>;
 
@@ -105,10 +112,10 @@ private:
     void reset_heading_hold_();
     bool assemble_observation_(bool shadow_recovery = false);
     std::expected<void, std::string>
-        process_action_(const PolicyAction& raw, bool shadow_recovery = false);
+        process_action_(std::span<const double> raw, bool shadow_recovery = false);
     void compute_motor_torques_();
     void apply_soft_limits_(Eigen::Vector4d& leg_torque) const;
-    void accept_policy_result_(std::size_t tick);
+    void accept_policy_result_();
 
     std::array<InputInterface<double>, 6> angle_inputs_;
     std::array<InputInterface<double>, 6> velocity_inputs_;
@@ -156,19 +163,31 @@ private:
     OutputInterface<double> recovery_height_output_;
     OutputInterface<double> inference_time_us_;
     OutputInterface<double> pd_time_us_;
-    std::array<OutputInterface<double>, ObservationLayout::kSize> observation_outputs_;
+    std::vector<std::unique_ptr<OutputInterface<double>>> observation_outputs_;
     std::array<OutputInterface<double>, PolicyAction{}.size()> action_outputs_;
+    std::array<OutputInterface<double>, PolicyAction{}.size()> action_target_outputs_;
+    std::array<OutputInterface<double>, 6> model_angle_outputs_, model_velocity_outputs_;
+    OutputInterface<Eigen::Vector3d> policy_command_output_, policy_gyro_output_;
+    OutputInterface<Eigen::Vector3d> policy_gravity_output_;
+    OutputInterface<double> policy_height_output_;
     OutputInterface<bool> heading_hold_active_output_;
     OutputInterface<double> heading_yaw_output_, heading_target_output_, heading_error_output_;
     OutputInterface<double> heading_raw_rate_output_, heading_limited_rate_output_;
     rmcs_rl::PolicyWorker::Result policy_result_;
-    PolicyObservation pending_policy_observation_{};
+    rmcs_rl::PolicyIoConfig policy_io_;
+    std::vector<rmcs_rl::Slot> observation_slots_;
+    std::unique_ptr<rmcs_rl::ObservationHistory> observation_history_;
+    std::vector<double> observation_, pending_policy_observation_;
+    // YAML action index -> physical motor index, and its inverse.
+    std::array<std::size_t, 6> action_motors_{}, motor_actions_{};
+    Vector6 action_scales_ = Vector6::Ones();
     std::unique_ptr<rmcs_rl::PolicyWorker> policy_worker_;
     std::uint64_t policy_generation_ = 0;
     std::uint64_t submitted_policy_sequence_ = 0;
     std::uint64_t accepted_policy_sequence_ = 0;
     bool policy_result_pending_ = false;
     std::chrono::steady_clock::time_point policy_submitted_at_{};
+    double inference_timeout_ = 0.04;
     PolicyProfile policy_profile_ = kV6PolicyProfile;
     LegTargetWinding leg_target_winding_ = LegTargetWinding::kIndependentNearest;
     std::optional<double> heading_target_rad_;
@@ -229,9 +248,7 @@ private:
     RecoverySensorStatus recovery_sensor_status_;
     RecoveryFailure recovery_failure_latched_ = RecoveryFailure::kNone;
     int joint_reference_failure_latched_ = 0;
-    PolicyObservation observation_{};
-    PolicyAction previous_action_{};
-    PolicyAction policy_action_{};
+    std::vector<double> previous_action_, policy_action_;
     std::size_t last_reset_count_ = 0;
     ControlSchedule schedule_;
     State state_ = State::kInit;

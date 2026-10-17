@@ -87,6 +87,8 @@ bool RlController::upright_capture_ready_(
 }
 
 bool RlController::recovery_capture_ready_() const {
+    if (!policy_targets_valid_)
+        return false;
     // Hinge differences determine actual knee extension independently of the
     // leg's common rotation. A low reference alone cannot limit a spring-loaded leg.
     for (int side = 0; side < 2; ++side) {
@@ -213,7 +215,8 @@ bool RlController::advance_recovery_() {
         && recovery_command_.phase == RecoveryPhase::kBlend) {
         // Clear history once without changing the global 50 Hz policy clock.
         // Hold the latest shadow targets until the next scheduled evaluation.
-        previous_action_.fill(0.0f);
+        std::ranges::fill(previous_action_, 0.0);
+        observation_history_->reset();
     }
     if (recovery_command_.phase == RecoveryPhase::kFailed) {
         return false;

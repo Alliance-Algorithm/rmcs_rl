@@ -3,20 +3,30 @@
 #include <algorithm>
 #include <cmath>
 #include <numbers>
+#include <rmcs_rl/rl_bridge/utility.hpp>
 
 #include "leg_target_winding.hpp"
 
 namespace rmcs::rl {
 
 std::expected<void, std::string>
-    RlController::process_action_(const PolicyAction& raw, bool shadow_recovery) {
-    PolicyAction clipped;
-    for (int i = 0; i < 6; ++i) {
+    RlController::process_action_(std::span<const double> raw, bool shadow_recovery) {
+    if (raw.size() != policy_io_.action_size)
+        return std::unexpected{std::string{"ONNX action size does not match YAML"}};
+    Vector6 decoded;
+    auto clipped = policy_action_;
+    for (std::size_t i = 0; i < policy_io_.action_size; ++i) {
         if (!std::isfinite(raw[i]))
             return std::unexpected{std::string{"ONNX returned a non-finite action"}};
-        const float limit = i < 4 ? DeployedPolicyContract::kLegActionLimit
-                                  : DeployedPolicyContract::kWheelActionLimit;
-        clipped[i] = std::clamp(raw[i], -limit, limit);
+        const auto& term = policy_io_.action_terms[i];
+        const double target = rmcs_rl::map_action(raw[i], term);
+        if (!std::isfinite(target))
+            return std::unexpected{std::string{"YAML action mapping returned a non-finite target"}};
+        decoded[action_motors_[i]] = target;
+        clipped[i] = target / term.scale;
+        if (!std::isfinite(clipped[i]))
+            return std::unexpected{
+                std::string{"YAML action scale cannot represent action history"}};
     }
     Vector6 targets = policy_targets_;
     const bool v6 = policy_profile_.name == kV6PolicyProfile.name;
@@ -25,7 +35,7 @@ std::expected<void, std::string>
                                 : q_;
     std::array<double, 4> desired{}, current{};
     for (int i = 0; i < 4; ++i) {
-        desired[i] = nominal_[i] + DeployedPolicyContract::kLegActionScale * clipped[i];
+        desired[i] = nominal_[i] + decoded[i];
         current[i] = control_q[i];
     }
     const auto leg_targets = wind_leg_targets(desired, current, leg_target_winding_);
@@ -48,12 +58,14 @@ std::expected<void, std::string>
         }
     }
     // The last two actions command wheel speeds, not torques.
-    targets[4] = DeployedPolicyContract::kWheelActionScale * clipped[4];
-    targets[5] = DeployedPolicyContract::kWheelActionScale * clipped[5];
+    targets[4] = decoded[4];
+    targets[5] = decoded[5];
     if (!targets.allFinite())
         return std::unexpected{
             std::string{"Policy action or soft-limit mapping generated a non-finite target"}};
     policy_action_ = clipped;
+    for (std::size_t i = 0; i < policy_io_.action_size; ++i)
+        *action_target_outputs_[i] = decoded[action_motors_[i]];
     if (!shadow_recovery && !(v6 && recovery_started_))
         previous_action_ = clipped;
     policy_targets_ = targets;
@@ -111,20 +123,24 @@ void RlController::compute_motor_torques_() {
     Eigen::Vector4d tau = Eigen::Vector4d::Zero();
     Eigen::Vector2d wheel_tau = Eigen::Vector2d::Zero();
     if (native_recovery) {
-        if (!policy_targets_valid_) {
+        const auto& command = joint_reference_recovery_->command();
+        if (!policy_targets_valid_ && (command.blend > 0.0 || command.pure_rl)) {
             latch_fault_();
             return;
         }
         const Vector6 continuous_q = joint_reference_recovery_->project_feedback(q_);
-        Vector6 actor;
-        actor.head<4>() =
-            (policy_profile_.leg_kp * (policy_targets_.head<4>() - continuous_q.head<4>())
-             - policy_profile_.leg_kd * dq_.head<4>())
-                .cwiseMax(-DeployedPolicyContract::kLegTorqueLimit)
-                .cwiseMin(DeployedPolicyContract::kLegTorqueLimit);
-        actor.tail<2>() = (policy_profile_.wheel_kp * (policy_targets_.tail<2>() - dq_.tail<2>()))
-                              .cwiseMax(-policy_profile_.wheel_torque_limit)
-                              .cwiseMin(policy_profile_.wheel_torque_limit);
+        Vector6 actor = Vector6::Zero();
+        if (policy_targets_valid_) {
+            actor.head<4>() =
+                (policy_profile_.leg_kp * (policy_targets_.head<4>() - continuous_q.head<4>())
+                 - policy_profile_.leg_kd * dq_.head<4>())
+                    .cwiseMax(-DeployedPolicyContract::kLegTorqueLimit)
+                    .cwiseMin(DeployedPolicyContract::kLegTorqueLimit);
+            actor.tail<2>() =
+                (policy_profile_.wheel_kp * (policy_targets_.tail<2>() - dq_.tail<2>()))
+                    .cwiseMax(-policy_profile_.wheel_torque_limit)
+                    .cwiseMin(policy_profile_.wheel_torque_limit);
+        }
         const Vector6 effort =
             joint_reference_recovery_->torques(joint_reference_recovery_feedback_(), actor);
         tau = effort.head<4>();
@@ -270,10 +286,13 @@ void RlController::compute_motor_torques_() {
             std::clamp(motor_tau_wheel, -*max_torque_inputs_[4 + i], *max_torque_inputs_[4 + i]);
     }
     if (native_recovery) {
-        const Vector6 history = joint_reference_recovery_->effective_action_history(
-            Eigen::Map<const Eigen::Matrix<float, 6, 1>>{policy_action_.data()}.cast<double>());
+        Vector6 actor;
         for (int i = 0; i < 6; ++i)
-            previous_action_[i] = static_cast<float>(history[i]);
+            actor[i] = policy_action_[motor_actions_[i]];
+        const Vector6 history = joint_reference_recovery_->effective_action_history(
+            actor, Eigen::Map<const Vector6>{nominal_.data()}, action_scales_);
+        for (int i = 0; i < 6; ++i)
+            previous_action_[motor_actions_[i]] = history[i];
     }
 }
 
