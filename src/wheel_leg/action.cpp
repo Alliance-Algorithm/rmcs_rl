@@ -122,29 +122,39 @@ void RlController::compute_motor_torques_() {
         state_ == State::kRl && !recovery_started_ && policy_profile_.name == kV6PolicyProfile.name;
     Eigen::Vector4d tau = Eigen::Vector4d::Zero();
     Eigen::Vector2d wheel_tau = Eigen::Vector2d::Zero();
+    Eigen::Vector4d leg_reference = targets_.head<4>();
+    Eigen::Vector4d reference_feedback = q_.head<4>();
     if (native_recovery) {
         const auto& command = joint_reference_recovery_->command();
-        if (!policy_targets_valid_ && (command.blend > 0.0 || command.pure_rl)) {
+        if (!policy_targets_valid_) {
             latch_fault_();
             return;
         }
         const Vector6 continuous_q = joint_reference_recovery_->project_feedback(q_);
-        Vector6 actor = Vector6::Zero();
-        if (policy_targets_valid_) {
-            actor.head<4>() =
-                (policy_profile_.leg_kp * (policy_targets_.head<4>() - continuous_q.head<4>())
-                 - policy_profile_.leg_kd * dq_.head<4>())
-                    .cwiseMax(-DeployedPolicyContract::kLegTorqueLimit)
-                    .cwiseMin(DeployedPolicyContract::kLegTorqueLimit);
-            actor.tail<2>() =
-                (policy_profile_.wheel_kp * (policy_targets_.tail<2>() - dq_.tail<2>()))
-                    .cwiseMax(-policy_profile_.wheel_torque_limit)
-                    .cwiseMin(policy_profile_.wheel_torque_limit);
-        }
+        Vector6 actor;
+        actor.head<4>() =
+            (policy_profile_.leg_kp * (policy_targets_.head<4>() - continuous_q.head<4>())
+             - policy_profile_.leg_kd * dq_.head<4>())
+                .cwiseMax(-DeployedPolicyContract::kLegTorqueLimit)
+                .cwiseMin(DeployedPolicyContract::kLegTorqueLimit);
+        actor.tail<2>() = (policy_profile_.wheel_kp * (policy_targets_.tail<2>() - dq_.tail<2>()))
+                              .cwiseMax(-policy_profile_.wheel_torque_limit)
+                              .cwiseMin(policy_profile_.wheel_torque_limit);
         const Vector6 effort =
             joint_reference_recovery_->torques(joint_reference_recovery_feedback_(), actor);
         tau = effort.head<4>();
         wheel_tau = effort.tail<2>();
+        if (use_motor_position_pd_ && (!command.release_finished || command.failed)) {
+            clear_outputs_();
+            return;
+        }
+        leg_reference =
+            command.pure_rl ? policy_targets_.head<4>().eval() : command.targets.head<4>().eval();
+        if (command.blending)
+            leg_reference = continuous_q.head<4>()
+                          + (effort.head<4>() + policy_profile_.leg_kd * dq_.head<4>())
+                                / policy_profile_.leg_kp;
+        reference_feedback = continuous_q.head<4>();
     } else if (scripted) {
         tau = recovery_command_.torque.head<4>();
         wheel_tau = recovery_command_.torque.tail<2>();
@@ -207,6 +217,7 @@ void RlController::compute_motor_torques_() {
             tau = policy_tau;
             wheel_tau = policy_wheel;
         }
+        leg_reference = policy_targets_.head<4>();
     }
     // Enforce the relative hinge limit during PREPARE as well as during RL.
     // Stop on a measured violation beyond the guard band; physical stops are
@@ -272,6 +283,24 @@ void RlController::compute_motor_torques_() {
     for (int i = 0; i < 4; ++i)
         *torque_outputs_[i] =
             std::clamp(motor_tau[i], -*max_torque_inputs_[i], *max_torque_inputs_[i]);
+
+    if (use_motor_position_pd_) {
+        // Preserve the pair's continuous turn, then express its error in the
+        // encoder API frame. Driver reversal/bias is applied only by DmMotor.
+        const Eigen::Vector4d delta =
+            leg_jacobian_.transpose() * (leg_reference - reference_feedback);
+        for (int i = 0; i < 4; ++i) {
+            const double target = *angle_inputs_[i] + delta[i];
+            if (!std::isfinite(target)) {
+                latch_fault_();
+                return;
+            }
+            *angle_outputs_[i] = target;
+        }
+        *joint_command_ns_ = static_cast<std::uint64_t>(
+            std::chrono::duration_cast<std::chrono::nanoseconds>(Clock::now().time_since_epoch())
+                .count());
+    }
 
     for (int i = 0; i < 2; ++i) {
         // DjiMotor's configured ratio converts motor current to wheel-output

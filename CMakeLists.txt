@@ -91,6 +91,9 @@ if(BUILD_TESTING)
         "${PROJECT_SOURCE_DIR}/../rmcs_bringup/config" ABSOLUTE)
     target_compile_definitions(wheel_leg_yaml_test PRIVATE
         WHEEL_LEG_BRINGUP_CONFIG="${WHEEL_LEG_BRINGUP_CONFIG}")
+    add_executable(wheel_leg_reference_replay test/wheel_leg_reference_replay.cpp)
+    target_include_directories(wheel_leg_reference_replay PRIVATE src/wheel_leg)
+    target_link_libraries(wheel_leg_reference_replay rmcs_rl)
 endif()
 
 ament_auto_package(USE_SCOPED_HEADER_INSTALL_DIR)

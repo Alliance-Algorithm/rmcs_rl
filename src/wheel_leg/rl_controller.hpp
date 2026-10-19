@@ -1,6 +1,6 @@
 #pragma once
 
-#include "../policy/policy_worker.hpp"
+#include "../policy/policy_model.hpp"
 #include "closed_chain_support_observer.hpp"
 #include "control_interval.hpp"
 #include "joint_reference_recovery_controller.hpp"
@@ -83,7 +83,6 @@ private:
     };
 
     void enter_(State next, bool force_reset = false);
-    void reset_policy_generation_();
     void latch_fault_(
         std::optional<RecoveryFailure> reason = std::nullopt,
         std::source_location location = std::source_location::current());
@@ -117,13 +116,18 @@ private:
         process_action_(std::span<const double> raw, bool shadow_recovery = false);
     void compute_motor_torques_();
     void apply_soft_limits_(Eigen::Vector4d& leg_torque) const;
-    void accept_policy_result_();
+    bool policy_action_fresh_() const;
 
     std::array<InputInterface<double>, 6> angle_inputs_;
     std::array<InputInterface<double>, 6> velocity_inputs_;
     std::array<InputInterface<double>, 6> max_torque_inputs_;
     std::array<InputInterface<double>, 6> torque_feedback_inputs_;
     std::array<OutputInterface<double>, 6> torque_outputs_;
+    std::array<OutputInterface<double>, 4> angle_outputs_;
+    InputInterface<bool> motor_position_pd_;
+    InputInterface<double> motor_position_kp_, motor_position_kd_;
+    OutputInterface<std::uint64_t> joint_command_ns_;
+    bool use_motor_position_pd_ = false;
     std::array<InputInterface<int>, 4> fault_inputs_;
     std::array<InputInterface<std::uint64_t>, 6> motor_feedback_sequences_;
     std::array<InputInterface<std::uint64_t>, 6> motor_feedback_ns_;
@@ -175,20 +179,14 @@ private:
     OutputInterface<bool> heading_hold_active_output_;
     OutputInterface<double> heading_yaw_output_, heading_target_output_, heading_error_output_;
     OutputInterface<double> heading_raw_rate_output_, heading_limited_rate_output_;
-    rmcs_rl::PolicyWorker::Result policy_result_;
     rmcs_rl::PolicyIoConfig policy_io_;
     std::vector<rmcs_rl::Slot> observation_slots_;
     std::unique_ptr<rmcs_rl::ObservationHistory> observation_history_;
-    std::vector<double> observation_, pending_policy_observation_;
+    std::vector<double> observation_, raw_action_;
     // YAML action index -> physical motor index, and its inverse.
     std::array<std::size_t, 6> action_motors_{}, motor_actions_{};
     Vector6 action_scales_ = Vector6::Ones();
-    std::unique_ptr<rmcs_rl::PolicyWorker> policy_worker_;
-    std::uint64_t policy_generation_ = 0;
-    std::uint64_t submitted_policy_sequence_ = 0;
-    std::uint64_t accepted_policy_sequence_ = 0;
-    bool policy_result_pending_ = false;
-    std::chrono::steady_clock::time_point policy_submitted_at_{};
+    std::unique_ptr<rmcs_rl::PolicyModel> policy_;
     std::optional<Clock::time_point> accepted_policy_submitted_at_;
     double inference_timeout_ = 0.04;
     PolicyProfile policy_profile_ = kV6PolicyProfile;

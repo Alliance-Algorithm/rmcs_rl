@@ -137,9 +137,8 @@ public:
     JointReferenceRecoveryVector6 torques(
         const JointReferenceRecoveryFeedback& feedback,
         const JointReferenceRecoveryVector6& rl_torque) const;
-    JointReferenceRecoveryVector6 effective_action_history(
-        const JointReferenceRecoveryVector6& rl_action,
-        const JointReferenceRecoveryVector6& nominal,
+    JointReferenceRecoveryVector6
+        effective_action_history(const JointReferenceRecoveryVector6& rl_action, const JointReferenceRecoveryVector6& nominal,
         const JointReferenceRecoveryVector6& action_scales) const;
     static Eigen::Vector4d
         paired_delta(const Eigen::Vector4d& goal, const Eigen::Vector4d& reference);
@@ -191,6 +190,7 @@ private:
     bool phase_reached_(const StepContext& step, double seconds) const;
     float phase_elapsed_() const;
     void enter_(JointReferenceRecoveryPhase phase);
+    void start_thrust_(const Vector4f& reference);
     void fail_(int code);
     void reset_fsm_(const Vector6f& q, bool active);
     void publish_();
@@ -220,6 +220,7 @@ private:
     bool enabled_ = false, membership_ = false, motion_released_ = true;
     bool pitch_initialized_ = false, release_finished_ = true;
     bool wheel_balance_active_ = false;
+    bool push_off_required_ = false;
     float continuous_pitch_ = 0.0f, last_pitch_ = 0.0f;
     float orbit_angle_ = 0.0f, plant_pitch_ = 0.0f;
     double initial_release_seconds_ = 0.0;

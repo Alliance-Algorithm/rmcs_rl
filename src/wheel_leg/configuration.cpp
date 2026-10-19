@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <cmath>
 #include <filesystem>
+#include <limits>
 #include <numbers>
 #include <ranges>
 #include <stdexcept>
@@ -96,7 +97,7 @@ RlController::RlController(const rclcpp::NodeOptions& options)
     observation_history_ = std::make_unique<rmcs_rl::ObservationHistory>(
         policy_io_.obs_frame_size, policy_io_.history_length, policy_io_.history_period);
     observation_.resize(policy_io_.obs_frame_size);
-    pending_policy_observation_.resize(policy_io_.obs_frame_size);
+    raw_action_.resize(policy_io_.action_size);
     previous_action_.resize(policy_io_.action_size);
     policy_action_.resize(policy_io_.action_size);
     inference_timeout_ = get_parameter_or("inference_timeout", policy_io_.max_action_age);
@@ -127,8 +128,15 @@ RlController::RlController(const rclcpp::NodeOptions& options)
         }
         if (i < 4) {
             register_input(prefix + "/fault_code", fault_inputs_[i]);
+            register_output(
+                prefix + "/control_angle", angle_outputs_[i],
+                std::numeric_limits<double>::quiet_NaN());
         }
     }
+    register_input("/wheel_leg/joint_position_pd", motor_position_pd_, false);
+    register_input("/wheel_leg/joint_position_kp", motor_position_kp_, false);
+    register_input("/wheel_leg/joint_position_kd", motor_position_kd_, false);
+    register_output("/wheel_leg/joint_command_steady_ns", joint_command_ns_, std::uint64_t{0});
     register_input("/wheel_leg/feedback_fresh", feedback_fresh_);
     register_input("/wheel_leg/imu/quaternion", orientation_);
     register_input("/wheel_leg/imu/angular_velocity", gyro_);
@@ -519,10 +527,9 @@ RlController::RlController(const rclcpp::NodeOptions& options)
                     "Recovery capture reference exceeds calibrated hinge limits");
             recovery_capture_hinge_max_[side] = maximum;
         }
-        if (recovery_config.dynamic_takeover) {
+        // Keep the extended support pose; the low reference only defines actor entry.
+        if (recovery_config.dynamic_takeover)
             recovery_config.nominal = recovery_capture_reference_;
-            recovery_config.support = recovery_capture_reference_;
-        }
         recovery_capture_max_tilt_rad_ =
             recovery_parameter("recovery_capture_max_tilt_rad", prepare_max_tilt_rad_);
         recovery_capture_max_angular_velocity_ = recovery_parameter(
@@ -653,12 +660,12 @@ RlController::RlController(const rclcpp::NodeOptions& options)
         if (policy_config.expected_model_spec_sha256.empty())
             policy_config.expected_model_spec_sha256 = std::string{kBranch107ModelSpecSha256};
     }
-    policy_worker_ = std::make_unique<rmcs_rl::PolicyWorker>(policy_config);
+    policy_ = std::make_unique<rmcs_rl::PolicyModel>(policy_config);
     if (leg_target_winding_ == LegTargetWinding::kPairedBranch107)
         validate_leg_target_model_spec(
-            leg_target_winding_, policy_worker_->info().model_spec_sha256, "Wheel-leg ONNX model");
+            leg_target_winding_, policy_->info().model_spec_sha256, "Wheel-leg ONNX model");
     {
-        const auto& path = policy_worker_->info().path;
+        const auto& path = policy_->info().path;
         RCLCPP_INFO(
             get_logger(),
             "ONNX model %s, %s control, winding %s, %.0fHz policy / %.0fHz feedback PD / "
@@ -667,7 +674,6 @@ RlController::RlController(const rclcpp::NodeOptions& options)
             leg_target_winding_name(leg_target_winding_).data(), inference_frequency_,
             pd_frequency_, recovery_frequency_);
     }
-    policy_result_.action.reserve(policy_io_.action_size);
     policy_ready_ = true;
     // Configuration is copied into fixed control-loop state at construction.
     // Reject edits that would otherwise change ROS metadata without changing it.

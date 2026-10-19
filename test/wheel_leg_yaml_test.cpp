@@ -17,6 +17,9 @@
 #include <rmcs_rl/rl_bridge/interface_binding.hpp>
 #include <rmcs_rl/rl_bridge/observation_history.hpp>
 
+#include "policy/configuration.hpp"
+#include "policy/policy_worker.hpp"
+#include "wheel_leg/chassis_body_geometry.hpp"
 #include "wheel_leg/rl_controller.hpp"
 
 namespace rmcs::rl {
@@ -45,8 +48,7 @@ struct WheelLegDeploymentTestAccess {
     static auto& previous(RlController& c) { return c.previous_action_; }
     static const auto& nominal(RlController& c) { return c.nominal_; }
     static const auto& targets(RlController& c) { return c.policy_targets_; }
-    static auto& worker(RlController& c) { return *c.policy_worker_; }
-    static auto generation(RlController& c) { return c.policy_generation_; }
+    static auto& model(RlController& c) { return *c.policy_; }
     static bool targets_valid(RlController& c) { return c.policy_targets_valid_; }
     static bool assemble(RlController& c, bool shadow = false) {
         return c.assemble_observation_(shadow);
@@ -64,7 +66,13 @@ struct WheelLegDeploymentTestAccess {
             - std::chrono::duration_cast<std::chrono::steady_clock::duration>(
                 std::chrono::duration<double>{2 * c.inference_timeout_});
     }
-    static void accept(RlController& c) { c.accept_policy_result_(); }
+    static bool fresh(RlController& c) { return c.policy_action_fresh_(); }
+    static void motor_pd(RlController& c, double kp, double kd) {
+        c.reset_count_.make_and_bind_directly(std::size_t{0});
+        c.motor_position_pd_.make_and_bind_directly(true);
+        c.motor_position_kp_.make_and_bind_directly(kp);
+        c.motor_position_kd_.make_and_bind_directly(kd);
+    }
     static void reset(RlController& c) { c.enter_(State::kIdle, true); }
     static auto& history(RlController& c) { return *c.observation_history_; }
     static const auto& recovery(RlController& c) { return *c.joint_reference_recovery_; }
@@ -73,6 +81,9 @@ struct WheelLegDeploymentTestAccess {
             *output = 1.0;
         for (auto& output : c.action_target_outputs_)
             *output = 1.0;
+        for (auto& output : c.angle_outputs_)
+            *output = 1.0;
+        *c.joint_command_ns_ = 100;
     }
     static bool outputs_zero(RlController& c) {
         for (const auto& output : c.torque_outputs_)
@@ -81,7 +92,10 @@ struct WheelLegDeploymentTestAccess {
         for (const auto& output : c.action_target_outputs_)
             if (*output != 0.0)
                 return false;
-        return !*c.enable_request_;
+        for (const auto& output : c.angle_outputs_)
+            if (!std::isnan(*output))
+                return false;
+        return !*c.enable_request_ && *c.joint_command_ns_ == 0;
     }
 };
 
@@ -126,7 +140,7 @@ TEST_F(WheelLegYaml, BothVehicleProfilesLoadTheRealActorAndPairInputs) {
         RlController c{options(profile)};
         EXPECT_NO_THROW(c.before_pairing({}));
         EXPECT_EQ(Access::io(c).obs_size, 35u);
-        EXPECT_EQ(Access::worker(c).info().action_size, 6u);
+        EXPECT_EQ(Access::model(c).info().action_size, 6u);
     }
 }
 
@@ -238,6 +252,17 @@ TEST_F(WheelLegYaml, PairingRejectsObservationTypeMismatchAndControlOutputCycles
     specs = base->get_parameter("observation_terms").as_string_array();
     specs[0] = "index=0 path=/wheel_leg/rl/state name=command/forward";
     EXPECT_THROW(controller({rclcpp::Parameter{"observation_terms", specs}}), std::runtime_error);
+    specs[0] = "index=0 path=/wheel_leg/left_hip_joint/control_angle name=command/forward";
+    EXPECT_THROW(controller({rclcpp::Parameter{"observation_terms", specs}}), std::runtime_error);
+}
+
+TEST_F(WheelLegYaml, MotorPositionPdRequiresTheDeployedNativeGains) {
+    auto valid = controller();
+    Access::motor_pd(*valid, 160.0, 2.5);
+    EXPECT_NO_THROW(valid->before_updating());
+    auto invalid = controller();
+    Access::motor_pd(*invalid, 80.0, 2.5);
+    EXPECT_THROW(invalid->before_updating(), std::runtime_error);
 }
 
 TEST_F(WheelLegYaml, ResetClearsEffortActionFeedbackAndObservationHistory) {
@@ -246,9 +271,7 @@ TEST_F(WheelLegYaml, ResetClearsEffortActionFeedbackAndObservationHistory) {
     const std::vector<double> old_frame(35, 8.0), new_frame(35, 2.0);
     history.append(old_frame);
     Access::seed_outputs(*c);
-    const auto generation = Access::generation(*c);
     Access::reset(*c);
-    EXPECT_GT(Access::generation(*c), generation);
     EXPECT_FALSE(Access::targets_valid(*c));
     EXPECT_TRUE(Access::outputs_zero(*c));
     for (const double value : Access::previous(*c))
@@ -258,7 +281,8 @@ TEST_F(WheelLegYaml, ResetClearsEffortActionFeedbackAndObservationHistory) {
 
 TEST_F(WheelLegYaml, WorkerPreservesRecoveryContextAndResetGeneration) {
     auto c = controller();
-    auto& worker = Access::worker(*c);
+    auto config = rmcs_rl::load_policy_config(*c, 35, 6, 1, 35);
+    rmcs_rl::PolicyWorker worker{config};
     const std::vector<double> obs(35, 0.0);
     ASSERT_TRUE(
         worker.submit(std::span<const double>{obs}, 71, 17, std::chrono::steady_clock::now(), 1));
@@ -272,37 +296,66 @@ TEST_F(WheelLegYaml, WorkerPreservesRecoveryContextAndResetGeneration) {
     EXPECT_EQ(result.context, 1u);
 }
 
-TEST_F(WheelLegYaml, PendingFirstInferenceKeepsPreparationAlive) {
+TEST_F(WheelLegYaml, InferenceDecodesTheActorInTheSameControlTick) {
     auto c = controller();
-    EXPECT_TRUE(Access::evaluate(*c));
-    EXPECT_FALSE(Access::fault(*c));
-    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds{50};
-    while (!Access::targets_valid(*c) && std::chrono::steady_clock::now() < deadline) {
-        Access::accept(*c);
-        std::this_thread::sleep_for(std::chrono::milliseconds{1});
-    }
+    ASSERT_FALSE(Access::targets_valid(*c));
+    ASSERT_TRUE(Access::evaluate(*c));
     EXPECT_TRUE(Access::targets_valid(*c));
+    EXPECT_FALSE(Access::fault(*c));
+    EXPECT_TRUE(Access::fresh(*c));
 }
 
-TEST_F(WheelLegYaml, ResetRejectsAnInferenceThatCompletesFromThePreviousSession) {
+TEST_F(WheelLegYaml, ResetKeepsTheActorClearedUntilTheNextPolicyFrame) {
     auto c = controller();
-    EXPECT_TRUE(Access::evaluate(*c));
+    ASSERT_TRUE(Access::evaluate(*c));
     Access::reset(*c);
-    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds{30};
-    while (std::chrono::steady_clock::now() < deadline) {
-        Access::accept(*c);
-        std::this_thread::sleep_for(std::chrono::milliseconds{1});
-    }
     EXPECT_FALSE(Access::targets_valid(*c));
     EXPECT_TRUE(Access::outputs_zero(*c));
+    EXPECT_TRUE(Access::fresh(*c));
 }
 
 TEST_F(WheelLegYaml, AcceptedActionExpiresWithoutWaitingForAnotherInference) {
     auto c = controller();
-    ASSERT_TRUE(Access::action(*c, {0, 0, 0, 0, 1, 2}));
+    ASSERT_TRUE(Access::evaluate(*c));
     Access::expire_action(*c);
-    Access::accept(*c);
-    EXPECT_TRUE(Access::fault(*c));
+    EXPECT_FALSE(Access::fresh(*c));
+}
+
+TEST_F(WheelLegYaml, GroundedUprightRecoveryPushesOffBeforePolicyCapture) {
+    auto c = controller();
+    auto recovery = Access::recovery(*c);
+    JointReferenceRecoveryFeedback feedback;
+    feedback.q = Eigen::Map<const JointReferenceRecoveryVector6>{Access::nominal(*c).data()};
+    feedback.gravity = Eigen::Vector3d{0, 0, -1};
+    feedback.estimated_height = 0.201;
+    feedback.support = true;
+    feedback.rl_capture_ready = true;
+    recovery.reset(feedback.q, true);
+    for (int tick = 0; tick < 100; ++tick) {
+        const auto& command = recovery.update(feedback, 0.001);
+        ASSERT_EQ(command.phase, JointReferenceRecoveryPhase::kThrust);
+        EXPECT_FALSE(command.pure_rl);
+    }
+    // The push-off reference must retain the extended support pose, rather
+    // than silently replacing it with the low actor-capture pose.
+    EXPECT_GT((recovery.command().targets.head<4>() - feedback.q.head<4>()).norm(), 0.01);
+    feedback.estimated_height = 0.24;
+    EXPECT_EQ(recovery.update(feedback, 0.001).phase, JointReferenceRecoveryPhase::kRl);
+    EXPECT_TRUE(recovery.command().pure_rl);
+}
+
+TEST_F(WheelLegYaml, ShellClearanceIsRequiredEvenWhenCallerAllowsCapture) {
+    auto c = controller();
+    auto recovery = Access::recovery(*c);
+    JointReferenceRecoveryFeedback feedback;
+    feedback.q = Eigen::Map<const JointReferenceRecoveryVector6>{Access::nominal(*c).data()};
+    feedback.gravity = Eigen::Vector3d{0.5, 0, -std::sqrt(0.75)};
+    feedback.estimated_height = body_geometry::support_depth(feedback.gravity.cast<float>());
+    feedback.support = true;
+    feedback.rl_capture_ready = true;
+    recovery.reset(feedback.q, true);
+    for (int tick = 0; tick < 100; ++tick)
+        EXPECT_FALSE(recovery.update(feedback, 0.001).pure_rl);
 }
 
 TEST_F(WheelLegYaml, NonfiniteHistoryCannotBeHiddenByObservationClipping) {
@@ -321,6 +374,7 @@ TEST_F(WheelLegYaml, SharedBridgeStillLoadsTheDeformableHistoryContract) {
     EXPECT_EQ(config.obs_size, 256u);
     EXPECT_EQ(config.action_size, 4u);
     EXPECT_DOUBLE_EQ(config.policy_rate, 200.0);
+    EXPECT_DOUBLE_EQ(config.max_action_age, 0.01);
     EXPECT_TRUE(config.policy_worker->healthy());
 }
 

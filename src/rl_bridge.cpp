@@ -150,7 +150,8 @@ public:
                    return std::isfinite(value);
                });
 
-        const bool fresh = has_snapshot && is_finite(age) && age <= config_.inference_timeout;
+        const bool fresh = has_snapshot && is_finite(age) && age <= config_.inference_timeout
+                        && age <= config_.max_action_age;
         const bool valid = enabled && !worker_failed_ && has_snapshot && fresh && seq_ok && finite;
 
         // The action fed into history must match the flat-ground command that is executed.

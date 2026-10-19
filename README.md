@@ -7,7 +7,7 @@ RMCS RL deployment package, referenced by RMCS as `rmcs_ws/src/rmcs_rl` submodul
 | Deployment | Components | Responsibility |
 | --- | --- | --- |
 | deformable | `rmcs_rl::RlBridge` | YAML observation/history assembly, in-process worker inference, action freshness and reset handling |
-| wheel-leg | `rmcs::rl::RlController` | Shared YAML observation/history and action mapping, in-process worker inference, preparation, feedback PD and recovery |
+| wheel-leg | `rmcs::rl::RlController` | Shared YAML observation/history and action mapping, synchronous policy frames, preparation, feedback PD and recovery |
 
 Vehicle hardware, remote commands, deformable action consumption and suspension arbitration
 remain in `rmcs_core`. Vehicle configurations belong to `rmcs_bringup/config`.
@@ -27,8 +27,12 @@ Both deployments derive observation and action counts from `observation_terms` a
 
 Startup checks tensor types, batch/rank, observation/history dimensions, action count and a trial
 inference. Model initialization failures include the resolved path and incompatibility reason.
-The worker runs inside RMCS. The 1 kHz executor never waits for inference; it accepts only completed,
-fresh results from the current reset generation.
+Deformable inference runs on a worker inside RMCS; its executor accepts completed results from the
+current reset generation within both `inference_timeout` and `max_action_age`.
+Wheel-leg uses the same model loader synchronously at `policy_rate`, matching the deployed recovery
+controller: assemble observations, infer and decode the actor, advance recovery, then compute PD in
+the same executor tick. This preserves the reference winding and action-feedback order. Its 1 kHz
+executor waits for each 50 Hz policy inference; timing on the vehicle must be checked separately.
 
 Compatible internal network changes need only a new path. A changed observation/action contract
 also needs a matching vehicle configuration. Tensor shape cannot establish feature order, axes,
@@ -92,8 +96,8 @@ action_terms:
 Leg winding, hinge guards, model-to-motor effort mapping and hardware torque limits run after
 YAML action decoding. Recovery converts its executed references back through the configured
 per-motor scales and actor indices for `last_action`. Reset clears history, action feedback and
-effort, and rejects asynchronous results from the previous generation. PREPARE keeps its bounded
-PD/script until the first valid inference; accepted actions expire at `inference_timeout`.
+effort, motor-position references and their command timestamp. Actor takeover requires a decoded
+policy frame; inference and accepted actions are bounded by `inference_timeout`.
 All configuration is startup-only. Changing a network's observation or actuator conventions still
 requires its matching YAML and the existing mechanical recovery contract.
 
@@ -106,3 +110,14 @@ colcon test-result --test-result-base build/rmcs_rl --verbose
 ```
 
 These tests load the real actor and vehicle YAML without constructing hardware or enabling drives.
+
+To compare with an explicitly fetched RMCS reference branch, also run:
+
+```sh
+python3 src/rmcs_rl/tools/verify_wheel_leg_reference.py --reference origin/dev/wheel_leg_rl
+```
+
+The verifier compares model bytes, deployment parameters, hardware code and the deformable contract.
+It compiles the original reference recovery/model code in a temporary directory and compares the
+same 6,400 recovery snapshots and 256 actor inputs with the built merge code. See
+[the deployment comparison](docs/wheel_leg_merge_validation.md) for provenance and evidence limits.
