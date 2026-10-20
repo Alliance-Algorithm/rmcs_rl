@@ -57,16 +57,6 @@ ament_auto_add_library(rmcs_rl SHARED
     src/rl_bridge/term_parser.cpp
     src/rl_bridge/interface_binding.cpp
     src/rl_bridge/observation.cpp
-    src/wheel_leg/action.cpp
-    src/wheel_leg/closed_chain_support_observer.cpp
-    src/wheel_leg/configuration.cpp
-    src/wheel_leg/controller_recovery.cpp
-    src/wheel_leg/joint_reference_recovery_controller.cpp
-    src/wheel_leg/observation.cpp
-    src/wheel_leg/recovery_controller.cpp
-    src/wheel_leg/recovery_observer.cpp
-    src/wheel_leg/recovery_profile.cpp
-    src/wheel_leg/rl_controller.cpp
 )
 ament_target_dependencies(rmcs_rl rmcs_executor rmcs_description rmcs_msgs rmcs_utility rclcpp)
 target_include_directories(rmcs_rl PUBLIC
@@ -82,12 +72,5 @@ pluginlib_export_plugin_description_file(rmcs_executor plugins.xml)
 install(DIRECTORY ${ONNXRUNTIME_ROOT_DIR}/lib/ DESTINATION lib FILES_MATCHING PATTERN "*.so*")
 
 install(DIRECTORY models DESTINATION share/${PROJECT_NAME})
-
-if(BUILD_TESTING)
-    # Only the reference replay tool used by tools/verify_wheel_leg_reference.py remains.
-    add_executable(wheel_leg_reference_replay test/wheel_leg_reference_replay.cpp)
-    target_include_directories(wheel_leg_reference_replay PRIVATE src/wheel_leg)
-    target_link_libraries(wheel_leg_reference_replay rmcs_rl)
-endif()
 
 ament_auto_package(USE_SCOPED_HEADER_INSTALL_DIR)

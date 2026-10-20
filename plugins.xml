@@ -1,4 +1,3 @@
 <library path="rmcs_rl">
   <class type="rmcs_rl::RlBridge" base_class_type="rmcs_executor::Component" />
-  <class type="rmcs::rl::RlController" base_class_type="rmcs_executor::Component" />
 </library>

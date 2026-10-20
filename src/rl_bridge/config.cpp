@@ -123,6 +123,7 @@ BridgeConfig load_bridge_config(rclcpp::Node& node) {
     config.enable_default = bool_or(node, "enable_default", false);
     config.reset_path = string_or(node, "reset_interface", "");
     config.flat_hold_path = string_or(node, "flat_hold_interface", "");
+    config.context_path = string_or(node, "context_interface", "");
     config.inference_timeout = number_or(node, "inference_timeout", 2.0 / config.policy_rate);
     if (!is_finite(config.inference_timeout) || config.inference_timeout <= 0.0)
         throw std::invalid_argument("RlBridge: inference_timeout must be finite and > 0");

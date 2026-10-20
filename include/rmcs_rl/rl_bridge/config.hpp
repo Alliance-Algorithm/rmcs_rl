@@ -37,6 +37,7 @@ struct BridgeConfig : PolicyIoConfig {
     bool enable_default = false;
     std::string reset_path;
     std::string flat_hold_path;
+    std::string context_path;
     double inference_timeout = 0.0;
     std::shared_ptr<PolicyWorker> policy_worker;
 };

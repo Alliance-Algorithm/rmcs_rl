@@ -4,9 +4,11 @@
 #include <condition_variable>
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <limits>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <span>
 #include <sstream>
 #include <stdexcept>
@@ -31,6 +33,80 @@
 
 namespace rmcs_rl {
 
+class PolicyActionPublisher final : public rmcs_executor::Component {
+public:
+    using Publish = std::function<void(std::optional<std::uint64_t>)>;
+
+    PolicyActionPublisher(const BridgeConfig& config, Publish publish)
+        : publish_(std::move(publish))
+        , reset_path_(config.reset_path) {
+        for (const auto& term : config.action_terms) {
+            action_outputs_.push_back(std::make_unique<OutputInterface<double>>());
+            register_output(term.output, *action_outputs_.back(), 0.0);
+            for (const auto& [suffix, value] :
+                 {std::pair{"/scale", term.scale},
+                  std::pair{
+                      "/clip_min",
+                      term.has_clip ? term.clip_min : -std::numeric_limits<double>::infinity()},
+                  std::pair{
+                      "/clip_max",
+                      term.has_clip ? term.clip_max : std::numeric_limits<double>::infinity()}}) {
+                contract_outputs_.push_back(std::make_unique<OutputInterface<double>>());
+                register_output(term.output + suffix, *contract_outputs_.back(), value);
+            }
+        }
+        register_output(config.rl_base + "/valid", valid_output_, 0.0);
+        register_output(config.rl_base + "/healthy", healthy_output_, 0.0);
+        register_output(
+            config.rl_base + "/action_age", action_age_output_,
+            std::numeric_limits<double>::quiet_NaN());
+        register_output(config.rl_base + "/obs_seq", obs_seq_output_, std::size_t{0});
+        register_output(config.rl_base + "/action_seq", action_seq_output_, std::size_t{0});
+        register_output(config.rl_base + "/action_context", action_context_output_, std::size_t{0});
+        register_output(config.rl_base + "/action_steady_ns", action_ns_output_, std::uint64_t{0});
+        register_output(
+            config.rl_base + "/observation_size", observation_size_output_, config.obs_size);
+        register_output(config.rl_base + "/action_size", action_size_output_, config.action_size);
+        register_output(
+            config.rl_base + "/history_length", history_length_output_, config.history_length);
+        register_output(
+            config.rl_base + "/feature_size", feature_size_output_, config.obs_frame_size);
+        register_output(config.rl_base + "/policy_rate", policy_rate_output_, config.policy_rate);
+        register_output(
+            config.rl_base + "/model_spec_sha256", model_spec_output_,
+            config.policy_worker->info().model_spec_sha256);
+        register_output(config.rl_base + "/performance/inference_us", inference_time_us_, 0.0);
+    }
+
+    void before_pairing(const OutputInfoMap& output_map) override {
+        if (!reset_path_.empty())
+            reset_slot_ = acquire_slot(
+                *this, reset_path_, {Binding::kSize, Binding::kInt, Binding::kDouble}, true,
+                output_map, slots_, "policy reset interface");
+    }
+
+    void update() override {
+        std::uint64_t count = 0;
+        const bool have_reset = reset_slot_ != kNoSlot && read_unsigned(slots_[reset_slot_], count);
+        publish_(have_reset ? std::optional{count} : std::nullopt);
+    }
+
+private:
+    friend class RlBridge;
+    Publish publish_;
+    std::string reset_path_;
+    std::vector<Slot> slots_;
+    std::size_t reset_slot_ = kNoSlot;
+    std::vector<std::unique_ptr<OutputInterface<double>>> action_outputs_, contract_outputs_;
+    OutputInterface<double> valid_output_, healthy_output_, action_age_output_, inference_time_us_;
+    OutputInterface<double> policy_rate_output_;
+    OutputInterface<std::string> model_spec_output_;
+    OutputInterface<std::size_t> obs_seq_output_, action_seq_output_, action_context_output_;
+    OutputInterface<std::uint64_t> action_ns_output_;
+    OutputInterface<std::size_t> observation_size_output_, action_size_output_;
+    OutputInterface<std::size_t> history_length_output_, feature_size_output_;
+};
+
 class RlBridge final
     : public rmcs_executor::Component
     , public rclcpp::Node {
@@ -45,28 +121,32 @@ public:
         , worker_(config_.policy_worker)
         , frame_buffer_(config_.obs_frame_size)
         , observation_buffer_(config_.obs_size)
+        , action_buffer_(config_.action_size)
         , result_buffer_{} {
         result_buffer_.action.reserve(config_.action_size);
 
-        for (const auto& term : config_.action_terms) {
-            action_outputs_.push_back(std::make_unique<OutputInterface<double>>());
-            register_output(term.output, *action_outputs_.back(), 0.0);
+        action_source_ = create_partner_component<PolicyActionPublisher>(
+            get_component_name() + "_actions", config_,
+            [this](std::optional<std::uint64_t> reset) { publish_actions_(reset); });
+        for (const auto& term : config_.action_terms)
             own_output_paths_.insert(term.output);
+        for (const auto& term : config_.obs_terms) {
+            for (std::size_t i = 0; i < term.dim; ++i) {
+                auto name = term.id;
+                if (term.dim > 1) {
+                    if (term.take == Take::kVector || term.take == Take::kGravity)
+                        name += std::string{"/"} + "xyz"[i];
+                    else if (!term.joint_names.empty())
+                        name += "/" + term.joint_names[i];
+                    else
+                        name += "/" + std::to_string(i);
+                }
+                observation_outputs_.push_back(std::make_unique<OutputInterface<double>>());
+                const auto path = config_.rl_base + "/observation/" + name;
+                register_output(path, *observation_outputs_.back(), 0.0);
+                own_output_paths_.insert(path);
+            }
         }
-        register_output(config_.rl_base + "/valid", valid_output_, 0.0);
-        register_output(config_.rl_base + "/healthy", healthy_output_, 0.0);
-        register_output(
-            config_.rl_base + "/action_age", action_age_output_,
-            std::numeric_limits<double>::quiet_NaN());
-        register_output(config_.rl_base + "/obs_seq", obs_seq_output_, std::size_t{0});
-        register_output(
-            config_.rl_base + "/observation_size", observation_size_output_, config_.obs_size);
-        register_output(config_.rl_base + "/action_size", action_size_output_, config_.action_size);
-        register_output(
-            config_.rl_base + "/history_length", history_length_output_, config_.history_length);
-        register_output(
-            config_.rl_base + "/feature_size", feature_size_output_, config_.obs_frame_size);
-        register_output(config_.rl_base + "/performance/inference_us", inference_time_us_, 0.0);
         own_output_paths_.insert(config_.rl_base + "/valid");
         own_output_paths_.insert(config_.rl_base + "/healthy");
         own_output_paths_.insert(config_.rl_base + "/action_age");
@@ -96,7 +176,6 @@ public:
 
     void update() override {
         const auto now = std::chrono::steady_clock::now();
-
         maybe_handle_reset_();
         const bool enabled = read_enable_();
         double flat_hold_value = 0.0;
@@ -112,6 +191,19 @@ public:
             reset_action_state(last_actions_, written_);
             history_.reset();
         }
+        if (enabled && timeline_.due(now, config_.pub_period))
+            maybe_submit_observation_(now);
+    }
+
+private:
+    void publish_actions_(std::optional<std::uint64_t> reset) {
+        const auto now = std::chrono::steady_clock::now();
+        if (reset && *reset != last_reset_count_) {
+            last_reset_count_ = *reset;
+            reset_runtime_();
+        }
+        const bool enabled = last_enabled_;
+        const bool flat_hold = last_flat_hold_;
         if (worker_->try_take(result_buffer_)) {
             if (result_buffer_.generation == generation_
                 && result_buffer_.sequence > action_sequence_
@@ -120,15 +212,12 @@ public:
                 action_generation_ = result_buffer_.generation;
                 action_submitted_at_ = result_buffer_.submitted_at;
                 action_completed_at_ = result_buffer_.completed_at;
+                action_context_ = result_buffer_.context;
                 std::copy(
                     result_buffer_.action.begin(), result_buffer_.action.end(),
                     action_buffer_.begin());
                 action_ready_ = true;
-                *inference_time_us_ = result_buffer_.inference_microseconds;
-                if (action_sequence_ != last_feedback_obs_seq_) {
-                    action_feedback_.store(action_submitted_at_, action_buffer_);
-                    last_feedback_obs_seq_ = action_sequence_;
-                }
+                *action_source_->inference_time_us_ = result_buffer_.inference_microseconds;
             } else if (result_buffer_.generation == generation_ && !result_buffer_.success) {
                 worker_failed_ = true;
                 action_ready_ = false;
@@ -154,25 +243,32 @@ public:
                         && age <= config_.max_action_age;
         const bool valid = enabled && !worker_failed_ && has_snapshot && fresh && seq_ok && finite;
 
-        // The action fed into history must match the flat-ground command that is executed.
-        if (valid && flat_hold) {
+        // History follows the clipped command that consumers can execute.
+        if (valid && flat_hold)
             std::fill(action_buffer_.begin(), action_buffer_.end(), 0.0);
-            if (action_sequence_ != last_feedback_obs_seq_) {
-                action_feedback_.store(action_submitted_at_, action_buffer_);
-                last_feedback_obs_seq_ = action_sequence_;
+        if (valid && action_sequence_ != last_feedback_obs_seq_) {
+            for (std::size_t i = 0; i < config_.action_size; ++i) {
+                const auto& term = config_.action_terms[i];
+                last_actions_[i] =
+                    term.scale == 0.0 ? 0.0 : map_action(action_buffer_[i], term) / term.scale;
             }
+            action_feedback_.store(action_submitted_at_, last_actions_);
+            last_feedback_obs_seq_ = action_sequence_;
         }
         write_actions(
             valid, std::span<const double>{action_buffer_}, config_.action_terms,
-            config_.invalid_mode, written_, action_outputs_);
+            config_.invalid_mode, written_, action_source_->action_outputs_);
 
-        *valid_output_ = valid ? 1.0 : 0.0;
-        *healthy_output_ = (worker_->healthy() && !worker_failed_ && fresh) ? 1.0 : 0.0;
-        *action_age_output_ = age;
-        *obs_seq_output_ = observation_sequence_;
-
-        if (enabled && timeline_.due(now, config_.pub_period))
-            maybe_submit_observation_(now);
+        *action_source_->valid_output_ = valid ? 1.0 : 0.0;
+        *action_source_->healthy_output_ = (worker_->healthy() && !worker_failed_) ? 1.0 : 0.0;
+        *action_source_->action_age_output_ = age;
+        *action_source_->obs_seq_output_ = observation_sequence_;
+        *action_source_->action_seq_output_ = action_sequence_;
+        *action_source_->action_context_output_ = action_context_;
+        *action_source_->action_ns_output_ =
+            static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                           action_submitted_at_.time_since_epoch())
+                                           .count());
 
         if (last_valid_ && !valid)
             reset_runtime_();
@@ -191,7 +287,6 @@ public:
         }
     }
 
-private:
     static std::size_t feedback_capacity_(const BridgeConfig& config) {
         if (config.history_period.count() == 0)
             return 2;
@@ -221,6 +316,10 @@ private:
             reset_slot_ = acquire_slot(
                 *this, config_.reset_path, {Binding::kSize, Binding::kInt, Binding::kDouble}, false,
                 output_map, slots_, "reset interface");
+        if (!config_.context_path.empty())
+            context_slot_ = acquire_slot(
+                *this, config_.context_path, {Binding::kSize, Binding::kInt}, true, output_map,
+                slots_, "policy context interface");
         if (!config_.flat_hold_path.empty())
             flat_hold_slot_ = acquire_slot(
                 *this, config_.flat_hold_path, {Binding::kBool, Binding::kDouble}, true, output_map,
@@ -246,9 +345,14 @@ private:
             observation_sequence_ = ++next_observation_sequence_;
             timeline_.publish(now, config_.pub_period);
             std::copy(stacked.begin(), stacked.end(), observation_buffer_.begin());
+            for (std::size_t i = 0; i < observation_outputs_.size(); ++i)
+                **observation_outputs_[i] = frame_buffer_[i];
+            std::uint64_t context = 0;
+            if (context_slot_ != kNoSlot && !read_unsigned(slots_[context_slot_], context))
+                throw std::runtime_error("RlBridge: invalid inference context");
             worker_->submit(
                 std::span<const double>{observation_buffer_}, observation_sequence_, generation_,
-                now);
+                now, context);
         } else {
             reset_runtime_();
             ++obs_invalid_count_;
@@ -310,20 +414,13 @@ private:
         last_feedback_obs_seq_ = 0;
         timeline_.reset();
         std::fill(action_buffer_.begin(), action_buffer_.end(), 0.0);
+        for (auto& output : observation_outputs_)
+            **output = 0.0;
     }
 
     std::vector<Slot> slots_;
-    std::vector<std::unique_ptr<OutputInterface<double>>> action_outputs_;
-
-    OutputInterface<double> valid_output_{};
-    OutputInterface<double> healthy_output_{};
-    OutputInterface<double> action_age_output_{};
-    OutputInterface<std::size_t> obs_seq_output_{};
-    OutputInterface<std::size_t> observation_size_output_;
-    OutputInterface<std::size_t> action_size_output_;
-    OutputInterface<std::size_t> history_length_output_;
-    OutputInterface<std::size_t> feature_size_output_;
-    OutputInterface<double> inference_time_us_;
+    std::vector<std::unique_ptr<OutputInterface<double>>> observation_outputs_;
+    std::shared_ptr<PolicyActionPublisher> action_source_;
 
     BridgeConfig config_;
     std::unordered_set<std::string> own_output_paths_;
@@ -331,6 +428,7 @@ private:
     std::size_t enable_slot_ = kNoSlot;
     std::size_t reset_slot_ = kNoSlot;
     std::size_t flat_hold_slot_ = kNoSlot;
+    std::size_t context_slot_ = kNoSlot;
 
     std::vector<double> last_actions_;
     std::vector<double> written_;
@@ -348,6 +446,7 @@ private:
     std::uint64_t next_observation_sequence_ = 0;
     std::uint64_t observation_sequence_ = 0;
     std::uint64_t action_sequence_ = 0;
+    std::uint64_t action_context_ = 0;
     std::uint64_t action_generation_ = 0;
     std::chrono::steady_clock::time_point action_submitted_at_{};
     std::chrono::steady_clock::time_point action_completed_at_{};

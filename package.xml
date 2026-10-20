@@ -6,7 +6,6 @@
   <description>RMCS generic RL policy deployment (ONNX Runtime CPU inference on the mini PC)</description>
   <maintainer email="alliance@njust.edu.cn">alliance</maintainer>
   <license>MIT</license>
-  <license>GPL-3.0-only</license>
 
   <buildtool_depend>ament_cmake</buildtool_depend>
 
