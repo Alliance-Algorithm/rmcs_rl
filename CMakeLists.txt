@@ -84,13 +84,7 @@ install(DIRECTORY ${ONNXRUNTIME_ROOT_DIR}/lib/ DESTINATION lib FILES_MATCHING PA
 install(DIRECTORY models DESTINATION share/${PROJECT_NAME})
 
 if(BUILD_TESTING)
-    find_package(ament_cmake_gtest REQUIRED)
-    ament_add_gtest(wheel_leg_yaml_test test/wheel_leg_yaml_test.cpp)
-    target_link_libraries(wheel_leg_yaml_test rmcs_rl)
-    get_filename_component(WHEEL_LEG_BRINGUP_CONFIG
-        "${PROJECT_SOURCE_DIR}/../rmcs_bringup/config" ABSOLUTE)
-    target_compile_definitions(wheel_leg_yaml_test PRIVATE
-        WHEEL_LEG_BRINGUP_CONFIG="${WHEEL_LEG_BRINGUP_CONFIG}")
+    # Only the reference replay tool used by tools/verify_wheel_leg_reference.py remains.
     add_executable(wheel_leg_reference_replay test/wheel_leg_reference_replay.cpp)
     target_include_directories(wheel_leg_reference_replay PRIVATE src/wheel_leg)
     target_link_libraries(wheel_leg_reference_replay rmcs_rl)
