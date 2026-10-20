@@ -134,14 +134,12 @@ protected:
     }
 };
 
-TEST_F(WheelLegYaml, BothVehicleProfilesLoadTheRealActorAndPairInputs) {
-    for (const auto* profile : {"wheel-leg-infantry-rl.yaml", "wheel-leg-infantry-recovery.yaml"}) {
-        rmcs_executor::Component::initializing_component_name = "rl_controller";
-        RlController c{options(profile)};
-        EXPECT_NO_THROW(c.before_pairing({}));
-        EXPECT_EQ(Access::io(c).obs_size, 35u);
-        EXPECT_EQ(Access::model(c).info().action_size, 6u);
-    }
+TEST_F(WheelLegYaml, RecoveryProfileLoadsTheRealActorAndPairInputs) {
+    rmcs_executor::Component::initializing_component_name = "rl_controller";
+    RlController c{options("wheel-leg-infantry-recovery.yaml")};
+    EXPECT_NO_THROW(c.before_pairing({}));
+    EXPECT_EQ(Access::io(c).obs_size, 35u);
+    EXPECT_EQ(Access::model(c).info().action_size, 6u);
 }
 
 TEST_F(WheelLegYaml, ObservationMatchesDeployed35FeaturesAcrossEncoderTurns) {
