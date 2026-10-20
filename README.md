@@ -64,7 +64,7 @@ compatibility checks at startup.
 
 ## Wheel-leg YAML interface
 
-The bringup profile `wheel-leg-infantry-recovery.yaml` keeps the real-vehicle hardware,
+The bringup profile `wheel-leg-infantry.yaml` keeps the real-vehicle hardware,
 calibration, paired leg winding and native recovery settings.
 Its `rl_controller` block now declares the same policy terms as `RlBridge`:
 

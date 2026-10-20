@@ -14,7 +14,7 @@ Compared on 2026-10-19 after fetching the parent repository:
 | Deformable / YAML design | `2120d5e5b89230b3adbb1a30646ef8112bb567bc` |
 | Deformable reference submodule | `f98953f7b4daa5da14d82b25cb92f7721cda81cb` |
 
-The vehicle entry point is `rmcs_bringup/config/wheel-leg-infantry-recovery.yaml`.
+The vehicle entry point is `rmcs_bringup/config/wheel-leg-infantry.yaml`.
 It selects `models/wheel_leg/recovery_candidate.onnx`, whose SHA256 is
 `a00d13df1d4113fe949c2a6a15b508e5c491fd1a5e6881570bf025a8d3c29c29`.
 The YAML filename is a deployment profile; the ONNX file contains the actor weights.

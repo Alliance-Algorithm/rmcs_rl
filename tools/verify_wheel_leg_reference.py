@@ -36,8 +36,8 @@ def verify_files(root, reference):
     def source(path):
         return run(["git", "show", f"{reference}:{path}"], cwd=root)
 
-    original = yaml.safe_load(source(CONFIG + "wheel-leg-infantry-recovery.yaml"))
-    current = yaml.safe_load((root / CONFIG / "wheel-leg-infantry-recovery.yaml").read_text())
+    original = yaml.safe_load(source(CONFIG + "wheel-leg-infantry.yaml"))
+    current = yaml.safe_load((root / CONFIG / "wheel-leg-infantry.yaml").read_text())
     for name in ("wheel_leg", "wheel_leg_chassis_controller"):
         require(original[name] == current[name], f"{name} parameters differ from {reference}")
     expected = original["rl_controller"]["ros__parameters"]
