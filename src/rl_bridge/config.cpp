@@ -79,6 +79,12 @@ BridgeConfig load_bridge_config(rclcpp::Node& node) {
         throw std::invalid_argument("RlBridge: policy_rate must be finite and > 0");
     config.pub_period = std::chrono::duration_cast<std::chrono::nanoseconds>(
         std::chrono::duration<double>(1.0 / config.policy_rate));
+    const double history_rate = number_or(node, "history_rate", config.policy_rate);
+    if (!is_finite(history_rate) || history_rate <= 0.0 || history_rate > config.policy_rate)
+        throw std::invalid_argument("RlBridge: history_rate must be finite, positive and <= policy_rate");
+    if (history_rate != config.policy_rate)
+        config.history_period = std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::duration<double>(1.0 / history_rate));
     config.max_action_age = number_or(node, "max_action_age", 2.0 / config.policy_rate);
     if (!(config.max_action_age > 0.0) || !is_finite(config.max_action_age))
         throw std::invalid_argument("RlBridge: max_action_age must be finite and > 0");
@@ -100,6 +106,8 @@ BridgeConfig load_bridge_config(rclcpp::Node& node) {
     config.enable_path = string_or(node, "enable_interface", config.rl_base + "/enable");
     config.enable_default = bool_or(node, "enable_default", false);
     config.reset_path = string_or(node, "reset_interface", "");
+    config.expected_model_id = parse_u64(string_or(node, "expected_model_id", "0"), "expected_model_id");
+    config.flat_hold_path = string_or(node, "flat_hold_interface", "");
     return config;
 }
 

@@ -22,6 +22,7 @@
 #include <rmcs_rl/msg/observation.hpp>
 
 #include <rmcs_rl/rl_bridge/action_channel.hpp>
+#include <rmcs_rl/rl_bridge/action_feedback_history.hpp>
 #include <rmcs_rl/rl_bridge/config.hpp>
 #include <rmcs_rl/rl_bridge/interface_binding.hpp>
 #include <rmcs_rl/rl_bridge/joint_config.hpp>
@@ -43,7 +44,8 @@ public:
               get_component_name(),
               rclcpp::NodeOptions{}.automatically_declare_parameters_from_overrides(true))
         , config_(load_bridge_config(*this))
-        , history_(config_.obs_frame_size, config_.history_length) {
+        , history_(config_.obs_frame_size, config_.history_length, config_.history_period)
+        , action_feedback_(config_.action_size) {
 
         for (const auto& term : config_.action_terms) {
             action_outputs_.push_back(std::make_unique<OutputInterface<double>>());
@@ -100,7 +102,22 @@ public:
         const auto now = std::chrono::steady_clock::now();
 
         maybe_handle_reset_();
-        maybe_publish_observation_(now);
+        const bool enabled = read_enable_();
+        double flat_hold_value = 0.0;
+        const bool flat_hold = flat_hold_slot_ != kNoSlot
+            && read_double(slots_[flat_hold_slot_], flat_hold_value)
+            && std::isfinite(flat_hold_value) && flat_hold_value != 0.0;
+        if (enabled != last_enabled_ || flat_hold != last_flat_hold_) {
+            reset_runtime_();
+            last_enabled_ = enabled;
+            last_flat_hold_ = flat_hold;
+        }
+        if (!enabled) {
+            reset_action_state(last_actions_, written_);
+            history_.reset();
+        }
+        if (enabled)
+            maybe_publish_observation_(now);
 
         ActionSnapshot& snapshot = read_snapshot_;
         const bool has_snapshot = action_channel_.try_read(snapshot);
@@ -117,21 +134,33 @@ public:
             check_contract_(snapshot);
         }
 
-        const bool enabled = read_enable_();
         const bool fresh = has_snapshot && is_finite(age) && age <= config_.max_action_age;
         const bool valid = enabled && contract_ok_ && has_snapshot && fresh && seq_ok && finite;
 
+        // The action fed into history must match the flat-ground command that is executed.
+        if (valid && flat_hold)
+            std::fill(snapshot.action.begin(), snapshot.action.end(), 0.0);
         write_actions(
             valid, snapshot, config_.action_terms, config_.invalid_mode, written_, action_outputs_);
 
-        if (valid)
-            last_actions_ = snapshot.action;
+        if (valid) {
+            if (config_.history_period.count() == 0) {
+                last_actions_ = snapshot.action;
+            } else if (snapshot.obs_seq != last_feedback_obs_seq_) {
+                const auto observation_time = now - std::chrono::duration_cast<std::chrono::nanoseconds>(
+                    std::chrono::duration<double>(age));
+                action_feedback_.store(observation_time, snapshot.action);
+                last_feedback_obs_seq_ = snapshot.obs_seq;
+            }
+        }
 
         *valid_output_ = valid ? 1.0 : 0.0;
         *healthy_output_ = (contract_ok_ && fresh) ? 1.0 : 0.0;
         *action_age_output_ = age;
         *obs_seq_output_ = timeline_.sequence();
 
+        if (last_valid_ && !valid)
+            reset_runtime_();
         if (valid != last_valid_) {
             if (valid) {
                 RCLCPP_INFO(
@@ -212,6 +241,10 @@ private:
             reset_slot_ = acquire_slot(
                 *this, config_.reset_path, {Binding::kSize, Binding::kInt, Binding::kDouble}, false,
                 output_map, slots_, "reset interface");
+        if (!config_.flat_hold_path.empty())
+            flat_hold_slot_ = acquire_slot(
+                *this, config_.flat_hold_path, {Binding::kBool, Binding::kDouble}, true,
+                output_map, slots_, "flat hold interface");
     }
 
     void maybe_handle_reset_() {
@@ -229,10 +262,13 @@ private:
             return;
 
         std::vector<double> obs;
+        if (config_.history_period.count() > 0)
+            last_actions_ = action_feedback_.sample(now, config_.history_period);
         if (build_observation(
                 config_.obs_terms, slots_, last_actions_, config_.obs_frame_size, obs)) {
-            publish_observation_(history_.append(obs), now);
+            publish_observation_(history_.append(obs, now), now);
         } else {
+            reset_runtime_();
             ++obs_invalid_count_;
             RCLCPP_WARN_THROTTLE(
                 get_logger(), *get_clock(), 1000,
@@ -252,6 +288,12 @@ private:
     }
 
     void check_contract_(const ActionSnapshot& snapshot) {
+        if (config_.expected_model_id != 0 && snapshot.model_id != config_.expected_model_id) {
+            if (contract_ok_)
+                RCLCPP_FATAL(get_logger(), "model mismatch: action model_id=%s != expected_model_id=%s",
+                    hex16(snapshot.model_id).c_str(), hex16(config_.expected_model_id).c_str());
+            contract_ok_ = false;
+        }
         if (snapshot.layout_hash != layout_hash_) {
             if (contract_ok_) {
                 contract_ok_ = false;
@@ -298,7 +340,7 @@ private:
         const std::vector<double>& obs, std::chrono::steady_clock::time_point now) {
         rmcs_rl::msg::Observation message;
         message.header.stamp = get_clock()->now();
-        message.obs_seq = timeline_.publish(now);
+        message.obs_seq = timeline_.publish(now, config_.pub_period);
         message.layout_hash = layout_hash_;
         message.obs = obs;
         obs_publisher_->publish(message);
@@ -317,6 +359,8 @@ private:
     void reset_runtime_() {
         reset_action_state(last_actions_, written_);
         history_.reset();
+        action_feedback_.reset();
+        last_feedback_obs_seq_ = 0;
         timeline_.reset();
     }
 
@@ -333,6 +377,7 @@ private:
 
     std::size_t enable_slot_ = kNoSlot;
     std::size_t reset_slot_ = kNoSlot;
+    std::size_t flat_hold_slot_ = kNoSlot;
 
     std::string obs_signature_;
     std::string actions_signature_;
@@ -341,12 +386,16 @@ private:
     std::vector<double> last_actions_;
     std::vector<double> written_;
     ObservationHistory history_;
+    ActionFeedbackHistory action_feedback_;
+    std::uint64_t last_feedback_obs_seq_ = 0;
 
     ObservationTimeline timeline_;
     std::uint64_t last_reset_count_ = 0;
     std::uint64_t obs_invalid_count_ = 0;
     bool contract_ok_ = true;
     bool last_valid_ = false;
+    bool last_enabled_ = false;
+    bool last_flat_hold_ = false;
 
     ActionChannel action_channel_;
     ActionSnapshot read_snapshot_;
