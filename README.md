@@ -11,6 +11,7 @@ channel routing, target scaling and clipping. `history_length`, optional
 
 The loader checks tensor types, ranks, dimensions and a trial inference. The
 paired-107 wheel-leg profile also validates model-spec and winding metadata.
+When ONNX supplies `policy_hz`, the loader rejects a different YAML `policy_rate`.
 Observation normalization metadata is optional numerical preprocessing.
 
 `RlBridge` creates a policy worker thread and an RMCS action publisher partner.
@@ -42,10 +43,18 @@ Recovery JSON assets and the original GPL license are in `rmcs_core`.
 
 ```sh
 colcon build --merge-install --symlink-install --packages-select rmcs_rl rmcs_core rmcs_bringup --cmake-args -DBUILD_TESTING=ON
-colcon test --merge-install --packages-select rmcs_core
-python3 src/rmcs_core/tools/verify_wheel_leg_reference.py --reference origin/dev/wheel_leg_rl
+colcon test --merge-install --packages-select rmcs_rl rmcs_core
+python3 src/rmcs_core/tools/verify_wheel_leg_reference.py --reference origin/dev/wheel_leg_rl --policy-receipt src/rmcs_rl/models/wheel_leg/flat_directional200_1346_preview_20261020.deployment.json
 ```
 
 The integration test constructs only in-memory snapshots and production software
 components. Replay checks recovery and model parity against an explicit fetched
 RMCS branch. Neither is vehicle or timing acceptance.
+
+The directional wheel-leg preview uses 200 Hz policy / 1000 Hz feedback and
+15 ms action expiry. `tool/prepare_wheel_leg_model.py` validates its source preview
+package, training contract, mechanical model and YAML layout before stamping
+the missing paired-107/layout metadata. It preserves graph bytes and compares
+256 batch-one inferences, recording the final SHA256 in `.deployment.json`.
+Without `--stamp` it checks an already prepared deployment. The original
+preview package remains unchanged and the candidate remains unqualified.

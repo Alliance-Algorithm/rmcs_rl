@@ -28,6 +28,7 @@ struct PolicyConfig {
     std::optional<double> obs_clip;
     std::optional<double> action_clip;
     std::map<std::string, PolicyExtraInput> extra_input_values;
+    double expected_policy_rate = 0.0;
 };
 
 } // namespace rmcs_rl

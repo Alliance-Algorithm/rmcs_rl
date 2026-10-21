@@ -58,6 +58,15 @@ PolicyModel::PolicyModel(const Config& config)
     info_.output_rank = runtime_.info().output_rank;
     info_.sequence_length = runtime_.info().sequence_length;
     info_.feature_size = runtime_.info().feature_size;
+    if (!std::isfinite(config.expected_policy_rate) || config.expected_policy_rate < 0.0)
+        throw std::invalid_argument("expected policy rate must be finite and non-negative");
+    if (const auto rate = runtime_.metadata("policy_hz")) {
+        const double model_rate = parse_number(*rate, "policy_hz");
+        if (model_rate <= 0.0
+            || (config.expected_policy_rate > 0.0
+                && std::abs(model_rate - config.expected_policy_rate) > 1e-6))
+            throw std::invalid_argument("model policy_hz metadata does not match policy_rate");
+    }
     load_normalization(config);
     obs_buffer_.resize(info_.obs_size);
     action_buffer_.resize(info_.action_size);
