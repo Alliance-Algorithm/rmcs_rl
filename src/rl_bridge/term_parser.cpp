@@ -27,8 +27,7 @@ ObsTerm finish_common(
                 + spec + "')");
         term.default_value = parse_double(default_value->second, "default");
         if (!is_finite(term.default_value))
-            throw std::invalid_argument(
-                "RlBridge: default must be finite (term '" + spec + "')");
+            throw std::invalid_argument("RlBridge: default must be finite (term '" + spec + "')");
         term.has_default = true;
     }
 
@@ -103,7 +102,8 @@ ObsTerm parse_obs_term(const std::string& spec, const TermParseContext& context)
     if (type == "last_action") {
         term.kind = TermKind::kLastAction;
         if (const auto indices = tokens.find("indices"); indices != tokens.end())
-            term.action_indices = parse_index_list(indices->second, context.action_size, "last_action");
+            term.action_indices =
+                parse_index_list(indices->second, context.action_size, "last_action");
         else
             for (std::size_t i = 0; i < context.action_size; ++i)
                 term.action_indices.push_back(i);
@@ -186,11 +186,24 @@ ObsTerm parse_obs_term(const std::string& spec, const TermParseContext& context)
         term.take = Take::kGravity;
         term.id = "gravity:" + term.path;
         term.dim = 3;
+    } else if (take == "array") {
+        const auto dimension = tokens.find("dim");
+        if (dimension == tokens.end())
+            throw std::invalid_argument("RlBridge: take=array requires dim= (term '" + spec + "')");
+        const auto count = parse_integer(dimension->second, "array dimension");
+        if (count < 1 || count > 4096)
+            throw std::invalid_argument("RlBridge: array dimension must be in [1, 4096]");
+        term.take = Take::kArray;
+        term.id = "array:" + term.path;
+        term.dim = static_cast<std::size_t>(count);
     } else {
         throw std::invalid_argument(
             "RlBridge: unknown take='" + take
-            + "' (use x|y|z|vec3|gravity, or omit for scalar) (term '" + spec + "')");
+            + "' (use x|y|z|vec3|gravity|array, or omit for scalar) (term '" + spec + "')");
     }
+
+    if (tokens.contains("dim") && term.take != Take::kArray)
+        throw std::invalid_argument("RlBridge: dim= is only valid with take=array");
 
     if (!type.empty()) {
         term.has_binding = true;
@@ -208,19 +221,22 @@ ObsTerm parse_obs_term(const std::string& spec, const TermParseContext& context)
             term.binding = Binding::kDirectionVector;
         } else if (type == "quaternion") {
             term.binding = Binding::kQuaternion;
+        } else if (type == "double_array") {
+            term.binding = Binding::kDoubleArray;
         } else {
             throw std::invalid_argument(
                 "RlBridge: unknown type='" + type + "' (term '" + spec + "')");
         }
-        const bool scalar_binding = term.binding == Binding::kDouble || term.binding == Binding::kBool
-                                  || term.binding == Binding::kInt || term.binding == Binding::kSize;
+        const bool scalar_binding = term.binding == Binding::kDouble
+                                 || term.binding == Binding::kBool || term.binding == Binding::kInt
+                                 || term.binding == Binding::kSize;
         const bool vector_binding =
             term.binding == Binding::kVector3 || term.binding == Binding::kDirectionVector;
         if (term.take == Take::kScalar && !scalar_binding)
             throw std::invalid_argument(
                 "RlBridge: type=" + type
-                + " needs take=vec3 or take=x|y|z (a whole vector is not a scalar) (term '"
-                + spec + "')");
+                + " needs take=vec3 or take=x|y|z (a whole vector is not a scalar) (term '" + spec
+                + "')");
         if ((term.take == Take::kComponent || term.take == Take::kVector) && !vector_binding)
             throw std::invalid_argument(
                 "RlBridge: take=" + take
@@ -232,10 +248,13 @@ ObsTerm parse_obs_term(const std::string& spec, const TermParseContext& context)
                 "RlBridge: transform=projected_gravity needs "
                 "type=quaternion (term '"
                 + spec + "')");
+        if (term.take == Take::kArray && term.binding != Binding::kDoubleArray)
+            throw std::invalid_argument("RlBridge: take=array requires type=double_array");
     }
 
     validate_tokens(
-        tokens, {"path", "take", "transform", "type", "index", "scale", "clip", "default", "name"},
+        tokens,
+        {"path", "take", "transform", "type", "dim", "index", "scale", "clip", "default", "name"},
         spec);
     return finish_common(term, tokens, spec);
 }
@@ -258,10 +277,12 @@ ActionTerm parse_action_term(const std::string& spec) {
     term.output = output->second;
     term.id = string_token(tokens, "name", term.output);
     if (term.id.empty())
-        throw std::invalid_argument("RlBridge: action name= must not be empty (term '" + spec + "')");
+        throw std::invalid_argument(
+            "RlBridge: action name= must not be empty (term '" + spec + "')");
     term.scale = double_token(tokens, "scale", 1.0, spec);
     if (term.scale == 0.0)
-        throw std::invalid_argument("RlBridge: action scale=0 is not allowed (term '" + spec + "')");
+        throw std::invalid_argument(
+            "RlBridge: action scale=0 is not allowed (term '" + spec + "')");
     parse_clip(tokens, spec, term.has_clip, term.clip_min, term.clip_max);
     validate_tokens(tokens, {"index", "output", "name", "scale", "clip"}, spec);
     return term;

@@ -62,4 +62,51 @@ TEST(WheelLegPolicyContract, RejectsDifferentObservationHistory) {
     config.observation_size = 70;
     EXPECT_THROW(rmcs_rl::PolicyModel{config}, std::invalid_argument);
 }
+
+TEST(WheelLegPolicyContract, RejectsMissingStandingObservationContract) {
+    auto config = configuration();
+    config.expected_observation_contract_sha256 =
+        "db0fc6121c73121dcd39eef0524ecfeab4b3aa69aa7f5700d4205499af2402a9";
+    EXPECT_THROW(rmcs_rl::PolicyModel{config}, std::invalid_argument);
+}
+
+rmcs_rl::PolicyConfig unified_configuration() {
+    auto config = configuration();
+    config.path = ament_index_cpp::get_package_share_directory("rmcs_rl")
+                + "/models/wheel_leg/self_wake_V1.0.onnx";
+    config.expected_observation_contract_sha256 =
+        "db0fc6121c73121dcd39eef0524ecfeab4b3aa69aa7f5700d4205499af2402a9";
+    return config;
+}
+
+TEST(UnifiedPolicyContract, RunsExactSelfRightingModel) {
+    rmcs_rl::PolicyModel model{unified_configuration()};
+    EXPECT_EQ(
+        model.info().observation_contract_sha256,
+        unified_configuration().expected_observation_contract_sha256);
+    std::array<double, 35> observation{};
+    observation[3] = .305 * 5;
+    observation[9] = 1; // Inverted body is a valid input for the unified actor.
+    observation[28] = 1;
+    std::array<double, 6> action{};
+    std::string error;
+    ASSERT_TRUE(model.run(observation, action, error)) << error;
+    for (std::size_t i = 0; i < action.size(); ++i) {
+        EXPECT_TRUE(std::isfinite(action[i]));
+        EXPECT_LE(std::abs(action[i]), i < 4 ? 16.0 : 9.0);
+    }
+}
+
+TEST(UnifiedPolicyContract, RejectsWrongObservationContractRateAndHistory) {
+    auto config = unified_configuration();
+    config.expected_observation_contract_sha256 = std::string(64, '0');
+    EXPECT_THROW(rmcs_rl::PolicyModel{config}, std::invalid_argument);
+    config = unified_configuration();
+    config.expected_policy_rate = 50.0;
+    EXPECT_THROW(rmcs_rl::PolicyModel{config}, std::invalid_argument);
+    config = unified_configuration();
+    config.sequence_length = 2;
+    config.observation_size = 70;
+    EXPECT_THROW(rmcs_rl::PolicyModel{config}, std::invalid_argument);
+}
 } // namespace

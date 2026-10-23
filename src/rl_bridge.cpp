@@ -28,6 +28,7 @@
 #include <rmcs_rl/rl_bridge/interface_binding.hpp>
 #include <rmcs_rl/rl_bridge/joint_config.hpp>
 #include <rmcs_rl/rl_bridge/observation.hpp>
+#include <rmcs_rl/rl_bridge/observation_frame_gate.hpp>
 #include <rmcs_rl/rl_bridge/types.hpp>
 #include <rmcs_rl/rl_bridge/utility.hpp>
 
@@ -75,6 +76,16 @@ public:
         register_output(
             config.rl_base + "/model_spec_sha256", model_spec_output_,
             config.policy_worker->info().model_spec_sha256);
+        register_output(
+            config.rl_base + "/observation_contract_sha256", observation_contract_output_,
+            config.policy_worker->info().observation_contract_sha256);
+        register_output(
+            config.rl_base + "/observation_frame_sequence_interface", frame_sequence_path_output_,
+            config.observation_frame_sequence_path);
+        register_output(
+            config.rl_base + "/observation_frame_interface", frame_path_output_,
+            config.observation_frame_sequence_path.empty() ? std::string{}
+                                                           : config.obs_terms.front().path);
         register_output(config.rl_base + "/performance/inference_us", inference_time_us_, 0.0);
     }
 
@@ -100,7 +111,8 @@ private:
     std::vector<std::unique_ptr<OutputInterface<double>>> action_outputs_, contract_outputs_;
     OutputInterface<double> valid_output_, healthy_output_, action_age_output_, inference_time_us_;
     OutputInterface<double> policy_rate_output_;
-    OutputInterface<std::string> model_spec_output_;
+    OutputInterface<std::string> model_spec_output_, observation_contract_output_;
+    OutputInterface<std::string> frame_sequence_path_output_, frame_path_output_;
     OutputInterface<std::size_t> obs_seq_output_, action_seq_output_, action_context_output_;
     OutputInterface<std::uint64_t> action_ns_output_;
     OutputInterface<std::size_t> observation_size_output_, action_size_output_;
@@ -138,6 +150,8 @@ public:
                         name += std::string{"/"} + "xyz"[i];
                     else if (!term.joint_names.empty())
                         name += "/" + term.joint_names[i];
+                    else if (term.take == Take::kArray)
+                        name += "/element_" + std::to_string(i);
                     else
                         name += "/" + std::to_string(i);
                 }
@@ -191,8 +205,18 @@ public:
             reset_action_state(last_actions_, written_);
             history_.reset();
         }
-        if (enabled && timeline_.due(now, config_.pub_period))
-            maybe_submit_observation_(now);
+        if (enabled) {
+            if (frame_sequence_slot_ != kNoSlot) {
+                const auto& sequence = slots_[frame_sequence_slot_].size_value;
+                const auto decision = frame_gate_.observe(sequence->ready() ? **sequence : 0);
+                if (decision == ObservationFrameGate::Decision::kSubmit)
+                    maybe_submit_observation_(now);
+                else if (decision == ObservationFrameGate::Decision::kReset)
+                    reset_runtime_(false);
+            } else if (timeline_.due(now, config_.pub_period)) {
+                maybe_submit_observation_(now);
+            }
+        }
     }
 
 private:
@@ -271,7 +295,7 @@ private:
                                            .count());
 
         if (last_valid_ && !valid)
-            reset_runtime_();
+            reset_runtime_(false);
         if (valid != last_valid_) {
             if (valid) {
                 RCLCPP_INFO(
@@ -307,6 +331,10 @@ private:
     }
 
     void bind_control_slots_(const OutputInfoMap& output_map) {
+        if (!config_.observation_frame_sequence_path.empty())
+            frame_sequence_slot_ = acquire_slot(
+                *this, config_.observation_frame_sequence_path, {Binding::kSize}, true, output_map,
+                slots_, "observation frame sequence interface");
         if (!config_.enable_path.empty())
             enable_slot_ = acquire_slot(
                 *this, config_.enable_path, {Binding::kBool, Binding::kDouble}, false, output_map,
@@ -354,7 +382,7 @@ private:
                 std::span<const double>{observation_buffer_}, observation_sequence_, generation_,
                 now, context);
         } else {
-            reset_runtime_();
+            reset_runtime_(false);
             ++obs_invalid_count_;
             RCLCPP_WARN_THROTTLE(
                 get_logger(), *get_clock(), 1000,
@@ -403,7 +431,9 @@ private:
         }
     }
 
-    void reset_runtime_() {
+    void reset_runtime_(bool reset_frame_gate = true) {
+        if (reset_frame_gate)
+            frame_gate_.reset();
         ++generation_;
         action_ready_ = false;
         observation_sequence_ = next_observation_sequence_;
@@ -429,6 +459,7 @@ private:
     std::size_t reset_slot_ = kNoSlot;
     std::size_t flat_hold_slot_ = kNoSlot;
     std::size_t context_slot_ = kNoSlot;
+    std::size_t frame_sequence_slot_ = kNoSlot;
 
     std::vector<double> last_actions_;
     std::vector<double> written_;
@@ -436,6 +467,7 @@ private:
     ActionFeedbackHistory action_feedback_;
     std::shared_ptr<PolicyWorker> worker_;
     ObservationTimeline timeline_;
+    ObservationFrameGate frame_gate_;
     std::vector<double> frame_buffer_;
     std::vector<double> observation_buffer_;
     std::vector<double> action_buffer_;

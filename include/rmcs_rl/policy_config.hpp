@@ -20,6 +20,7 @@ struct PolicyConfig {
     std::string model_type = "auto";
     std::string expected_model_spec_sha256;
     std::string expected_leg_winding_version;
+    std::string expected_observation_contract_sha256;
     std::size_t sequence_length = 0;
     std::size_t feature_size = 0;
     std::size_t observation_size = 0;

@@ -18,7 +18,7 @@ inline constexpr std::size_t kNoSlot = std::numeric_limits<std::size_t>::max();
 
 enum class TermKind { kPath, kJointPos, kJointVel, kJointTorque, kLastAction, kConstant };
 
-enum class Take { kScalar, kComponent, kVector, kGravity };
+enum class Take { kScalar, kComponent, kVector, kGravity, kArray };
 
 enum class Binding {
     kDouble,
@@ -28,6 +28,7 @@ enum class Binding {
     kVector3,
     kDirectionVector,
     kQuaternion,
+    kDoubleArray,
 };
 
 enum class InvalidMode { kNaN, kZero, kHold };
@@ -88,6 +89,7 @@ struct Slot {
         rmcs_executor::Component::InputInterface<rmcs_description::BaseLink::DirectionVector>>
         direction_vector_value;
     std::unique_ptr<rmcs_executor::Component::InputInterface<Eigen::Quaterniond>> quaternion_value;
+    std::unique_ptr<rmcs_executor::Component::InputInterface<std::vector<double>>> array_value;
 };
 
 } // namespace rmcs_rl

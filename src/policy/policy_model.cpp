@@ -51,6 +51,11 @@ PolicyModel::PolicyModel(const Config& config)
               config.action_size, config.extra_input_values}) {
     info_.path = config.path;
     info_.model_spec_sha256 = runtime_.info().model_spec_sha256;
+    info_.observation_contract_sha256 =
+        runtime_.metadata("rmcs_observation_contract_sha256").value_or("");
+    if (!config.expected_observation_contract_sha256.empty()
+        && info_.observation_contract_sha256 != config.expected_observation_contract_sha256)
+        throw std::invalid_argument("model observation contract does not match its preprocessor");
     info_.obs_size = runtime_.input_size();
     info_.action_size = runtime_.output_size();
     info_.model_type = runtime_.info().model_type;
@@ -60,7 +65,10 @@ PolicyModel::PolicyModel(const Config& config)
     info_.feature_size = runtime_.info().feature_size;
     if (!std::isfinite(config.expected_policy_rate) || config.expected_policy_rate < 0.0)
         throw std::invalid_argument("expected policy rate must be finite and non-negative");
-    if (const auto rate = runtime_.metadata("policy_hz")) {
+    const auto rate = runtime_.metadata("policy_hz");
+    if (!config.expected_observation_contract_sha256.empty() && !rate)
+        throw std::invalid_argument("explicit observation contract requires policy_hz metadata");
+    if (rate) {
         const double model_rate = parse_number(*rate, "policy_hz");
         if (model_rate <= 0.0
             || (config.expected_policy_rate > 0.0

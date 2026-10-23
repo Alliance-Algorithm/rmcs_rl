@@ -30,6 +30,8 @@ bool build_observation(
     };
 
     for (const auto& term : terms) {
+        if (term.index > obs_size || term.dim > obs_size - term.index)
+            return false;
         bool ok = true;
         switch (term.kind) {
         case TermKind::kPath: {
@@ -39,6 +41,8 @@ bool build_observation(
                     term.clip_max, ok);
                 break;
             }
+            if (term.slot >= slots.size())
+                return false;
             const auto& entry = slots[term.slot];
             if (term.take == Take::kScalar) {
                 double value = 0.0;
@@ -77,6 +81,17 @@ bool build_observation(
                             term.index + i, value[static_cast<Eigen::Index>(i)], term.scale,
                             term.has_clip, term.clip_min, term.clip_max, ok);
                 }
+            } else if (term.take == Take::kArray) {
+                if (entry.binding != Binding::kDoubleArray || !entry.array_value
+                    || !entry.array_value->ready())
+                    return false;
+                const auto& values = **entry.array_value;
+                if (values.size() != term.dim)
+                    return false;
+                for (std::size_t i = 0; i < term.dim; ++i)
+                    push(
+                        term.index + i, values[i], term.scale, term.has_clip, term.clip_min,
+                        term.clip_max, ok);
             } else {
                 if (!entry.quaternion_value->ready())
                     return false;

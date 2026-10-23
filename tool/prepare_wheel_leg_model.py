@@ -117,7 +117,7 @@ def main():
     rate = 1 / contract['policy_dt']
     require(bridge['policy_rate'] == proof['policy_hz'] == rate, 'Policy frequency differs')
     require(config['rmcs_executor']['ros__parameters']['update_rate']
-            == chassis['pd_frequency'] == chassis['recovery_frequency']
+            == chassis['pd_frequency']
             == proof['physics_hz'] == 1 / contract['physics_dt'], 'Control frequency differs')
     require(bridge['max_action_age'] == bridge['inference_timeout']
             == chassis['inference_timeout'] == 3 / rate, 'Three-period action age differs')

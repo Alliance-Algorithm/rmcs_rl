@@ -124,6 +124,19 @@ BridgeConfig load_bridge_config(rclcpp::Node& node) {
     config.reset_path = string_or(node, "reset_interface", "");
     config.flat_hold_path = string_or(node, "flat_hold_interface", "");
     config.context_path = string_or(node, "context_interface", "");
+    config.observation_frame_sequence_path =
+        string_or(node, "observation_frame_sequence_interface", "");
+    if (!config.observation_frame_sequence_path.empty()) {
+        if (config.history_length != 1 || config.obs_terms.size() != 1)
+            throw std::invalid_argument(
+                "RlBridge: external frames require one array and history_length=1");
+        const auto& frame = config.obs_terms.front();
+        if (frame.kind != TermKind::kPath || frame.take != Take::kArray || frame.index != 0
+            || frame.dim != config.obs_frame_size || frame.scale != 1.0 || frame.has_clip
+            || config.history_period.count() != 0)
+            throw std::invalid_argument(
+                "RlBridge: external frame must be a complete unscaled array");
+    }
     config.inference_timeout = number_or(node, "inference_timeout", 2.0 / config.policy_rate);
     if (!is_finite(config.inference_timeout) || config.inference_timeout <= 0.0)
         throw std::invalid_argument("RlBridge: inference_timeout must be finite and > 0");

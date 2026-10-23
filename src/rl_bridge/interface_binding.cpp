@@ -44,6 +44,7 @@ void bind_observation_terms(
                     candidates = {Binding::kVector3, Binding::kDirectionVector};
                     break;
                 case Take::kGravity: candidates = {Binding::kQuaternion}; break;
+                case Take::kArray: candidates = {Binding::kDoubleArray}; break;
                 }
             }
             term.slot = resolve(term.path, candidates, !term.has_default, "observation term");
@@ -62,6 +63,7 @@ const char* binding_name(Binding binding) {
     case Binding::kVector3: return "Eigen::Vector3d";
     case Binding::kDirectionVector: return "BaseLink::DirectionVector";
     case Binding::kQuaternion: return "Eigen::Quaterniond";
+    case Binding::kDoubleArray: return "std::vector<double>";
     }
     return "unknown";
 }
@@ -76,6 +78,7 @@ bool binding_matches_type(Binding binding, const std::type_info& type) {
     case Binding::kDirectionVector:
         return type == typeid(rmcs_description::BaseLink::DirectionVector);
     case Binding::kQuaternion: return type == typeid(Eigen::Quaterniond);
+    case Binding::kDoubleArray: return type == typeid(std::vector<double>);
     }
     return false;
 }
@@ -156,6 +159,11 @@ std::size_t acquire_slot(
         slot.quaternion_value =
             std::make_unique<rmcs_executor::Component::InputInterface<Eigen::Quaterniond>>();
         component.register_input(path, *slot.quaternion_value, required);
+        break;
+    case Binding::kDoubleArray:
+        slot.array_value =
+            std::make_unique<rmcs_executor::Component::InputInterface<std::vector<double>>>();
+        component.register_input(path, *slot.array_value, required);
         break;
     }
     slots.push_back(std::move(slot));
