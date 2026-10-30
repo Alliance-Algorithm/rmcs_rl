@@ -56,6 +56,19 @@ PolicyModel::PolicyModel(const Config& config)
     if (!config.expected_observation_contract_sha256.empty()
         && info_.observation_contract_sha256 != config.expected_observation_contract_sha256)
         throw std::invalid_argument("model observation contract does not match its preprocessor");
+    if (!config.expected_observation_version.empty()
+        && runtime_.metadata("rmcs_observation_version").value_or("")
+               != config.expected_observation_version)
+        throw std::invalid_argument("model observation version does not match its preprocessor");
+    if (!config.expected_obs_normalization.empty()) {
+        if (config.expected_obs_normalization != "embedded"
+            || runtime_.metadata("rmcs_obs_normalization").value_or("") != "embedded")
+            throw std::invalid_argument(
+                "model must embed the frozen training observation normalizer");
+        if (runtime_.metadata("rmcs_obs_mean") || runtime_.metadata("rmcs_obs_std"))
+            throw std::invalid_argument(
+                "embedded normalization cannot also declare external mean/std");
+    }
     info_.obs_size = runtime_.input_size();
     info_.action_size = runtime_.output_size();
     info_.model_type = runtime_.info().model_type;

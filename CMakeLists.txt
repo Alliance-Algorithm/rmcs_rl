@@ -79,6 +79,8 @@ if(BUILD_TESTING)
     target_link_libraries(policy_model_contract rmcs_rl)
     ament_add_gtest(observation_frame test/observation_frame.cpp)
     target_link_libraries(observation_frame rmcs_rl)
+    add_executable(prone_policy_parity test/prone_policy_parity.cpp)
+    target_link_libraries(prone_policy_parity rmcs_rl)
 endif()
 
 ament_auto_package(USE_SCOPED_HEADER_INSTALL_DIR)

@@ -34,9 +34,11 @@ OnnxRuntime::OnnxRuntime(const Config& config)
         throw std::invalid_argument("model path must not be empty");
     const auto requested_type = lower(config.model_type);
     if (requested_type != "auto" && requested_type != "mlp" && requested_type != "transformer"
-        && requested_type != "generic" && requested_type != "wheel_leg_v7")
+        && requested_type != "generic" && requested_type != "wheel_leg_v7"
+        && requested_type != "wheel_leg_v202")
         throw std::invalid_argument(
-            "model_type must be auto, mlp, transformer, generic, or wheel_leg_v7 (got '"
+            "model_type must be auto, mlp, transformer, generic, wheel_leg_v7, or wheel_leg_v202 "
+            "(got '"
             + config.model_type + "')");
 
     Ort::SessionOptions options;
@@ -50,14 +52,17 @@ OnnxRuntime::OnnxRuntime(const Config& config)
         && metadata("leg_winding_version").value_or("") != config.expected_leg_winding_version)
         throw std::invalid_argument(
             "model leg_winding_version metadata does not match the configured target contract");
-    if (requested_type == "wheel_leg_v7") {
+    if (requested_type == "wheel_leg_v7" || requested_type == "wheel_leg_v202") {
+        if (requested_type == "wheel_leg_v202" && config.expected_model_spec_sha256.empty())
+            throw std::invalid_argument(
+                "wheel_leg_v202 requires an explicit model specification hash");
         const auto expected_spec =
             config.expected_model_spec_sha256.empty()
                 ? std::string{"0ac82045ab584f20091538aa782d93ea545382dc701faca1f8ae92aeb7cd1997"}
                 : config.expected_model_spec_sha256;
         if (info_.model_spec_sha256 != expected_spec)
             throw std::invalid_argument(
-                "wheel_leg_v7 model_spec_sha256 does not match the deployed paired-107 contract");
+                "wheel-leg model_spec_sha256 does not match the deployed geometry contract");
     }
 
     if (session_.GetOutputCount() != 1)
@@ -118,7 +123,8 @@ OnnxRuntime::OnnxRuntime(const Config& config)
         throw std::invalid_argument("output batch dimension must be 1 or dynamic");
 
     std::string resolved_type = requested_type;
-    if (resolved_type == "auto" || resolved_type == "wheel_leg_v7" || resolved_type.empty()) {
+    if (resolved_type == "auto" || resolved_type == "wheel_leg_v7"
+        || resolved_type == "wheel_leg_v202" || resolved_type.empty()) {
         if (raw_input_shape.size() == 2)
             resolved_type = "mlp";
         else if (raw_input_shape.size() == 3)

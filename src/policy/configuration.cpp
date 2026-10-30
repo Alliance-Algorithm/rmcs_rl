@@ -31,6 +31,8 @@ PolicyConfig load_policy_config(
     config.expected_leg_winding_version = string_or(node, "leg_winding_version", "");
     config.expected_observation_contract_sha256 =
         string_or(node, "expected_observation_contract_sha256", "");
+    config.expected_observation_version = string_or(node, "expected_observation_version", "");
+    config.expected_obs_normalization = string_or(node, "expected_obs_normalization", "");
     config.expected_policy_rate = number_or(node, "policy_rate", 50.0);
     config.observation_size = observation_size;
     config.action_size = action_size;

@@ -109,4 +109,13 @@ TEST(UnifiedPolicyContract, RejectsWrongObservationContractRateAndHistory) {
     config.observation_size = 70;
     EXPECT_THROW(rmcs_rl::PolicyModel{config}, std::invalid_argument);
 }
+
+TEST(ProneMotionPolicyContract, RejectsOldObservationVersionAndMissingTrainingNormalization) {
+    auto config = unified_configuration();
+    config.expected_observation_version = "wheel-leg-prone-motion-v4";
+    EXPECT_THROW(rmcs_rl::PolicyModel{config}, std::invalid_argument);
+    config = unified_configuration();
+    config.expected_obs_normalization = "embedded";
+    EXPECT_THROW(rmcs_rl::PolicyModel{config}, std::invalid_argument);
+}
 } // namespace
