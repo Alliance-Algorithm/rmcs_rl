@@ -10,7 +10,6 @@ namespace rmcs_rl {
 PolicyWorker::PolicyWorker(PolicyConfig config)
     : model_(config)
     , pending_observation_(model_.info().obs_size)
-    , pending_action_(model_.info().action_size)
     , input_buffer_(model_.info().obs_size)
     , action_buffer_(model_.info().action_size)
     , result_{} {
@@ -40,7 +39,6 @@ bool PolicyWorker::try_take(Result& result) {
     std::swap(result.generation, result_.generation);
     std::swap(result.submitted_at, result_.submitted_at);
     std::swap(result.context, result_.context);
-    std::swap(result.completed_at, result_.completed_at);
     std::swap(result.inference_microseconds, result_.inference_microseconds);
     std::swap(result.success, result_.success);
     result.error.swap(result_.error);
@@ -89,7 +87,6 @@ void PolicyWorker::run_() {
             result_.generation = generation;
             result_.submitted_at = submitted_at;
             result_.context = context;
-            result_.completed_at = completed;
             result_.inference_microseconds =
                 std::chrono::duration<double, std::micro>{completed - started}.count();
             result_.success = success;

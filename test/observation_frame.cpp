@@ -127,4 +127,23 @@ TEST_F(ObservationFrame, RejectsExternalFrameHistoryAndSecondTransform) {
         }
     }
 }
+
+TEST_F(ObservationFrame, ConfigurationDoesNotLoadAModelOrStartAnInferenceWorker) {
+    const auto options =
+        rclcpp::NodeOptions{}
+            .automatically_declare_parameters_from_overrides(true)
+            .parameter_overrides({
+                {"action_terms", std::vector<std::string>{"index=0 output=/target"}},
+                {"observation_terms", std::vector<std::string>{"path=/frame take=array dim=35"}},
+                {"observation_frame_sequence_interface", "/frame_sequence"},
+                {"rl_model_path", "/nonexistent/rmcs-configuration-only.onnx"},
+                {"policy_rate", 100.0},
+            });
+    rclcpp::Node node{"configuration_only", options};
+    const auto config = rmcs_rl::load_bridge_config(node);
+    EXPECT_EQ(config.obs_size, 35u);
+    EXPECT_EQ(config.action_size, 1u);
+    EXPECT_EQ(config.policy.path, "/nonexistent/rmcs-configuration-only.onnx");
+    EXPECT_EQ(config.policy.expected_policy_rate, 100.);
+}
 } // namespace

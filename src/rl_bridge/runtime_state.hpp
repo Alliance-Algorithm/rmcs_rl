@@ -4,16 +4,10 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
-#include <limits>
-#include <memory>
 #include <span>
 #include <stdexcept>
 #include <string>
 #include <vector>
-
-#include <rmcs_executor/component.hpp>
-#include <rmcs_rl/rl_bridge/types.hpp>
-#include <rmcs_rl/rl_bridge/utility.hpp>
 
 namespace rmcs_rl {
 
@@ -180,31 +174,6 @@ private:
     std::size_t next_ = 0;
 };
 
-inline void reset_action_state(std::vector<double>& last_actions, std::vector<double>& written) {
-    std::fill(last_actions.begin(), last_actions.end(), 0.0);
-    std::fill(written.begin(), written.end(), 0.0);
-}
-
-inline void write_actions(
-    bool valid, std::span<const double> action, const std::vector<ActionTerm>& terms,
-    InvalidMode invalid_mode, std::vector<double>& written,
-    std::vector<std::unique_ptr<rmcs_executor::Component::OutputInterface<double>>>& outputs) {
-    for (std::size_t i = 0; i < terms.size(); ++i) {
-        double value;
-        if (valid) {
-            value = map_action(action[i], terms[i]);
-            written[i] = value;
-        } else if (invalid_mode == InvalidMode::kNaN) {
-            value = std::numeric_limits<double>::quiet_NaN();
-        } else if (invalid_mode == InvalidMode::kZero) {
-            value = 0.0;
-        } else {
-            value = written[i];
-        }
-        **outputs[i] = value;
-    }
-}
-
 inline std::string invalid_reason(
     bool enabled, bool healthy, bool has_action, bool fresh, bool sequence_ok, bool finite) {
     if (!healthy)
@@ -221,8 +190,5 @@ inline std::string invalid_reason(
         return "inference result is stale";
     return "unknown";
 }
-
-using OutputAction =
-    std::vector<std::unique_ptr<rmcs_executor::Component::OutputInterface<double>>>;
 
 } // namespace rmcs_rl

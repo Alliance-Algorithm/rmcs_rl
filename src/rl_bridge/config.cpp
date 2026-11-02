@@ -6,7 +6,6 @@
 #include <utility>
 
 #include "policy/configuration.hpp"
-#include "policy/policy_worker.hpp"
 #include <rmcs_rl/parameters.hpp>
 #include <rmcs_rl/rl_bridge/observation_history.hpp>
 #include <rmcs_rl/rl_bridge/term_parser.hpp>
@@ -140,8 +139,8 @@ BridgeConfig load_bridge_config(rclcpp::Node& node) {
     config.inference_timeout = number_or(node, "inference_timeout", 2.0 / config.policy_rate);
     if (!is_finite(config.inference_timeout) || config.inference_timeout <= 0.0)
         throw std::invalid_argument("RlBridge: inference_timeout must be finite and > 0");
-    config.policy_worker = std::make_shared<PolicyWorker>(load_policy_config(
-        node, config.obs_size, config.action_size, config.history_length, config.obs_frame_size));
+    config.policy = load_policy_config(
+        node, config.obs_size, config.action_size, config.history_length, config.obs_frame_size);
     return config;
 }
 

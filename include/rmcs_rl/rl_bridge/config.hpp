@@ -3,7 +3,6 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
-#include <memory>
 #include <string>
 #include <vector>
 
@@ -13,8 +12,6 @@
 #include <rmcs_rl/rl_bridge/types.hpp>
 
 namespace rmcs_rl {
-
-class PolicyWorker;
 
 struct PolicyIoConfig {
     JointConfig joint_config;
@@ -40,7 +37,7 @@ struct BridgeConfig : PolicyIoConfig {
     std::string context_path;
     std::string observation_frame_sequence_path;
     double inference_timeout = 0.0;
-    std::shared_ptr<PolicyWorker> policy_worker;
+    PolicyConfig policy;
 };
 
 PolicyIoConfig load_policy_io_config(rclcpp::Node& node);

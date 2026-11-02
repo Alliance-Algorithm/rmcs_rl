@@ -1,19 +1,16 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
-#include <condition_variable>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
 #include <limits>
 #include <memory>
-#include <mutex>
 #include <optional>
 #include <span>
 #include <sstream>
 #include <stdexcept>
 #include <string>
-#include <thread>
 #include <unordered_set>
 #include <utility>
 #include <vector>
@@ -38,9 +35,13 @@ class PolicyActionPublisher final : public rmcs_executor::Component {
 public:
     using Publish = std::function<void(std::optional<std::uint64_t>)>;
 
-    PolicyActionPublisher(const BridgeConfig& config, Publish publish)
+    PolicyActionPublisher(
+        const BridgeConfig& config, const PolicyModel::Info& model, Publish publish)
         : publish_(std::move(publish))
-        , reset_path_(config.reset_path) {
+        , reset_path_(config.reset_path)
+        , terms_(config.action_terms)
+        , invalid_mode_(config.invalid_mode)
+        , written_(config.action_size) {
         for (const auto& term : config.action_terms) {
             action_outputs_.push_back(std::make_unique<OutputInterface<double>>());
             register_output(term.output, *action_outputs_.back(), 0.0);
@@ -74,11 +75,10 @@ public:
             config.rl_base + "/feature_size", feature_size_output_, config.obs_frame_size);
         register_output(config.rl_base + "/policy_rate", policy_rate_output_, config.policy_rate);
         register_output(
-            config.rl_base + "/model_spec_sha256", model_spec_output_,
-            config.policy_worker->info().model_spec_sha256);
+            config.rl_base + "/model_spec_sha256", model_spec_output_, model.model_spec_sha256);
         register_output(
             config.rl_base + "/observation_contract_sha256", observation_contract_output_,
-            config.policy_worker->info().observation_contract_sha256);
+            model.observation_contract_sha256);
         register_output(
             config.rl_base + "/observation_frame_sequence_interface", frame_sequence_path_output_,
             config.observation_frame_sequence_path);
@@ -102,12 +102,46 @@ public:
         publish_(have_reset ? std::optional{count} : std::nullopt);
     }
 
+    void reset() { std::fill(written_.begin(), written_.end(), 0.0); }
+
+    void publish(
+        const PolicyWorker::Result& action, bool valid, bool healthy, double age,
+        std::uint64_t observation_sequence) {
+        for (std::size_t i = 0; i < terms_.size(); ++i) {
+            double value;
+            if (valid) {
+                value = map_action(action.action[i], terms_[i]);
+                written_[i] = value;
+            } else if (invalid_mode_ == InvalidMode::kNaN) {
+                value = std::numeric_limits<double>::quiet_NaN();
+            } else if (invalid_mode_ == InvalidMode::kZero) {
+                value = 0.0;
+            } else {
+                value = written_[i];
+            }
+            **action_outputs_[i] = value;
+        }
+        *valid_output_ = valid ? 1.0 : 0.0;
+        *healthy_output_ = healthy ? 1.0 : 0.0;
+        *action_age_output_ = age;
+        *obs_seq_output_ = observation_sequence;
+        *action_seq_output_ = action.sequence;
+        *action_context_output_ = action.context;
+        *action_ns_output_ =
+            static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                           action.submitted_at.time_since_epoch())
+                                           .count());
+        *inference_time_us_ = action.inference_microseconds;
+    }
+
 private:
-    friend class RlBridge;
     Publish publish_;
     std::string reset_path_;
     std::vector<Slot> slots_;
     std::size_t reset_slot_ = kNoSlot;
+    std::vector<ActionTerm> terms_;
+    InvalidMode invalid_mode_;
+    std::vector<double> written_;
     std::vector<std::unique_ptr<OutputInterface<double>>> action_outputs_, contract_outputs_;
     OutputInterface<double> valid_output_, healthy_output_, action_age_output_, inference_time_us_;
     OutputInterface<double> policy_rate_output_;
@@ -130,15 +164,15 @@ public:
         , config_(load_bridge_config(*this))
         , history_(config_.obs_frame_size, config_.history_length, config_.history_period)
         , action_feedback_(config_.action_size, feedback_capacity_(config_))
-        , worker_(config_.policy_worker)
+        , worker_(config_.policy)
         , frame_buffer_(config_.obs_frame_size)
         , observation_buffer_(config_.obs_size)
-        , action_buffer_(config_.action_size)
         , result_buffer_{} {
+        action_.action.resize(config_.action_size);
         result_buffer_.action.reserve(config_.action_size);
 
         action_source_ = create_partner_component<PolicyActionPublisher>(
-            get_component_name() + "_actions", config_,
+            get_component_name() + "_actions", config_, worker_.info(),
             [this](std::optional<std::uint64_t> reset) { publish_actions_(reset); });
         for (const auto& term : config_.action_terms)
             own_output_paths_.insert(term.output);
@@ -166,7 +200,6 @@ public:
         own_output_paths_.insert(config_.rl_base + "/action_age");
         own_output_paths_.insert(config_.rl_base + "/obs_seq");
         last_actions_.assign(config_.action_size, 0.0);
-        written_.assign(config_.action_size, 0.0);
     }
 
     void before_pairing(const OutputInfoMap& output_map) override {
@@ -185,7 +218,7 @@ public:
             config_.obs_size, config_.action_size, config_.policy_rate);
         RCLCPP_INFO(
             get_logger(), "in-process policy worker: model=%s, obs=%zu, action=%zu",
-            worker_->info().path.c_str(), worker_->info().obs_size, worker_->info().action_size);
+            worker_.info().path.c_str(), worker_.info().obs_size, worker_.info().action_size);
     }
 
     void update() override {
@@ -202,7 +235,8 @@ public:
             last_flat_hold_ = flat_hold;
         }
         if (!enabled) {
-            reset_action_state(last_actions_, written_);
+            std::fill(last_actions_.begin(), last_actions_.end(), 0.0);
+            action_source_->reset();
             history_.reset();
         }
         if (enabled) {
@@ -228,38 +262,17 @@ private:
         }
         const bool enabled = last_enabled_;
         const bool flat_hold = last_flat_hold_;
-        if (worker_->try_take(result_buffer_)) {
-            if (result_buffer_.generation == generation_
-                && result_buffer_.sequence > action_sequence_
-                && result_buffer_.sequence <= observation_sequence_ && result_buffer_.success) {
-                action_sequence_ = result_buffer_.sequence;
-                action_generation_ = result_buffer_.generation;
-                action_submitted_at_ = result_buffer_.submitted_at;
-                action_completed_at_ = result_buffer_.completed_at;
-                action_context_ = result_buffer_.context;
-                std::copy(
-                    result_buffer_.action.begin(), result_buffer_.action.end(),
-                    action_buffer_.begin());
-                action_ready_ = true;
-                *action_source_->inference_time_us_ = result_buffer_.inference_microseconds;
-            } else if (result_buffer_.generation == generation_ && !result_buffer_.success) {
-                worker_failed_ = true;
-                action_ready_ = false;
-                RCLCPP_ERROR_THROTTLE(
-                    get_logger(), *get_clock(), 1000, "RL inference failed: %s",
-                    result_buffer_.error.c_str());
-            }
-        }
+        receive_policy_result_();
         const bool has_snapshot = action_ready_;
 
         const double age = has_snapshot
-                             ? std::chrono::duration<double>(now - action_submitted_at_).count()
+                             ? std::chrono::duration<double>(now - action_.submitted_at).count()
                              : std::numeric_limits<double>::quiet_NaN();
-        const bool seq_ok = has_snapshot && action_generation_ == generation_
-                         && action_sequence_ <= observation_sequence_;
+        const bool seq_ok = has_snapshot && action_.generation == generation_
+                         && action_.sequence <= observation_sequence_;
         const bool finite =
             has_snapshot
-            && std::all_of(action_buffer_.begin(), action_buffer_.end(), [](double value) {
+            && std::all_of(action_.action.begin(), action_.action.end(), [](double value) {
                    return std::isfinite(value);
                });
 
@@ -269,30 +282,18 @@ private:
 
         // History follows the clipped command that consumers can execute.
         if (valid && flat_hold)
-            std::fill(action_buffer_.begin(), action_buffer_.end(), 0.0);
-        if (valid && action_sequence_ != last_feedback_obs_seq_) {
+            std::fill(action_.action.begin(), action_.action.end(), 0.0);
+        if (valid && action_.sequence != last_feedback_obs_seq_) {
             for (std::size_t i = 0; i < config_.action_size; ++i) {
                 const auto& term = config_.action_terms[i];
                 last_actions_[i] =
-                    term.scale == 0.0 ? 0.0 : map_action(action_buffer_[i], term) / term.scale;
+                    term.scale == 0.0 ? 0.0 : map_action(action_.action[i], term) / term.scale;
             }
-            action_feedback_.store(action_submitted_at_, last_actions_);
-            last_feedback_obs_seq_ = action_sequence_;
+            action_feedback_.store(action_.submitted_at, last_actions_);
+            last_feedback_obs_seq_ = action_.sequence;
         }
-        write_actions(
-            valid, std::span<const double>{action_buffer_}, config_.action_terms,
-            config_.invalid_mode, written_, action_source_->action_outputs_);
-
-        *action_source_->valid_output_ = valid ? 1.0 : 0.0;
-        *action_source_->healthy_output_ = (worker_->healthy() && !worker_failed_) ? 1.0 : 0.0;
-        *action_source_->action_age_output_ = age;
-        *action_source_->obs_seq_output_ = observation_sequence_;
-        *action_source_->action_seq_output_ = action_sequence_;
-        *action_source_->action_context_output_ = action_context_;
-        *action_source_->action_ns_output_ =
-            static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
-                                           action_submitted_at_.time_since_epoch())
-                                           .count());
+        action_source_->publish(
+            action_, valid, worker_.healthy() && !worker_failed_, age, observation_sequence_);
 
         if (last_valid_ && !valid)
             reset_runtime_(false);
@@ -300,7 +301,7 @@ private:
             if (valid) {
                 RCLCPP_INFO(
                     get_logger(), "valid=1 (obs_seq=%llu action_age=%.4f s)",
-                    static_cast<unsigned long long>(action_sequence_), age);
+                    static_cast<unsigned long long>(action_.sequence), age);
             } else {
                 RCLCPP_WARN(
                     get_logger(), "valid=0: %s",
@@ -308,6 +309,23 @@ private:
                         .c_str());
             }
             last_valid_ = valid;
+        }
+    }
+
+    void receive_policy_result_() {
+        if (worker_.try_take(result_buffer_)) {
+            if (result_buffer_.generation == generation_
+                && result_buffer_.sequence > action_.sequence
+                && result_buffer_.sequence <= observation_sequence_ && result_buffer_.success) {
+                std::swap(action_, result_buffer_);
+                action_ready_ = true;
+            } else if (result_buffer_.generation == generation_ && !result_buffer_.success) {
+                worker_failed_ = true;
+                action_ready_ = false;
+                RCLCPP_ERROR_THROTTLE(
+                    get_logger(), *get_clock(), 1000, "RL inference failed: %s",
+                    result_buffer_.error.c_str());
+            }
         }
     }
 
@@ -378,7 +396,7 @@ private:
             std::uint64_t context = 0;
             if (context_slot_ != kNoSlot && !read_unsigned(slots_[context_slot_], context))
                 throw std::runtime_error("RlBridge: invalid inference context");
-            worker_->submit(
+            worker_.submit(
                 std::span<const double>{observation_buffer_}, observation_sequence_, generation_,
                 now, context);
         } else {
@@ -438,12 +456,13 @@ private:
         action_ready_ = false;
         observation_sequence_ = next_observation_sequence_;
         worker_failed_ = false;
-        reset_action_state(last_actions_, written_);
+        std::fill(last_actions_.begin(), last_actions_.end(), 0.0);
+        action_source_->reset();
         history_.reset();
         action_feedback_.reset();
         last_feedback_obs_seq_ = 0;
         timeline_.reset();
-        std::fill(action_buffer_.begin(), action_buffer_.end(), 0.0);
+        std::fill(action_.action.begin(), action_.action.end(), 0.0);
         for (auto& output : observation_outputs_)
             **output = 0.0;
     }
@@ -462,26 +481,20 @@ private:
     std::size_t frame_sequence_slot_ = kNoSlot;
 
     std::vector<double> last_actions_;
-    std::vector<double> written_;
     ObservationHistory history_;
     ActionFeedbackHistory action_feedback_;
-    std::shared_ptr<PolicyWorker> worker_;
+    PolicyWorker worker_;
     ObservationTimeline timeline_;
     ObservationFrameGate frame_gate_;
     std::vector<double> frame_buffer_;
     std::vector<double> observation_buffer_;
-    std::vector<double> action_buffer_;
+    PolicyWorker::Result action_;
     PolicyWorker::Result result_buffer_;
     std::uint64_t last_feedback_obs_seq_ = 0;
 
     std::uint64_t generation_ = 0;
     std::uint64_t next_observation_sequence_ = 0;
     std::uint64_t observation_sequence_ = 0;
-    std::uint64_t action_sequence_ = 0;
-    std::uint64_t action_context_ = 0;
-    std::uint64_t action_generation_ = 0;
-    std::chrono::steady_clock::time_point action_submitted_at_{};
-    std::chrono::steady_clock::time_point action_completed_at_{};
     std::uint64_t last_reset_count_ = 0;
     std::uint64_t obs_invalid_count_ = 0;
     bool worker_failed_ = false;

@@ -25,7 +25,6 @@ public:
         std::uint64_t generation = 0;
         Clock::time_point submitted_at{};
         std::uint64_t context = 0;
-        Clock::time_point completed_at{};
         double inference_microseconds = 0.0;
         bool success = false;
         std::string error;
@@ -70,7 +69,6 @@ private:
 
     PolicyModel model_;
     std::vector<double> pending_observation_;
-    std::vector<double> pending_action_;
     std::vector<double> input_buffer_;
     std::vector<double> action_buffer_;
     std::uint64_t pending_sequence_ = 0;
