@@ -61,13 +61,15 @@ PolicyModel::PolicyModel(const Config& config)
                != config.expected_observation_version)
         throw std::invalid_argument("model observation version does not match its preprocessor");
     if (!config.expected_obs_normalization.empty()) {
-        if (config.expected_obs_normalization != "embedded"
-            || runtime_.metadata("rmcs_obs_normalization").value_or("") != "embedded")
+        if ((config.expected_obs_normalization != "embedded"
+             && config.expected_obs_normalization != "none")
+            || runtime_.metadata("rmcs_obs_normalization").value_or("")
+                   != config.expected_obs_normalization)
             throw std::invalid_argument(
-                "model must embed the frozen training observation normalizer");
+                "model observation normalization does not match the configured training contract");
         if (runtime_.metadata("rmcs_obs_mean") || runtime_.metadata("rmcs_obs_std"))
             throw std::invalid_argument(
-                "embedded normalization cannot also declare external mean/std");
+                "explicit normalization cannot also declare external mean/std");
     }
     info_.obs_size = runtime_.input_size();
     info_.action_size = runtime_.output_size();

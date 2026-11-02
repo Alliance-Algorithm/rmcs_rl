@@ -9,7 +9,7 @@
 #include "policy/policy_model.hpp"
 
 int main(int argc, char** argv) {
-    if (argc != 2)
+    if (argc != 2 && argc != 3)
         return 2;
     try {
         rmcs_rl::PolicyConfig config;
@@ -23,6 +23,23 @@ int main(int argc, char** argv) {
         config.expected_observation_version = "wheel-leg-prone-motion-v4";
         config.expected_obs_normalization = "embedded";
         config.expected_policy_rate = 100.;
+        if (argc == 3) {
+            const std::string mode = argv[2];
+            if (mode != "--prone-200hz" && mode != "--wheelbipe")
+                return 2;
+            const bool wheelbipe = mode == "--wheelbipe";
+            config.expected_model_spec_sha256 =
+                "8a9d759525c48955e8965b2e14b9e158c1d8fc9f3d68f33e4024a3c94bf8f812";
+            config.expected_leg_winding_version =
+                wheelbipe ? "paired_full_vehicle110_v1" : "paired_branch107_v1";
+            config.expected_observation_contract_sha256 =
+                wheelbipe ? "bd8397a8cb057c5d7859ba79ffbc1310c7c75d2a9ddcfdb7ea844d02db001e69"
+                          : "6613ab1b2a538fc31558b668117dbcb77bed4f84e93133d9c087c5752ec6c967";
+            config.expected_observation_version =
+                wheelbipe ? "wheelbipe-v202-foundation-v2" : "wheel-leg-prone-motion-v4-odom-v2";
+            config.expected_obs_normalization = wheelbipe ? "none" : "embedded";
+            config.expected_policy_rate = wheelbipe ? 50. : 100.;
+        }
         config.normalization_from_metadata = false;
         config.obs_clip = 100.;
         config.sequence_length = 1;
