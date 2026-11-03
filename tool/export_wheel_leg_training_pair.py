@@ -126,8 +126,10 @@ def export(module, native, checkpoint, target, profile, *, updates, contract, so
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--training-root", type=Path, required=True)
-    parser.add_argument("--prone-checkpoint", type=Path, required=True)
+    parser.add_argument("--profile", choices=("pair", "wheelbipe"), default="pair")
+    parser.add_argument("--training-root", type=Path)
+    parser.add_argument("--prone-checkpoint", type=Path)
+    parser.add_argument("--wheelbipe-output-name", default="wheelbipe_v202_50hz.onnx")
     parser.add_argument("--wheelbipe-checkpoint", type=Path, required=True)
     parser.add_argument("--wheelbipe-checkpoint-sha256", required=True,
                         help="SHA256 read independently on Kaiser before copying")
@@ -138,14 +140,20 @@ def main():
     pair = json.loads(CONTRACT.read_text())
     require(digest(args.wheelbipe_checkpoint) == args.wheelbipe_checkpoint_sha256,
             "Kaiser checkpoint copy differs")
-    actor, updates, native = prone_actor(args.training_root, args.prone_checkpoint, pair["prone"])
-    results = [export(actor, native, args.prone_checkpoint, args.output / "prone_motion_v4_100hz.onnx",
-        "prone", updates=updates, contract=pair["prone"], source_uri=str(args.prone_checkpoint.resolve()))]
+    results = []
+    if args.profile == "pair":
+        require(args.training_root is not None and args.prone_checkpoint is not None,
+                "Pair export requires --training-root and --prone-checkpoint")
+        actor, updates, native = prone_actor(args.training_root, args.prone_checkpoint, pair["prone"])
+        results.append(export(actor, native, args.prone_checkpoint, args.output / "prone_motion_v4_100hz.onnx",
+            "prone", updates=updates, contract=pair["prone"], source_uri=str(args.prone_checkpoint.resolve())))
     data = torch.load(args.wheelbipe_checkpoint, map_location="cpu", weights_only=False)
     state = data["model_state_dict"]
     require(not any("normalizer" in key for key in state), "Unexpected Wheelbipe normalizer")
     actor = make_mlp(state, "actor")
-    results.append(export(actor, actor, args.wheelbipe_checkpoint, args.output / "wheelbipe_v202_50hz.onnx",
+    require(Path(args.wheelbipe_output_name).name == args.wheelbipe_output_name
+            and args.wheelbipe_output_name.endswith(".onnx"), "Expected an ONNX filename")
+    results.append(export(actor, actor, args.wheelbipe_checkpoint, args.output / args.wheelbipe_output_name,
         "wheelbipe", updates=int(data["iter"]) + 1, contract=pair["wheelbipe"],
         source_uri=args.wheelbipe_source_path))
     print(json.dumps([{key: row[key] for key in ("profile", "completed_updates", "max_absolute_error",

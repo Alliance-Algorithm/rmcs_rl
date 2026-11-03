@@ -1,0 +1,31 @@
+{
+  "schema": "rmcs-wheel-leg-snapshot-export-v1",
+  "profile": "wheelbipe",
+  "checkpoint": "kaiser:/home/kaiser/workspace/wheelbipe-v202-port/runs/full_flat_1024_20000_200hz_balanced_seed119_011/attempts/0001-03d234624906/train/model_8500.pt",
+  "checkpoint_sha256": "fb36b4a9e5bd7f85f7bc3b4e28532b77edb7516fa1c46ed029a2a4d72fdd4a3f",
+  "completed_updates": 8501,
+  "training_budget": 20000,
+  "training_complete": false,
+  "onnx_sha256": "f4baaa4daa4611a9d438ff75bf75dced4df81ceb28b22a5a1e41ca07425b0f85",
+  "pair_contract_sha256": "acddedb9db2d5f02e492512b4a469223c8ec37ef46c00c4dc772198cadf43c36",
+  "metadata": {
+    "rmcs_model_spec_sha256": "8a9d759525c48955e8965b2e14b9e158c1d8fc9f3d68f33e4024a3c94bf8f812",
+    "leg_target_model_spec_sha256": "8a9d759525c48955e8965b2e14b9e158c1d8fc9f3d68f33e4024a3c94bf8f812",
+    "leg_winding_version": "paired_full_vehicle110_v1",
+    "rmcs_observation_contract_sha256": "bd8397a8cb057c5d7859ba79ffbc1310c7c75d2a9ddcfdb7ea844d02db001e69",
+    "rmcs_observation_version": "wheelbipe-v202-foundation-v2",
+    "rmcs_obs_normalization": "none",
+    "policy_hz": "50",
+    "feedback_pd_hz": "200",
+    "gas_spring_compensation_enabled": "false",
+    "rmcs_checkpoint_sha256": "fb36b4a9e5bd7f85f7bc3b4e28532b77edb7516fa1c46ed029a2a4d72fdd4a3f",
+    "completed_updates": "8501",
+    "behavior_qualified": "false",
+    "hardware_tested": "false"
+  },
+  "parity_samples": 1024,
+  "max_absolute_error": 5.7220458984375e-06,
+  "behavior_qualified": false,
+  "hardware_tested": false,
+  "live_training_modified": false
+}
