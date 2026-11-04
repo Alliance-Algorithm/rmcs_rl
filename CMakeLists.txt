@@ -57,6 +57,7 @@ ament_auto_add_library(rmcs_rl SHARED
     src/rl_bridge/term_parser.cpp
     src/rl_bridge/interface_binding.cpp
     src/rl_bridge/observation.cpp
+    src/visualization/wheel_leg_mirror.cpp
 )
 ament_target_dependencies(rmcs_rl rmcs_executor rmcs_description rmcs_msgs rmcs_utility rclcpp)
 target_include_directories(rmcs_rl PUBLIC
@@ -72,6 +73,8 @@ pluginlib_export_plugin_description_file(rmcs_executor plugins.xml)
 install(DIRECTORY ${ONNXRUNTIME_ROOT_DIR}/lib/ DESTINATION lib FILES_MATCHING PATTERN "*.so*")
 
 install(DIRECTORY models DESTINATION share/${PROJECT_NAME})
+install(DIRECTORY tool/visualization DESTINATION share/${PROJECT_NAME}/tool
+    FILES_MATCHING PATTERN "*.py")
 
 if(BUILD_TESTING)
     find_package(ament_cmake_gtest REQUIRED)

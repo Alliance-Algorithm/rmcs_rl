@@ -4,6 +4,59 @@ Generic YAML observation/action interfaces and in-process ONNX policy workers fo
 RMCS. Vehicle calibration, PD and actuator limits live in `rmcs_core`.
 Wheel-leg self-righting belongs to the policy; there is no host recovery script.
 
+## Wheel-leg live mirror
+
+`rmcs_rl::WheelLegMirrorComponent` publishes measured joints, body IMU and
+estimator references for the Isaac Sim kinematic mirror. Its implementation
+is in `src/visualization/wheel_leg_mirror.cpp`; the Foxglove receiver and
+JSONL recording/replay utilities are in `tool/visualization/`.
+
+Enable it in the vehicle YAML, alongside the existing wheel-leg hardware,
+chassis and state-estimator components:
+
+```yaml
+rmcs_executor:
+  ros__parameters:
+    components:
+      # Append to the existing component list.
+      - rmcs_rl::WheelLegMirrorComponent -> wheel_leg_mirror
+
+wheel_leg_mirror:
+  ros__parameters:
+    enabled: true
+    update_rate: 100.0
+```
+
+Loading the component enables telemetry at 100 Hz by default; the parameter
+block can be omitted if those defaults are suitable. `enabled: false` disables
+all of its inputs and publishers. It works with traditional and RL wheel-leg
+profiles and does not require an `RlBridge` instance or a policy model.
+
+`enabled` controls this telemetry component, not actuator enable. In the
+`wheel-leg-infantry-wheelbipe-recovery` profile it stays on while chassis
+control and DM drives are disabled. `control_enabled` and `dm_control_ready`
+are diagnostic labels only. The viewer uses fresh measured encoders and IMU
+even when estimator references are invalid. It applies no gravity, contact,
+tilt or angular-speed gate; nominal joint limits produce diagnostics without
+clamping measured poses. Stale/invalid raw data and unsolved CAD loop closure
+remain explicit display errors. Motor safety and enable logic are unchanged.
+
+Calibration stays in `rmcs_core::controller::chassis::WheelLegStateEstimator`,
+which supplies `model_offsets`, `calibration_sha256` and
+`calibration_model_spec_sha256` under `/wheel_leg/state/`. The mirror reads
+these interfaces rather than including private vehicle headers or copying
+calibration tables. It publishes the same `/wheel_leg/telemetry/*` messages
+and recording schema as the earlier core broadcaster.
+
+Build with `build-rmcs --packages-select rmcs_rl rmcs_core rmcs_bringup`. Run
+Foxglove bridge in the robot's ROS environment; the Isaac GUI remains on the
+viewing computer and connects over WebSocket. The parent repository's
+`docs/zh-cn/wheel_leg_live_mirror.md` describes the complete configuration and
+the training repository's `docs/WHEEL_LEG_LIVE_MIRROR.md` describes GUI startup,
+joint-name mapping and measured-pose checks.
+
+## Policy deployment
+
 Set `rl_bridge.rl_model_path` in the vehicle profile and restart. Relative paths
 resolve inside the installed `rmcs_rl` share directory. `observation_terms` owns
 feature order, source binding, scaling and clipping; `action_terms` owns actor
