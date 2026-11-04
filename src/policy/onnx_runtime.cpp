@@ -20,8 +20,6 @@ std::string lower(std::string value) {
 }
 
 bool batch_dimension_ok(std::int64_t dimension) {
-    // ONNX uses -1 for a dynamic dimension. Symbolic dimensions are returned
-    // as -1 by the C++ API, so this also covers named batch dimensions.
     return dimension == 1 || dimension == -1;
 }
 
@@ -95,9 +93,6 @@ OnnxRuntime::OnnxRuntime(const Config& config)
         throw std::invalid_argument(
             "output tensor must be named '" + output_name_ + "', got '" + actual_output.get()
             + "'");
-    // Keep TypeInfo alive while reading the TensorTypeAndShapeInfo. The
-    // latter is a view into TypeInfo in ONNX Runtime; chaining a temporary
-    // here can read freed type metadata on some runtime builds.
     const auto input_type = session_.GetInputTypeInfo(primary_index);
     const auto output_type = session_.GetOutputTypeInfo(0);
     if (input_type.GetONNXType() != ONNX_TYPE_TENSOR
@@ -213,8 +208,6 @@ OnnxRuntime::OnnxRuntime(const Config& config)
             input_shape_.begin(), input_shape_.end(), std::size_t{1},
             [](auto value, auto dim) { return value * static_cast<std::size_t>(dim); }));
 
-    // Extra (non-obs) inputs: every one needs a constant from extra_inputs.*,
-    // and every declared constant must match a model input.
     auto remaining = config.extra_input_values;
     constant_slot_.assign(input_count, -1);
     for (std::size_t index = 0; index < input_count; ++index) {

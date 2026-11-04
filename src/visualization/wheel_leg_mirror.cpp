@@ -46,10 +46,6 @@ public:
             register_input(prefix + "/velocity", velocity_[i]);
             register_input(prefix + "/feedback_steady_ns", feedback_ns_[i]);
         }
-        // The WheelLeg hardware exposes the two gimbal axes through the same
-        // calibrated motor interfaces as the other RMCS gimbals. Keep them in
-        // the complete JointState snapshot so the GUI can drive M_joint1 and
-        // M_joint2 from the same executor cycle as the legs.
         register_input("/gimbal/yaw/angle", gimbal_angle_[0]);
         register_input("/gimbal/yaw/velocity", gimbal_velocity_[0]);
         register_input("/gimbal/pitch/angle", gimbal_angle_[1]);
@@ -61,7 +57,6 @@ public:
         register_input("/wheel_leg/imu/angular_velocity", gyro_);
         register_input("/wheel_leg/imu/last_steady_ns", imu_ns_);
         register_input("/wheel_leg/feedback_fresh", fresh_);
-        // These are labels only. Feedback must remain visible while disarmed.
         register_input("/chassis/control_enable", control_enabled_, false);
         register_input("/wheel_leg/dm_control_ready", dm_control_ready_, false);
         register_input("/wheel_leg/state/valid", valid_);
@@ -102,8 +97,6 @@ public:
             last_publish_ = now;
         }
 
-        // One executor snapshot, one ROS timestamp for every topic. Per-sensor
-        // ages below retain the asynchronous CAN/IMU acquisition information.
         std_msgs::msg::Header header;
         header.stamp = get_clock()->now();
         header.frame_id = "chassis_body";
@@ -130,7 +123,6 @@ public:
         imu.angular_velocity.x = gyro_->x();
         imu.angular_velocity.y = gyro_->y();
         imu.angular_velocity.z = gyro_->z();
-        // Covariances are unknown; acceleration is not part of this snapshot.
         imu.linear_acceleration_covariance[0] = -1.;
         if (!q.coeffs().allFinite() || std::abs(q.squaredNorm() - 1.) > .01)
             imu.orientation_covariance[0] = -1.;

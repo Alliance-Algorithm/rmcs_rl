@@ -17,7 +17,6 @@ void bind_observation_terms(
         case TermKind::kJointPos:
         case TermKind::kJointVel:
         case TermKind::kJointTorque: {
-            // A zero-position term has no feedback dependency.
             if (term.zero)
                 break;
             const char field = term.kind == TermKind::kJointPos ? 'a'

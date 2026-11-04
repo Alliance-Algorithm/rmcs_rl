@@ -46,7 +46,6 @@ public:
 
     explicit OnnxRuntime(const Config& config);
 
-    // Kept for small external users of the old deployment API.
     OnnxRuntime(
         const std::string& model_path, const std::string& input_name,
         const std::string& output_name)

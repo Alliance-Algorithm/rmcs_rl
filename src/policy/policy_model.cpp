@@ -93,7 +93,6 @@ PolicyModel::PolicyModel(const Config& config)
     load_normalization(config);
     obs_buffer_.resize(info_.obs_size);
     action_buffer_.resize(info_.action_size);
-    // Validate the actual graph before a policy can publish motor commands.
     runtime_.run(obs_buffer_, action_buffer_);
     if (!std::all_of(action_buffer_.begin(), action_buffer_.end(), [](float value) {
             return std::isfinite(value);

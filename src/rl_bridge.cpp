@@ -280,7 +280,6 @@ private:
                         && age <= config_.max_action_age;
         const bool valid = enabled && !worker_failed_ && has_snapshot && fresh && seq_ok && finite;
 
-        // History follows the clipped command that consumers can execute.
         if (valid && flat_hold)
             std::fill(action_.action.begin(), action_.action.end(), 0.0);
         if (valid && action_.sequence != last_feedback_obs_seq_) {

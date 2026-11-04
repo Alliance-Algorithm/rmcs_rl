@@ -4,7 +4,6 @@
 
 namespace rmcs_rl {
 
-// The producer owns frame cadence. Re-reading a frame cannot refresh its age.
 class ObservationFrameGate {
 public:
     enum class Decision { kWait, kSubmit, kReset };
