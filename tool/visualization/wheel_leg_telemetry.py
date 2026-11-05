@@ -19,6 +19,8 @@ TOPICS = {
     "/wheel_leg/telemetry/rl_angular_velocity": ("gyro", "geometry_msgs/msg/Vector3Stamped", "chassis_body"),
     "/wheel_leg/telemetry/diagnostics": ("diagnostics", "diagnostic_msgs/msg/DiagnosticArray", "chassis_body"),
 }
+RAW_IMU_TOPIC = "/wheel_leg/telemetry/imu_raw"
+CHANNELS = TOPICS | {RAW_IMU_TOPIC: ("raw_imu", "sensor_msgs/msg/Imu", "chassis_body")}
 SUBPROTOCOLS = ("foxglove.sdk.v1", "foxglove.websocket.v1")
 
 
@@ -46,6 +48,11 @@ class Snapshot:
     dm_control_ready: bool | None = None
     gimbal_positions: tuple[float, ...] = ()
     gimbal_velocities: tuple[float, ...] = ()
+
+    operator: dict | None = None
+    remote: dict | None = None
+    controller: dict | None = None
+    specific_force_body: tuple[float, ...] = ()
 
     @property
     def positions_by_name(self):
@@ -102,6 +109,13 @@ class Snapshot:
             raise ValueError("invalid actuator state labels")
         if type(self.reset_count) is not int or self.reset_count < 0:
             raise ValueError("invalid reset count")
+        if self.operator is not None:
+            op = self.operator
+            if (type(op.get("enabled")) is not bool or type(op.get("fresh")) is not bool
+                    or len(op.get("command", [])) != 3
+                    or not all(math.isfinite(v) for v in [*op["command"], op["height"]])
+                    or type(op.get("mode")) is not int or not 0 <= op["mode"] <= 8):
+                raise ValueError("invalid interpreted operator command")
         return self
 
     @classmethod
@@ -110,7 +124,7 @@ class Snapshot:
         for name in ("positions", "gimbal_positions", "quaternion_wxyz", "gyro_body",
                      "gravity_rl", "gyro_rl", "velocities", "gimbal_velocities",
                      "rmcs_knee", "rmcs_length", "rmcs_model_positions", "model_offsets",
-                     "sensor_age_s"):
+                     "sensor_age_s", "specific_force_body"):
             if name in fields:
                 fields[name] = tuple(fields[name])
         return cls(**fields).validate()
@@ -169,6 +183,13 @@ class SnapshotAssembler:
             return tuple(float(values[side + "/" + key]) for side in ("left", "right"))
         def optional_flag(key):
             return None if values.get(key, "unknown") == "unknown" else flag(key)
+        operator = None
+        if values.get("operator/ready") == "true":
+            operator = dict(enabled=flag("control_enabled"), fresh=flag("operator/remote_fresh"),
+                command=[float(values["operator/" + k]) for k in ("vx", "vy", "wz")],
+                height=float(values["operator/height_m"]), mode=int(values["operator/mode"]))
+        remote = {k.removeprefix("remote/"): float(v) for k, v in values.items() if k.startswith("remote/")}
+        controller = {k: int(v) for k, v in values.items() if k in ("rl/state", "recovery/phase", "recovery/fault")}
         q = imu.orientation
         result = Snapshot(stamp, tuple(float(joints.position[i]) for i in index),
                           (float(q.w), float(q.x), float(q.y), float(q.z)),
@@ -187,15 +208,43 @@ class SnapshotAssembler:
                           control_enabled=optional_flag("control_enabled"),
                           dm_control_ready=optional_flag("dm_control_ready"),
                           gimbal_positions=tuple(float(joints.position[i]) for i in gimbal_index),
-                          gimbal_velocities=gimbal_velocity).validate()
+                          gimbal_velocities=gimbal_velocity, operator=operator,
+                          remote=remote or None, controller=controller or None,
+                          specific_force_body=vector(imu.linear_acceleration)
+                              if imu.linear_acceleration_covariance[0] != -1 else ()).validate()
         self.last_stamp = stamp
         self.pending = {key: val for key, val in self.pending.items() if key > stamp}
         return result
 
 
+@dataclass(frozen=True)
+class ImuSample:
+    stamp_ns: int
+    quaternion_wxyz: tuple[float, ...]
+    specific_force_body: tuple[float, ...]
+    gyro_body: tuple[float, ...]
+    epoch: int = 0
+
+    def validate(self):
+        if self.stamp_ns <= 0 or self.epoch < 0:
+            raise ValueError("invalid raw IMU timestamp/epoch")
+        for name, count in (("quaternion_wxyz", 4), ("specific_force_body", 3), ("gyro_body", 3)):
+            a = getattr(self, name)
+            if len(a) != count or not all(math.isfinite(v) for v in a):
+                raise ValueError("invalid raw IMU " + name)
+        if not .99 < sum(v*v for v in self.quaternion_wxyz) < 1.01:
+            raise ValueError("invalid raw IMU quaternion")
+        return self
+
+    @classmethod
+    def from_dict(cls, row):
+        return cls(**{k: row[k] for k in cls.__dataclass_fields__}).validate()
+
+
 class LatestSnapshot:
     def __init__(self, record=None, source="foxglove", metadata=None):
-        self.lock = threading.Lock()
+        self.lock = threading.RLock()
+        self.listeners = []
         self.snapshot = None
         self.received = 0.0
         self.status = "waiting for telemetry"
@@ -220,6 +269,25 @@ class LatestSnapshot:
                 self.record.write(json.dumps(asdict(snapshot) | {
                     "record_time_s": self.received - self.started, "source": self.source}, allow_nan=False) + "\n")
                 self.record.flush()
+            for listener in self.listeners:
+                listener("snapshot", snapshot)
+
+    def _row(self, kind, value, dispatch=True):
+        with self.lock:
+            if self.record:
+                self.record.write(json.dumps(value | {"kind": kind,
+                    "record_time_s": time.monotonic() - self.started}, allow_nan=False) + "\n")
+                self.record.flush()
+            if dispatch:
+                for listener in self.listeners:
+                    listener(kind, value)
+
+    def put_imu(self, sample):
+        sample.validate()
+        self._row("imu", asdict(sample))
+
+    def event(self, name, *, dispatch=True, **data):
+        self._row("event", dict(name=name, **data), dispatch=dispatch)
 
     def set_status(self, status):
         with self.lock:
@@ -240,6 +308,7 @@ class FoxgloveReader(threading.Thread):
     def __init__(self, url, latest):
         super().__init__(daemon=True)
         self.url, self.latest = url, latest
+        self.epoch = 0
         self.stopped = threading.Event()
 
     def run(self):
@@ -261,6 +330,8 @@ class FoxgloveReader(threading.Thread):
                                               max_queue=16) as socket:
                     if socket.subprotocol not in SUBPROTOCOLS:
                         raise ValueError("server did not negotiate a supported Foxglove subprotocol")
+                    self.epoch += 1
+                    self.latest.event("source_epoch", epoch=self.epoch)
                     assembler, subscriptions = SnapshotAssembler(), {}
                     self.latest.set_status("connected; waiting for 5 telemetry topics")
                     while not self.stopped.is_set():
@@ -274,9 +345,9 @@ class FoxgloveReader(threading.Thread):
                                 requests = []
                                 for channel in event["channels"]:
                                     topic = channel["topic"]
-                                    if topic not in TOPICS:
+                                    if topic not in CHANNELS:
                                         continue
-                                    if channel["encoding"] != "cdr" or channel["schemaName"] != TOPICS[topic][1]:
+                                    if channel["encoding"] != "cdr" or channel["schemaName"] != CHANNELS[topic][1]:
                                         raise ValueError(f"unsupported encoding/schema for {topic}")
                                     ident = channel["id"]
                                     if ident not in subscriptions or subscriptions[ident] != topic:
@@ -302,7 +373,18 @@ class FoxgloveReader(threading.Thread):
                         if topic is None:
                             continue
                         try:
-                            message = self.typestore.deserialize_cdr(packet[13:], TOPICS[topic][1])
+                            message = self.typestore.deserialize_cdr(packet[13:], CHANNELS[topic][1])
+                            if topic == RAW_IMU_TOPIC:
+                                if (message.header.frame_id != "chassis_body"
+                                        or message.orientation_covariance[0] == -1
+                                        or message.linear_acceleration_covariance[0] == -1):
+                                    raise ValueError("raw IMU orientation/acceleration unavailable")
+                                q = message.orientation
+                                self.latest.put_imu(ImuSample(
+                                    int(message.header.stamp.sec)*1_000_000_000 + int(message.header.stamp.nanosec),
+                                    (float(q.w), float(q.x), float(q.y), float(q.z)),
+                                    vector(message.linear_acceleration), vector(message.angular_velocity), self.epoch))
+                                continue
                             snapshot = assembler.accept(topic, message)
                             if snapshot:
                                 self.latest.put(snapshot)
@@ -320,7 +402,7 @@ class FoxgloveReader(threading.Thread):
         self.join(timeout=5)
 
 
-def read_record(path, expected_metadata=None):
+def read_rows(path, expected_metadata=None):
     """Stream recorded snapshots; verify identity before yielding any state."""
     with open(path) as stream:
         first = next(stream, None)
@@ -339,6 +421,12 @@ def read_record(path, expected_metadata=None):
             if not isinstance(elapsed, (int, float)) or not math.isfinite(elapsed) or elapsed < 0 or elapsed < previous:
                 raise ValueError("recording time must be finite, nonnegative and nondecreasing")
             previous = elapsed
+            yield elapsed, row
+
+
+def read_record(path, expected_metadata=None):
+    for elapsed, row in read_rows(path, expected_metadata):
+        if row.get("kind", "snapshot") == "snapshot":
             yield elapsed, Snapshot.from_dict(row)
 
 
@@ -355,11 +443,19 @@ class ReplayReader(threading.Thread):
         try:
             while not self.stopped.is_set():
                 started, count = time.monotonic(), 0
-                for elapsed, snapshot in read_record(self.path, self.metadata):
+                if count == 0:
+                    self.latest.event("replay_begin")
+                for elapsed, row in read_rows(self.path, self.metadata):
                     if self.stopped.wait(max(0., started + elapsed / self.speed - time.monotonic())):
                         return
-                    self.latest.put(snapshot, source="replay")
-                    count += 1
+                    kind = row.get("kind", "snapshot")
+                    if kind == "imu":
+                        self.latest.put_imu(ImuSample.from_dict(row))
+                    elif kind == "event":
+                        self.latest._row("event", {k: v for k, v in row.items() if k not in ("kind", "record_time_s")})
+                    elif kind == "snapshot":
+                        self.latest.put(Snapshot.from_dict(row), source="replay")
+                        count += 1
                 if not count:
                     raise ValueError("recording contains no snapshots")
                 if not self.loop:

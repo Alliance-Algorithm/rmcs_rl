@@ -1,4 +1,5 @@
 #include <array>
+#include <bit>
 #include <chrono>
 #include <cmath>
 #include <cstdint>
@@ -13,6 +14,10 @@
 #include <geometry_msgs/msg/vector3_stamped.hpp>
 #include <rclcpp/node.hpp>
 #include <rmcs_executor/component.hpp>
+#include <rmcs_description/tf_description.hpp>
+#include <rmcs_msgs/chassis_mode.hpp>
+#include <rmcs_msgs/keyboard.hpp>
+#include <rmcs_msgs/switch.hpp>
 #include <sensor_msgs/msg/imu.hpp>
 #include <sensor_msgs/msg/joint_state.hpp>
 
@@ -56,6 +61,25 @@ public:
         register_input("/wheel_leg/imu/quaternion", orientation_);
         register_input("/wheel_leg/imu/angular_velocity", gyro_);
         register_input("/wheel_leg/imu/last_steady_ns", imu_ns_);
+        register_input("/wheel_leg/imu/acceleration", acceleration_, false);
+        register_input("/wheel_leg/imu/acceleration_steady_ns", acceleration_ns_, false);
+        register_input("/wheel_leg/imu/acceleration_sample_ns", acceleration_sample_ns_, false);
+        register_input("/wheel_leg/imu/acceleration_sequence", acceleration_sequence_, false);
+        register_input("/remote/joystick/left", joystick_left_, false);
+        register_input("/remote/joystick/right", joystick_right_, false);
+        register_input("/remote/switch/left", switch_left_, false);
+        register_input("/remote/switch/right", switch_right_, false);
+        register_input("/remote/rotary_knob", knob_, false);
+        register_input("/remote/keyboard", keyboard_, false);
+        register_input("/wheel_leg/dr16_fresh", remote_fresh_, false);
+        register_input("/chassis/control_velocity", command_, false);
+        register_input("/chassis/control_height", height_, false);
+        register_input("/chassis/control_mode", mode_, false);
+        register_input("/wheel_leg/rl/state", rl_state_, false);
+        register_input("/wheel_leg/recovery/phase", recovery_phase_, false);
+        register_input("/wheel_leg/recovery/fault", recovery_fault_, false);
+        register_input("/gimbal/yaw/control_velocity", gimbal_yaw_velocity_, false);
+        register_input("/gimbal/pitch/control_torque", gimbal_pitch_torque_, false);
         register_input("/wheel_leg/feedback_fresh", fresh_);
         register_input("/chassis/control_enable", control_enabled_, false);
         register_input("/wheel_leg/dm_control_ready", dm_control_ready_, false);
@@ -69,6 +93,9 @@ public:
         register_input(
             "/wheel_leg/state/calibration_model_spec_sha256", calibration_model_spec_sha256_);
 
+        if (get_parameter_or("publish_raw_imu", true))
+            raw_imu_pub_ = create_publisher<sensor_msgs::msg::Imu>(
+                kPrefix + "imu_raw", rclcpp::QoS{100}.best_effort().durability_volatile());
         const auto qos = rclcpp::QoS{5}.best_effort().durability_volatile();
         joints_pub_ = create_publisher<sensor_msgs::msg::JointState>(kPrefix + "joint_states", qos);
         imu_pub_ = create_publisher<sensor_msgs::msg::Imu>(kPrefix + "imu_body", qos);
@@ -83,6 +110,7 @@ public:
     void update() override {
         if (!enabled_)
             return;
+        publish_raw_imu();
         const auto now = *timestamp_;
         if (*reset_ != last_reset_) {
             last_publish_.reset();
@@ -123,7 +151,12 @@ public:
         imu.angular_velocity.x = gyro_->x();
         imu.angular_velocity.y = gyro_->y();
         imu.angular_velocity.z = gyro_->z();
-        imu.linear_acceleration_covariance[0] = -1.;
+        if (acceleration_.ready() && acceleration_sequence_.ready() && *acceleration_sequence_) {
+            imu.linear_acceleration.x = acceleration_->x();
+            imu.linear_acceleration.y = acceleration_->y();
+            imu.linear_acceleration.z = acceleration_->z();
+        } else
+            imu.linear_acceleration_covariance[0] = -1.;
         if (!q.coeffs().allFinite() || std::abs(q.squaredNorm() - 1.) > .01)
             imu.orientation_covariance[0] = -1.;
 
@@ -159,6 +192,40 @@ public:
         add("dm_control_ready",
             dm_control_ready_.ready() ? (*dm_control_ready_ ? "true" : "false") : "unknown");
         add("reset_count", std::to_string(*reset_));
+        const bool command_ready = command_.ready() && height_.ready() && mode_.ready()
+                                && control_enabled_.ready() && remote_fresh_.ready();
+        add("operator/ready", command_ready ? "true" : "false");
+        if (command_ready) {
+            add("operator/remote_fresh", *remote_fresh_ ? "true" : "false");
+            add("operator/vx", number(command_->vector.x()));
+            add("operator/vy", number(command_->vector.y()));
+            add("operator/wz", number(command_->vector.z()));
+            add("operator/height_m", number(*height_));
+            add("operator/mode", std::to_string(static_cast<int>(*mode_)));
+        }
+        if (joystick_left_.ready() && joystick_right_.ready() && switch_left_.ready()
+            && switch_right_.ready() && knob_.ready() && keyboard_.ready()) {
+            add("remote/left_x", number(joystick_left_->x()));
+            add("remote/left_y", number(joystick_left_->y()));
+            add("remote/right_x", number(joystick_right_->x()));
+            add("remote/right_y", number(joystick_right_->y()));
+            add("remote/switch_left", std::to_string(static_cast<int>(*switch_left_)));
+            add("remote/switch_right", std::to_string(static_cast<int>(*switch_right_)));
+            add("remote/knob", number(*knob_));
+            add("remote/keyboard", std::to_string(std::bit_cast<std::uint16_t>(*keyboard_)));
+        }
+        if (rl_state_.ready()) add("rl/state", std::to_string(*rl_state_));
+        if (recovery_phase_.ready()) add("recovery/phase", std::to_string(*recovery_phase_));
+        if (recovery_fault_.ready()) add("recovery/fault", std::to_string(*recovery_fault_));
+        if (gimbal_yaw_velocity_.ready())
+            add("gimbal/yaw_control_velocity", number(*gimbal_yaw_velocity_));
+        if (gimbal_pitch_torque_.ready())
+            add("gimbal/pitch_control_torque", number(*gimbal_pitch_torque_));
+        if (acceleration_sample_ns_.ready())
+            add("imu/acceleration_sample_ns", std::to_string(*acceleration_sample_ns_));
+        if (acceleration_sequence_.ready())
+            add("imu/acceleration_sequence", std::to_string(*acceleration_sequence_));
+        add("imu/acceleration_convention", "body_specific_force_including_gravity_mps2");
         const auto steady_ns =
             std::chrono::duration_cast<std::chrono::nanoseconds>(Clock::now().time_since_epoch())
                 .count();
@@ -197,6 +264,49 @@ public:
     }
 
 private:
+    void publish_raw_imu() {
+        if (!raw_imu_pub_ || !acceleration_.ready() || !acceleration_sample_ns_.ready()
+            || !acceleration_sequence_.ready() || !acceleration_ns_.ready()
+            || !*acceleration_sequence_ || !*acceleration_sample_ns_)
+            return;
+        const auto sequence = *acceleration_sequence_;
+        if (sequence == last_acceleration_sequence_)
+            return;
+        last_acceleration_sequence_ = sequence;
+        const auto source_ns = *acceleration_sample_ns_;
+        // Preserve board sample intervals. ROS time is anchored once per source
+        // epoch; receive jitter and GUI frame rate never set the integration dt.
+        if (!raw_source_origin_ || source_ns <= last_source_ns_) {
+            raw_source_origin_ = source_ns;
+            const auto steady_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                Clock::now().time_since_epoch()).count();
+            raw_ros_origin_ = get_clock()->now().nanoseconds()
+                           - std::max<std::int64_t>(0, steady_ns - *acceleration_ns_);
+        }
+        last_source_ns_ = source_ns;
+        sensor_msgs::msg::Imu message;
+        message.header.frame_id = "chassis_body";
+        message.header.stamp = rclcpp::Time{
+            raw_ros_origin_ + static_cast<std::int64_t>(source_ns - *raw_source_origin_)};
+        message.orientation.w = orientation_->w();
+        message.orientation.x = orientation_->x();
+        message.orientation.y = orientation_->y();
+        message.orientation.z = orientation_->z();
+        message.angular_velocity.x = gyro_->x();
+        message.angular_velocity.y = gyro_->y();
+        message.angular_velocity.z = gyro_->z();
+        message.linear_acceleration.x = acceleration_->x();
+        message.linear_acceleration.y = acceleration_->y();
+        message.linear_acceleration.z = acceleration_->z();
+        const auto steady_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+            Clock::now().time_since_epoch()).count();
+        if (!orientation_->coeffs().allFinite()
+            || std::abs(orientation_->squaredNorm() - 1.) > .01
+            || !*imu_ns_ || steady_ns - *imu_ns_ > 40'000'000)
+            message.orientation_covariance[0] = -1.;
+        raw_imu_pub_->publish(message);
+    }
+
     static std::string number(double value) {
         std::ostringstream stream;
         stream << std::setprecision(17) << value;
@@ -218,7 +328,21 @@ private:
         bullet_feeder_velocity_;
     InputInterface<Eigen::Quaterniond> orientation_;
     InputInterface<Eigen::Vector3d> gyro_, gravity_;
-    InputInterface<std::uint64_t> imu_ns_;
+    InputInterface<std::uint64_t> imu_ns_, acceleration_ns_, acceleration_sample_ns_,
+        acceleration_sequence_;
+    InputInterface<Eigen::Vector3d> acceleration_;
+    InputInterface<Eigen::Vector2d> joystick_left_, joystick_right_;
+    InputInterface<rmcs_msgs::Switch> switch_left_, switch_right_;
+    InputInterface<rmcs_msgs::Keyboard> keyboard_;
+    InputInterface<double> knob_, height_, gimbal_yaw_velocity_, gimbal_pitch_torque_;
+    InputInterface<rmcs_description::BaseLink::DirectionVector> command_;
+    InputInterface<rmcs_msgs::ChassisMode> mode_;
+    InputInterface<bool> remote_fresh_;
+    InputInterface<int> rl_state_, recovery_phase_, recovery_fault_;
+    rclcpp::Publisher<sensor_msgs::msg::Imu>::SharedPtr raw_imu_pub_;
+    std::optional<std::uint64_t> raw_source_origin_;
+    std::int64_t raw_ros_origin_ = 0;
+    std::uint64_t last_acceleration_sequence_ = 0, last_source_ns_ = 0;
     InputInterface<bool> fresh_, valid_;
     InputInterface<bool> control_enabled_, dm_control_ready_;
     InputInterface<JointVector> model_position_;

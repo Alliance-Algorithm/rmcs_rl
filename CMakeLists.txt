@@ -72,6 +72,10 @@ set_target_properties(rmcs_rl PROPERTIES INSTALL_RPATH "$ORIGIN")
 pluginlib_export_plugin_description_file(rmcs_executor plugins.xml)
 install(DIRECTORY ${ONNXRUNTIME_ROOT_DIR}/lib/ DESTINATION lib FILES_MATCHING PATTERN "*.so*")
 
+# Local stdin/stdout simulation only; never launches the hardware executor.
+ament_auto_add_executable(wheel_leg_policy_host tool/simulation/wheel_leg_policy_host.cpp)
+target_link_libraries(wheel_leg_policy_host nlohmann_json::nlohmann_json)
+
 install(DIRECTORY models DESTINATION share/${PROJECT_NAME})
 install(DIRECTORY tool/visualization DESTINATION share/${PROJECT_NAME}/tool
     FILES_MATCHING PATTERN "*.py")
