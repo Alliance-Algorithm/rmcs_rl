@@ -19,8 +19,6 @@ TOPICS = {
     "/wheel_leg/telemetry/rl_angular_velocity": ("gyro", "geometry_msgs/msg/Vector3Stamped", "chassis_body"),
     "/wheel_leg/telemetry/diagnostics": ("diagnostics", "diagnostic_msgs/msg/DiagnosticArray", "chassis_body"),
 }
-RAW_IMU_TOPIC = "/wheel_leg/telemetry/imu_raw"
-CHANNELS = TOPICS | {RAW_IMU_TOPIC: ("raw_imu", "sensor_msgs/msg/Imu", "chassis_body")}
 SUBPROTOCOLS = ("foxglove.sdk.v1", "foxglove.websocket.v1")
 
 
@@ -52,7 +50,6 @@ class Snapshot:
     operator: dict | None = None
     remote: dict | None = None
     controller: dict | None = None
-    specific_force_body: tuple[float, ...] = ()
 
     @property
     def positions_by_name(self):
@@ -124,7 +121,7 @@ class Snapshot:
         for name in ("positions", "gimbal_positions", "quaternion_wxyz", "gyro_body",
                      "gravity_rl", "gyro_rl", "velocities", "gimbal_velocities",
                      "rmcs_knee", "rmcs_length", "rmcs_model_positions", "model_offsets",
-                     "sensor_age_s", "specific_force_body"):
+                     "sensor_age_s"):
             if name in fields:
                 fields[name] = tuple(fields[name])
         return cls(**fields).validate()
@@ -209,36 +206,10 @@ class SnapshotAssembler:
                           dm_control_ready=optional_flag("dm_control_ready"),
                           gimbal_positions=tuple(float(joints.position[i]) for i in gimbal_index),
                           gimbal_velocities=gimbal_velocity, operator=operator,
-                          remote=remote or None, controller=controller or None,
-                          specific_force_body=vector(imu.linear_acceleration)
-                              if imu.linear_acceleration_covariance[0] != -1 else ()).validate()
+                          remote=remote or None, controller=controller or None).validate()
         self.last_stamp = stamp
         self.pending = {key: val for key, val in self.pending.items() if key > stamp}
         return result
-
-
-@dataclass(frozen=True)
-class ImuSample:
-    stamp_ns: int
-    quaternion_wxyz: tuple[float, ...]
-    specific_force_body: tuple[float, ...]
-    gyro_body: tuple[float, ...]
-    epoch: int = 0
-
-    def validate(self):
-        if self.stamp_ns <= 0 or self.epoch < 0:
-            raise ValueError("invalid raw IMU timestamp/epoch")
-        for name, count in (("quaternion_wxyz", 4), ("specific_force_body", 3), ("gyro_body", 3)):
-            a = getattr(self, name)
-            if len(a) != count or not all(math.isfinite(v) for v in a):
-                raise ValueError("invalid raw IMU " + name)
-        if not .99 < sum(v*v for v in self.quaternion_wxyz) < 1.01:
-            raise ValueError("invalid raw IMU quaternion")
-        return self
-
-    @classmethod
-    def from_dict(cls, row):
-        return cls(**{k: row[k] for k in cls.__dataclass_fields__}).validate()
 
 
 class LatestSnapshot:
@@ -281,10 +252,6 @@ class LatestSnapshot:
             if dispatch:
                 for listener in self.listeners:
                     listener(kind, value)
-
-    def put_imu(self, sample):
-        sample.validate()
-        self._row("imu", asdict(sample))
 
     def event(self, name, *, dispatch=True, **data):
         self._row("event", dict(name=name, **data), dispatch=dispatch)
@@ -341,14 +308,31 @@ class FoxgloveReader(threading.Thread):
                             continue
                         if isinstance(packet, str):
                             event = json.loads(packet)
-                            if event.get("op") == "advertise":
+                            if event.get("op") == "serverInfo":
+                                # The bridge may be foxglove_bridge or the Foxglove
+                                # SDK.  Keep the negotiated transport visible in a
+                                # recording so a reachable-but-empty ROS graph is
+                                # distinguishable from a decode failure.
+                                self.latest.event(
+                                    "server_info",
+                                    server_name=event.get("name", ""),
+                                    capabilities=event.get("capabilities", []),
+                                    supported_encodings=event.get("supportedEncodings", []),
+                                    metadata=event.get("metadata", {}),
+                                    dispatch=False,
+                                )
+                            elif event.get("op") == "advertise":
                                 requests = []
+                                rejected = []
                                 for channel in event["channels"]:
                                     topic = channel["topic"]
-                                    if topic not in CHANNELS:
+                                    if topic not in TOPICS:
                                         continue
-                                    if channel["encoding"] != "cdr" or channel["schemaName"] != CHANNELS[topic][1]:
-                                        raise ValueError(f"unsupported encoding/schema for {topic}")
+                                    if channel["encoding"] != "cdr" or channel["schemaName"] != TOPICS[topic][1]:
+                                        rejected.append(
+                                            f"{topic} ({channel.get('encoding')}/{channel.get('schemaName')})"
+                                        )
+                                        continue
                                     ident = channel["id"]
                                     if ident not in subscriptions or subscriptions[ident] != topic:
                                         subscriptions[ident] = topic
@@ -356,8 +340,18 @@ class FoxgloveReader(threading.Thread):
                                 if requests:
                                     await socket.send(json.dumps({"op": "subscribe", "subscriptions": requests}))
                                 missing = set(TOPICS) - set(subscriptions.values())
+                                advertised = sorted(channel.get("topic", "") for channel in event["channels"])
+                                details = [
+                                    f"advertised {len(advertised)} channel(s)",
+                                    f"subscribed {len(set(subscriptions.values()) & set(TOPICS))}/5",
+                                ]
                                 if missing:
-                                    self.latest.set_status("missing topics: " + ", ".join(sorted(missing)))
+                                    details.append("missing: " + ", ".join(sorted(missing)))
+                                if rejected:
+                                    details.append("rejected: " + ", ".join(rejected))
+                                if advertised:
+                                    details.append("available: " + ", ".join(advertised))
+                                self.latest.set_status("; ".join(details))
                             elif event.get("op") == "unadvertise":
                                 for ident in event["channelIds"]:
                                     subscriptions.pop(ident, None)
@@ -373,18 +367,7 @@ class FoxgloveReader(threading.Thread):
                         if topic is None:
                             continue
                         try:
-                            message = self.typestore.deserialize_cdr(packet[13:], CHANNELS[topic][1])
-                            if topic == RAW_IMU_TOPIC:
-                                if (message.header.frame_id != "chassis_body"
-                                        or message.orientation_covariance[0] == -1
-                                        or message.linear_acceleration_covariance[0] == -1):
-                                    raise ValueError("raw IMU orientation/acceleration unavailable")
-                                q = message.orientation
-                                self.latest.put_imu(ImuSample(
-                                    int(message.header.stamp.sec)*1_000_000_000 + int(message.header.stamp.nanosec),
-                                    (float(q.w), float(q.x), float(q.y), float(q.z)),
-                                    vector(message.linear_acceleration), vector(message.angular_velocity), self.epoch))
-                                continue
+                            message = self.typestore.deserialize_cdr(packet[13:], TOPICS[topic][1])
                             snapshot = assembler.accept(topic, message)
                             if snapshot:
                                 self.latest.put(snapshot)
@@ -446,12 +429,12 @@ class ReplayReader(threading.Thread):
                 if count == 0:
                     self.latest.event("replay_begin")
                 for elapsed, row in read_rows(self.path, self.metadata):
+                    kind = row.get("kind", "snapshot")
+                    if kind not in ("snapshot", "event"):
+                        continue
                     if self.stopped.wait(max(0., started + elapsed / self.speed - time.monotonic())):
                         return
-                    kind = row.get("kind", "snapshot")
-                    if kind == "imu":
-                        self.latest.put_imu(ImuSample.from_dict(row))
-                    elif kind == "event":
+                    if kind == "event":
                         self.latest._row("event", {k: v for k, v in row.items() if k not in ("kind", "record_time_s")})
                     elif kind == "snapshot":
                         self.latest.put(Snapshot.from_dict(row), source="replay")

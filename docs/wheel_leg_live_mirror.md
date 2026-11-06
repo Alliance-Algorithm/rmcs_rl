@@ -61,7 +61,7 @@ ros2 launch rmcs_bringup rmcs.launch.py robot:=wheel-leg-infantry-wheelbipe-reco
 ros2 launch foxglove_bridge foxglove_bridge_launch.xml
 ```
 
-默认 WebSocket 地址为 `ws://实车IP:8765`。若使用自定义话题白名单，应包含下面六个话题。本机镜像仅订阅它们，不发控制命令。
+默认 WebSocket 地址为 `ws://实车IP:8765`。若使用自定义话题白名单，应包含下面五个话题。本机镜像仅订阅它们，不发控制命令。
 
 ## 消息约定
 
@@ -70,8 +70,7 @@ ros2 launch foxglove_bridge foxglove_bridge_launch.xml
 | 话题，前缀 `/wheel_leg/telemetry/` | 消息 | 内容 |
 |---|---|---|
 | `joint_states` | `sensor_msgs/msg/JointState` | 四个腿部主动轴、两个轮子以及云台 yaw/pitch 的硬件层输出轴角与角速度 |
-| `imu_body` | `sensor_msgs/msg/Imu` | 安装补偿后的姿态四元数、机体角速度，以及 body specific force（包含重力） |
-| `imu_raw` | `sensor_msgs/msg/Imu` | 每个新加速度源样本；header 时间锚定 IMU 样本时间，供本机手动搬动位移积分 |
+| `imu_body` | `sensor_msgs/msg/Imu` | 安装补偿后的姿态四元数和机体角速度 |
 | `rl_projected_gravity` | `geometry_msgs/msg/Vector3Stamped` | 状态估计器的机体系单位重力向量，尚未做策略观测缩放 |
 | `rl_angular_velocity` | `geometry_msgs/msg/Vector3Stamped` | 机体角速度，尚未做策略观测缩放 |
 | `diagnostics` | `diagnostic_msgs/msg/DiagnosticArray` | 有效性、反馈年龄、标定身份、模型轴角、被动膝内角和腿长 |
@@ -87,7 +86,7 @@ ros2 launch foxglove_bridge foxglove_bridge_launch.xml
 `pitch_motor_zero_point` 处理一次，镜像不重复减零点。摩擦轮和拨弹轮速度保留在
 diagnostics 中供 Foxglove 查看，不参与车体几何。
 
-`imu_body` 的 ROS 四元数字段为 `x,y,z,w`，内部 Eigen 为 `w,x,y,z`。`linear_acceleration` 是安装补偿后的 body specific force（m/s²，包含重力）；没有有效样本时才将 `linear_acceleration_covariance[0] = -1`。`imu_raw` 只在加速度 sequence 变化时发布，保留源样本时间间隔。共同发布时间表示执行器快照；CAN 与 IMU 的采集仍异步，因此 diagnostics 还包含各自的单调时钟反馈年龄。
+`imu_body` 的 ROS 四元数字段为 `x,y,z,w`，内部 Eigen 为 `w,x,y,z`。镜像遥测不提供线加速度，`linear_acceleration_covariance[0] = -1`。共同发布时间表示执行器快照；CAN 与 IMU 的采集仍异步，因此 diagnostics 还包含各自的单调时钟反馈年龄。
 
 diagnostics 的 status 名称为 `wheel_leg/telemetry`，关键值包括：
 
@@ -98,7 +97,6 @@ diagnostics 的 status 名称为 `wheel_leg/telemetry`，关键值包括：
 - `operator/ready`、`operator/remote_fresh`、`operator/vx`、`operator/vy`、`operator/wz`、`operator/height_m`、`operator/mode`：RMCS 已解释的遥控输入，供本机物理车复用，避免在 Python 重写双下/双中状态机。
 - `remote/*`：原始双摇杆、左右拨杆、knob 和键盘 bitmask；不存在时表示该配置没有这些接口。
 - `rl/state`、`recovery/phase`、`recovery/fault`：实车当前控制器状态，仅作对照。
-- `imu/acceleration_sample_ns`、`imu/acceleration_sequence`、`imu/acceleration_convention=body_specific_force_including_gravity_mps2`。
 - `imu_age_s`、`motor_age_s/<轴名>`；缺失或异常未来时间为 -1。
 - `model_position_rad/<轴名>`、四个腿轴的 `model_offset_rad/<轴名>`。
 - `gimbal_state_ready`、`gimbal/yaw_angle_rad`、`gimbal/yaw_velocity_rad_s`、
@@ -120,15 +118,11 @@ scripts/view_wheel_leg_live.sh --replay session.jsonl
 
 映射、独立几何重建、GUI 依赖与核对流程见该项目的 `docs/WHEEL_LEG_LIVE_MIRROR.md`。协议接收与记录实现复用本仓库 `rmcs_ws/src/rmcs_rl/tool/visualization/wheel_leg_telemetry.py`，构建时也安装到 `share/rmcs_rl/tool/visualization/`，无需在 GUI 主机安装 ROS。
 
-镜像固定世界位置，只更新本机 IMU 积分得到的实测 XYZ、实测朝向、轮腿机构和云台 yaw/pitch 姿态。它不施加重力、接触、碰撞或其他动力学，不会把手持、悬空、倒置或快速转动车体拉回站立，也不会按倾角或角速度阻止显示。名义膝角/关节范围只给出诊断，不夹紧测量输入。闭链仅根据机构锚点求解；云台关节不参与轮腿闭链约束。
+镜像的世界位置固定为本机 `--base-position X Y Z`，默认 `(0, 0, 0.65)` m，只更新实测朝向、轮腿机构和云台 yaw/pitch 姿态。它不估计实车的平移距离，不施加重力、接触、碰撞或其他动力学，不会把手持、悬空、倒置或快速转动车体拉回站立，也不会按倾角或角速度阻止显示。名义膝角/关节范围只给出诊断，不夹紧测量输入。闭链仅根据机构锚点求解；云台关节不参与轮腿闭链约束。
 
 RMCS `state_valid=false` 或汇总 `feedback_fresh=false` 时，镜像继续使用单个传感器年龄合格的编码器和 IMU 显示当前姿态。`state_valid=false` 时将 RMCS 的对照解算标为不可用，不会把失效参考值用于几何重建。重力方向差只显示数值，不参与姿态更新。IMU 的原有姿态融合仍可能受手动加速影响，镜像显示的是它实际返回的姿态，不再额外做加速度或重力修正。
 
 断线、缺帧、单个反馈过期、坏数值、标定不一致或无法闭合机构时仍冻结最后有效姿态并标红。这些是数据与几何完整性检查。原有实车控制使能、力矩、故障和超时保护保持原样；软件对齐检查不代表实车几何测量或动力学验证已经完成。
-
-## 原始 IMU 的来源
-
-`WheelLeg` 已将 `Bmi088Ekf::AccelerationSnapshot` 的 body specific force、host receive time、BoardClock sample time 和 sequence 分开发布。IMU 安装变换与可能的传感器杆臂修正只在硬件驱动处理一次；本组件不重新做安装补偿。加速度的 BoardClock 时间先转为纳秒，镜像端据此建立源时间轴；网络到达时间和 GUI 帧率不进入积分。
 
 ## 与本机 PhysX 双车对比
 
