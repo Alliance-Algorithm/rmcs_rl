@@ -6,7 +6,6 @@
 
 以下配置已经加入组件，默认 100 Hz：
 
-- `wheel-leg-infantry-traditional.yaml`
 - `wheel-leg-infantry-prone-v4.yaml`
 - `wheel-leg-infantry-wheelbipe.yaml`
 - `wheel-leg-infantry-wheelbipe-recovery.yaml`
@@ -41,10 +40,10 @@ build-rmcs --packages-select rmcs_rl rmcs_core rmcs_bringup
 source rmcs_ws/install/setup.bash
 ```
 
-部署后按原流程启动所选 RMCS 配置。例如现有传统配置入口为：
+部署后按原流程启动所选 RMCS 配置。例如当前策略配置入口为：
 
 ```bash
-ros2 launch rmcs_bringup rmcs.launch.py robot:=wheel-leg-infantry-traditional
+ros2 launch rmcs_bringup rmcs.launch.py robot:=wheel-leg-infantry-wheelbipe
 ```
 
 当前 `wheel-leg-infantry-wheelbipe-recovery` 已启用镜像。使用该配置时启动：

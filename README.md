@@ -164,7 +164,7 @@ must gate actuation on validity and their own control/safety state. Observation
 telemetry is available under `<rl_base>/observation/<term-name>`.
 
 For wheel-leg, the bringup profile `wheel-leg-infantry-rl.yaml` uses
-`rmcs_core::controller::chassis::WheelLegController` and `rmcs_rl::RlBridge`.
+`rmcs_core::controller::chassis::WheelLegRlController` and `rmcs_rl::RlBridge`.
 The controller supplies calibrated joint/IMU coordinates, command conditioning
 and executed action history. Unified policies use a complete controller-owned
 frame; the bridge copies the frame and runs inference.
