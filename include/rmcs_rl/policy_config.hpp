@@ -32,6 +32,9 @@ struct PolicyConfig {
     std::optional<double> action_clip;
     std::map<std::string, PolicyExtraInput> extra_input_values;
     double expected_policy_rate = 0.0;
+    std::string estimate_output_name;
+    std::size_t estimate_size = 0;
+    std::map<std::string, std::string> expected_metadata;
 };
 
 } // namespace rmcs_rl

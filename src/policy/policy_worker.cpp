@@ -12,8 +12,10 @@ PolicyWorker::PolicyWorker(PolicyConfig config)
     , pending_observation_(model_.info().obs_size)
     , input_buffer_(model_.info().obs_size)
     , action_buffer_(model_.info().action_size)
+    , estimate_buffer_(model_.info().estimate_size)
     , result_{} {
     result_.action.reserve(model_.info().action_size);
+    result_.estimate.reserve(model_.info().estimate_size);
     worker_ = std::jthread([this] { run_(); });
 }
 
@@ -44,6 +46,8 @@ bool PolicyWorker::try_take(Result& result) {
     result.error.swap(result_.error);
     result.action.clear();
     result.action.insert(result.action.end(), result_.action.begin(), result_.action.end());
+    result.estimate.assign(result_.estimate.begin(), result_.estimate.end());
+    result.estimate_frame.assign(result_.estimate_frame.begin(), result_.estimate_frame.end());
     result_ready_ = false;
     return true;
 }
@@ -71,7 +75,7 @@ void PolicyWorker::run_() {
 
         std::string error;
         const auto started = Clock::now();
-        const bool success = model_.run(input_buffer_, action_buffer_, error);
+        const bool success = model_.run(input_buffer_, action_buffer_, error, estimate_buffer_);
         const auto completed = Clock::now();
 
         {
@@ -92,6 +96,10 @@ void PolicyWorker::run_() {
             result_.success = success;
             result_.error = std::move(error);
             if (success) {
+                result_.estimate.assign(estimate_buffer_.begin(), estimate_buffer_.end());
+                if (!estimate_buffer_.empty())
+                    result_.estimate_frame.assign(
+                        input_buffer_.end() - model_.info().feature_size, input_buffer_.end());
                 result_.action.clear();
                 result_.action.insert(
                     result_.action.end(), action_buffer_.begin(), action_buffer_.end());

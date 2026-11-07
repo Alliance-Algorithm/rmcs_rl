@@ -24,6 +24,17 @@ PolicyConfig load_policy_config(
     config.input_name = string_or(node, "input_name", "");
     config.output_name = string_or(node, "output_name", "");
     config.model_type = string_or(node, "model_type", "auto");
+    config.estimate_output_name = string_or(node, "estimate_output_name", "");
+    const auto estimate_size = integer_parameter(node, "estimate_size").value_or(0);
+    if (estimate_size < 0)
+        throw std::invalid_argument("estimate_size must be non-negative");
+    config.estimate_size = static_cast<std::size_t>(estimate_size);
+    for (const auto& name : node.list_parameters({"expected_metadata"}, 0).names) {
+        constexpr std::string_view prefix = "expected_metadata.";
+        if (name.starts_with(prefix))
+            config.expected_metadata.emplace(
+                name.substr(prefix.size()), node.get_parameter(name).as_string());
+    }
     config.expected_model_spec_sha256 = string_or(node, "expected_model_spec_sha256", "");
     if (config.model_type == "wheel_leg_v7" && config.expected_model_spec_sha256.empty())
         config.expected_model_spec_sha256 =

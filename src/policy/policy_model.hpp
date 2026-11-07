@@ -28,12 +28,15 @@ public:
         std::size_t output_rank = 0;
         std::size_t sequence_length = 1;
         std::size_t feature_size = 0;
+        std::size_t estimate_size = 0;
     };
 
     explicit PolicyModel(const Config& config);
 
     [[nodiscard]] const Info& info() const { return info_; }
-    bool run(std::span<const double> observation, std::span<double> action, std::string& error);
+    bool
+        run(std::span<const double> observation, std::span<double> action, std::string& error,
+            std::span<double> estimate = {});
 
 private:
     void load_normalization(const Config& config);
@@ -46,6 +49,7 @@ private:
     std::optional<double> action_clip_;
     std::vector<float> obs_buffer_;
     std::vector<float> action_buffer_;
+    std::vector<float> estimate_buffer_;
 };
 
 } // namespace rmcs_rl

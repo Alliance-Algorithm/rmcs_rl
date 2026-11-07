@@ -57,6 +57,16 @@ public:
                 register_output(term.output + suffix, *contract_outputs_.back(), value);
             }
         }
+        estimate_size_ = model.estimate_size;
+        if (estimate_size_ != 0) {
+            register_output(
+                config.rl_base + "/estimate", estimate_output_,
+                std::vector<double>(model.estimate_size, std::numeric_limits<double>::quiet_NaN()));
+            register_output(config.rl_base + "/estimate_valid", estimate_valid_output_, false);
+            register_output(
+                config.rl_base + "/estimate_frame", estimate_frame_output_,
+                std::vector<double>(model.feature_size, std::numeric_limits<double>::quiet_NaN()));
+        }
         register_output(config.rl_base + "/valid", valid_output_, 0.0);
         register_output(config.rl_base + "/healthy", healthy_output_, 0.0);
         register_output(
@@ -121,6 +131,16 @@ public:
             }
             **action_outputs_[i] = value;
         }
+        if (estimate_size_ != 0) {
+            *estimate_valid_output_ = valid;
+            if (valid) {
+                *estimate_output_ = action.estimate;
+                *estimate_frame_output_ = action.estimate_frame;
+            } else
+                std::fill(
+                    estimate_output_->begin(), estimate_output_->end(),
+                    std::numeric_limits<double>::quiet_NaN());
+        }
         *valid_output_ = valid ? 1.0 : 0.0;
         *healthy_output_ = healthy ? 1.0 : 0.0;
         *action_age_output_ = age;
@@ -150,6 +170,9 @@ private:
     OutputInterface<std::size_t> obs_seq_output_, action_seq_output_, action_context_output_;
     OutputInterface<std::uint64_t> action_ns_output_;
     OutputInterface<std::size_t> observation_size_output_, action_size_output_;
+    std::size_t estimate_size_ = 0;
+    OutputInterface<std::vector<double>> estimate_output_, estimate_frame_output_;
+    OutputInterface<bool> estimate_valid_output_;
     OutputInterface<std::size_t> history_length_output_, feature_size_output_;
 };
 
@@ -170,6 +193,7 @@ public:
         , result_buffer_{} {
         action_.action.resize(config_.action_size);
         result_buffer_.action.reserve(config_.action_size);
+        result_buffer_.estimate.reserve(worker_.info().estimate_size);
 
         action_source_ = create_partner_component<PolicyActionPublisher>(
             get_component_name() + "_actions", config_, worker_.info(),

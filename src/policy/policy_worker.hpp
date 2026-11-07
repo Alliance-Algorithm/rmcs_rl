@@ -29,6 +29,8 @@ public:
         bool success = false;
         std::string error;
         std::vector<double> action;
+        std::vector<double> estimate;
+        std::vector<double> estimate_frame;
     };
 
     explicit PolicyWorker(PolicyConfig config);
@@ -71,6 +73,7 @@ private:
     std::vector<double> pending_observation_;
     std::vector<double> input_buffer_;
     std::vector<double> action_buffer_;
+    std::vector<double> estimate_buffer_;
     std::uint64_t pending_sequence_ = 0;
     std::uint64_t pending_generation_ = 0;
     Clock::time_point pending_submitted_at_{};

@@ -33,6 +33,8 @@ public:
         std::size_t action_size = 0;
         // 额外输入张量的常量值（键 = 模型输入名，值 = 展平的元素）。
         std::map<std::string, ExtraInputValues> extra_input_values;
+        std::string estimate_output_name;
+        std::size_t estimate_size = 0;
     };
 
     struct Info {
@@ -61,14 +63,17 @@ public:
                   .feature_size = 0,
                   .observation_size = 0,
                   .action_size = 0,
-                  .extra_input_values = {}}) {}
+                  .extra_input_values = {},
+                  .estimate_output_name = "",
+                  .estimate_size = 0}) {}
 
     [[nodiscard]] std::size_t input_size() const { return input_buffer_.size(); }
     [[nodiscard]] std::size_t output_size() const { return output_size_; }
     [[nodiscard]] const Info& info() const { return info_; }
     [[nodiscard]] std::optional<std::string> metadata(const char* key) const;
 
-    void run(std::span<const float> input, std::span<float> output);
+    [[nodiscard]] std::size_t estimate_size() const { return estimate_size_; }
+    void run(std::span<const float> input, std::span<float> output, std::span<float> estimate = {});
 
 private:
     struct ConstantInput {
@@ -87,6 +92,8 @@ private:
     Ort::Session session_{nullptr};
     std::string input_name_;
     std::string output_name_;
+    std::string estimate_name_;
+    std::size_t estimate_size_ = 0;
     std::vector<std::string> input_names_; // 会话输入顺序
     std::vector<ConstantInput> constants_;
     // 与 input_names_ 并行：主输入为 -1，其余为 constants_ 下标

@@ -48,7 +48,13 @@ PolicyModel::PolicyModel(const Config& config)
               config.path, config.input_name, config.output_name, config.model_type,
               config.expected_model_spec_sha256, config.expected_leg_winding_version,
               config.sequence_length, config.feature_size, config.observation_size,
-              config.action_size, config.extra_input_values}) {
+              config.action_size, config.extra_input_values, config.estimate_output_name,
+              config.estimate_size}) {
+    for (const auto& [key, value] : config.expected_metadata)
+        if (runtime_.metadata(key.c_str()).value_or("") != value)
+            throw std::invalid_argument(
+                "model metadata does not match configured contract: " + key);
+    info_.estimate_size = runtime_.estimate_size();
     info_.path = config.path;
     info_.model_spec_sha256 = runtime_.info().model_spec_sha256;
     info_.observation_contract_sha256 =
@@ -93,11 +99,14 @@ PolicyModel::PolicyModel(const Config& config)
     load_normalization(config);
     obs_buffer_.resize(info_.obs_size);
     action_buffer_.resize(info_.action_size);
-    runtime_.run(obs_buffer_, action_buffer_);
+    estimate_buffer_.resize(info_.estimate_size);
+    runtime_.run(obs_buffer_, action_buffer_, estimate_buffer_);
     if (!std::all_of(action_buffer_.begin(), action_buffer_.end(), [](float value) {
             return std::isfinite(value);
         }))
         throw std::runtime_error("startup inference produced non-finite actions: " + config.path);
+    if (!std::ranges::all_of(estimate_buffer_, [](float v) { return std::isfinite(v); }))
+        throw std::runtime_error("startup inference produced non-finite estimates: " + config.path);
 }
 
 void PolicyModel::load_normalization(const Config& config) {
@@ -128,9 +137,11 @@ void PolicyModel::load_normalization(const Config& config) {
 }
 
 bool PolicyModel::run(
-    std::span<const double> observation, std::span<double> action, std::string& error) {
+    std::span<const double> observation, std::span<double> action, std::string& error,
+    std::span<double> estimate) {
     error.clear();
-    if (observation.size() != info_.obs_size || action.size() != info_.action_size) {
+    if (observation.size() != info_.obs_size || action.size() != info_.action_size
+        || estimate.size() != info_.estimate_size) {
         error = "observation/action dimensions do not match model";
         return false;
     }
@@ -147,7 +158,7 @@ bool PolicyModel::run(
         }
     }
     try {
-        runtime_.run(obs_buffer_, action_buffer_);
+        runtime_.run(obs_buffer_, action_buffer_, estimate_buffer_);
     } catch (const std::exception& exception) {
         error = exception.what();
         return false;
@@ -158,6 +169,13 @@ bool PolicyModel::run(
         error = "policy output contains non-finite values";
         return false;
     }
+    if (!std::all_of(estimate_buffer_.begin(), estimate_buffer_.end(), [](float value) {
+            return std::isfinite(value);
+        })) {
+        error = "policy estimate contains non-finite values";
+        return false;
+    }
+    std::copy(estimate_buffer_.begin(), estimate_buffer_.end(), estimate.begin());
     for (std::size_t i = 0; i < action.size(); ++i) {
         const double value = action_buffer_[i];
         action[i] = action_clip_ ? std::clamp(value, -*action_clip_, *action_clip_) : value;

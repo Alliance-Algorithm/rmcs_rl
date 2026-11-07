@@ -126,9 +126,9 @@ BridgeConfig load_bridge_config(rclcpp::Node& node) {
     config.observation_frame_sequence_path =
         string_or(node, "observation_frame_sequence_interface", "");
     if (!config.observation_frame_sequence_path.empty()) {
-        if (config.history_length != 1 || config.obs_terms.size() != 1)
-            throw std::invalid_argument(
-                "RlBridge: external frames require one array and history_length=1");
+        if (config.obs_terms.size() != 1
+            || (config.history_length != 1 && !bool_or(node, "stack_external_frames", false)))
+            throw std::invalid_argument("RlBridge: external frames require one complete array");
         const auto& frame = config.obs_terms.front();
         if (frame.kind != TermKind::kPath || frame.take != Take::kArray || frame.index != 0
             || frame.dim != config.obs_frame_size || frame.scale != 1.0 || frame.has_clip

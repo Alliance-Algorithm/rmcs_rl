@@ -19,9 +19,7 @@ std::string lower(std::string value) {
     return value;
 }
 
-bool batch_dimension_ok(std::int64_t dimension) {
-    return dimension == 1 || dimension == -1;
-}
+bool batch_dimension_ok(std::int64_t dimension) { return dimension == 1 || dimension == -1; }
 
 } // namespace
 
@@ -63,8 +61,11 @@ OnnxRuntime::OnnxRuntime(const Config& config)
                 "wheel-leg model_spec_sha256 does not match the deployed geometry contract");
     }
 
-    if (session_.GetOutputCount() != 1)
-        throw std::invalid_argument("model must have exactly one output");
+    const bool with_estimate = !config.estimate_output_name.empty();
+    if (with_estimate != (config.estimate_size > 0))
+        throw std::invalid_argument("estimate output name and size must be configured together");
+    if (session_.GetOutputCount() != (with_estimate ? 2U : 1U))
+        throw std::invalid_argument("model outputs do not match the configured policy contract");
     const std::size_t input_count = session_.GetInputCount();
     if (input_count == 0)
         throw std::invalid_argument("model must have at least one input");
@@ -86,7 +87,15 @@ OnnxRuntime::OnnxRuntime(const Config& config)
         throw std::invalid_argument(
             "primary input '" + input_name_ + "' not found; model inputs: [" + listing + "]");
     }
-    const auto actual_output = session_.GetOutputNameAllocated(0, allocator_);
+    std::size_t action_index = 0;
+    if (!output_name_.empty()) {
+        for (; action_index < session_.GetOutputCount(); ++action_index)
+            if (output_name_ == session_.GetOutputNameAllocated(action_index, allocator_).get())
+                break;
+        if (action_index == session_.GetOutputCount())
+            throw std::invalid_argument("configured action output does not exist");
+    }
+    const auto actual_output = session_.GetOutputNameAllocated(action_index, allocator_);
     if (output_name_.empty())
         output_name_ = actual_output.get();
     if (actual_output.get() != output_name_)
@@ -94,7 +103,23 @@ OnnxRuntime::OnnxRuntime(const Config& config)
             "output tensor must be named '" + output_name_ + "', got '" + actual_output.get()
             + "'");
     const auto input_type = session_.GetInputTypeInfo(primary_index);
-    const auto output_type = session_.GetOutputTypeInfo(0);
+    const auto output_type = session_.GetOutputTypeInfo(action_index);
+    if (with_estimate) {
+        const auto index = 1U - action_index;
+        if (config.estimate_output_name != session_.GetOutputNameAllocated(index, allocator_).get())
+            throw std::invalid_argument("configured estimate output does not exist");
+        const auto type = session_.GetOutputTypeInfo(index);
+        if (type.GetONNXType() != ONNX_TYPE_TENSOR)
+            throw std::invalid_argument("estimate output must be a tensor");
+        const auto info = type.GetTensorTypeAndShapeInfo();
+        const auto shape = info.GetShape();
+        if (info.GetElementType() != ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT || shape.size() != 2
+            || !batch_dimension_ok(shape[0])
+            || shape[1] != static_cast<std::int64_t>(config.estimate_size))
+            throw std::invalid_argument("estimate output must be float32 [batch, estimate_size]");
+        estimate_name_ = config.estimate_output_name;
+        estimate_size_ = config.estimate_size;
+    }
     if (input_type.GetONNXType() != ONNX_TYPE_TENSOR
         || output_type.GetONNXType() != ONNX_TYPE_TENSOR)
         throw std::invalid_argument("obs and actions must be tensors");
@@ -365,8 +390,10 @@ std::optional<std::string> OnnxRuntime::metadata(const char* key) const {
     return std::string{value.get()};
 }
 
-void OnnxRuntime::run(std::span<const float> input, std::span<float> output) {
-    if (input.size() != input_size() || output.size() != output_size())
+void OnnxRuntime::run(
+    std::span<const float> input, std::span<float> output, std::span<float> estimate) {
+    if (input.size() != input_size() || output.size() != output_size()
+        || estimate.size() != estimate_size_)
         throw std::invalid_argument("inference buffers do not match model dimensions");
     std::copy(input.begin(), input.end(), input_buffer_.begin());
 
@@ -402,16 +429,25 @@ void OnnxRuntime::run(std::span<const float> input, std::span<float> output) {
             }
         }
     }
-    const char* output_names[] = {output_name_.c_str()};
+    const char* output_names[] = {output_name_.c_str(), estimate_name_.c_str()};
+    const std::size_t output_count = estimate_size_ == 0 ? 1 : 2;
     const auto outputs = session_.Run(
         Ort::RunOptions{nullptr}, input_names.data(), input_tensors.data(), input_count,
-        output_names, 1);
-    if (outputs.size() != 1 || !outputs[0].IsTensor()
+        output_names, output_count);
+    if (outputs.size() != output_count || !outputs[0].IsTensor()
         || outputs[0].GetTensorTypeAndShapeInfo().GetElementType()
                != ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT
         || outputs[0].GetTensorTypeAndShapeInfo().GetElementCount() != output_size())
         throw std::runtime_error("inference output does not match model dimensions");
     std::copy_n(outputs[0].GetTensorData<float>(), output_size(), output.begin());
+    if (estimate_size_ != 0) {
+        if (!outputs[1].IsTensor()
+            || outputs[1].GetTensorTypeAndShapeInfo().GetElementType()
+                   != ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT
+            || outputs[1].GetTensorTypeAndShapeInfo().GetElementCount() != estimate_size_)
+            throw std::runtime_error("estimate output does not match model dimensions");
+        std::copy_n(outputs[1].GetTensorData<float>(), estimate_size_, estimate.begin());
+    }
 }
 
 } // namespace rmcs_rl
