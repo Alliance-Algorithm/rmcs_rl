@@ -50,6 +50,9 @@ PolicyModel::PolicyModel(const Config& config)
               config.sequence_length, config.feature_size, config.observation_size,
               config.action_size, config.extra_input_values}) {
     info_.path = config.path;
+    for (const auto& [key, expected] : config.expected_metadata)
+        if (runtime_.metadata(key.c_str()) != std::optional<std::string>{expected})
+            throw std::invalid_argument("model metadata mismatch: expected_metadata." + key);
     info_.model_spec_sha256 = runtime_.info().model_spec_sha256;
     info_.observation_contract_sha256 =
         runtime_.metadata("rmcs_observation_contract_sha256").value_or("");

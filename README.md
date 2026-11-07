@@ -57,6 +57,81 @@ joint-name mapping and measured-pose checks.
 
 ## Policy deployment
 
+### Structured observation and action configuration
+
+New profiles use ordered names and parameter blocks rather than `key=value`
+strings. Both the deformable suspension profile and wheel-leg profiles use this
+format. Nested mappings are ROS parameter namespaces; `order` is a string array.
+
+```yaml
+rl_bridge:
+  ros__parameters:
+    rl_model_path: models/actor.onnx
+    policy_rate: 50.0
+    observations:
+      order: [gyro, command]
+      gyro:
+        source: /robot/gyro
+        type: vector3
+        scale: 0.5
+        clip: [-10.0, 10.0]
+      command:
+        source: /robot/command
+        type: vector3
+        select: [0, 2]
+    actions:
+      order: [left, right]
+      left:
+        output: /robot/policy/left
+        scale: 0.25
+      right:
+        output: /robot/policy/right
+        scale: 0.25
+    expected_metadata:
+      training_contract: robot_v1
+```
+
+Supported observation types are `scalar` (default), `vector3`, `array` with
+`size`, `scalars` with an ordered `sources` string array, `projected_gravity`
+from a quaternion, `constant` with a numeric `value` array, and `previous_action`.
+`select` selects/reorders source indices and may repeat indices. Processing is
+selection, `value * scale + offset`, then optional `clip: [lower, upper]`.
+`scale` and `offset` are scalar values applied to the whole term. A scalar source
+may specify a finite `default` for an absent interface. Input and action sizes
+are inferred; existing size parameters remain optional assertions.
+
+`source_clip` optionally clips before scaling. `precision: float32` rounds the
+source and arithmetic to float32, preserving training-time preprocessing order;
+the default is float64. Nonfinite sources are rejected before clipping.
+
+`previous_action` means the bridge's mapped/clipped action converted back to
+normalized units, not measured or guaranteed actuator execution. A vehicle that
+needs applied-action history must explicitly publish and bind that source.
+`expected_metadata` checks arbitrary string metadata keys at model startup;
+missing keys also fail validation. ONNX graphs own architecture and weights;
+tensor rank does not identify a model as an MLP or Transformer. `model_type:auto`
+therefore uses generic tensor validation. Vehicle-specific model type names are
+no longer accepted; use explicit metadata assertions instead.
+
+Legacy `observation_terms`/`action_terms` remain available for migration, but
+cannot be mixed with the structured format. Producer-sequence-triggered
+structured observations may contain multiple named features. Their producer
+must update all features before advancing the sequence. Legacy complete-frame
+mode retains its stricter single-array contract.
+
+Wheel-leg publishes unnormalized command, height, gyro, velocity and action
+feedback. YAML owns their preprocessing, feature concatenation, wheelbipe channel
+permutation, and physical action scaling/clipping. The controller consumes leg
+offsets and wheel speeds, retaining only mechanical winding and actuator safety.
+`action_history_source: raw|mapped` selects raw actor feedback or inverse-mapped
+executed feedback. Every action publishes `/raw`, `/scale`, `/offset`, and clip
+metadata alongside its decoded value. Observation telemetry at
+`<rl_base>/input/frame` now comes from the actual shared observation assembler.
+Standing odometry still uses a frozen training-reference calculation at 100 Hz;
+it explicitly rejects other rates until that stateful reference is generalized.
+Mechanical observation conventions and reference-profile selection remain
+vehicle-side. This is not yet a completely model-independent vehicle adapter.
+
 Set `rl_bridge.rl_model_path` in the vehicle profile and restart. Relative paths
 resolve inside the installed `rmcs_rl` share directory. `observation_terms` owns
 feature order, source binding, scaling and clipping; `action_terms` owns actor

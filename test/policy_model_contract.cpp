@@ -14,7 +14,7 @@ rmcs_rl::PolicyConfig configuration() {
     rmcs_rl::PolicyConfig config;
     config.path = ament_index_cpp::get_package_share_directory("rmcs_rl")
                 + "/models/wheel_leg/flat_directional200_1346_preview_20261020.onnx";
-    config.model_type = "wheel_leg_v7";
+    config.model_type = "generic";
     config.expected_model_spec_sha256 =
         "0ac82045ab584f20091538aa782d93ea545382dc701faca1f8ae92aeb7cd1997";
     config.expected_leg_winding_version = "paired_branch107_v1";
@@ -54,6 +54,17 @@ TEST(WheelLegPolicyContract, RejectsDifferentTargetWinding) {
     auto config = configuration();
     config.expected_leg_winding_version = "independent_nearest_v1";
     EXPECT_THROW(rmcs_rl::PolicyModel{config}, std::invalid_argument);
+}
+
+TEST(WheelLegPolicyContract, GenericMetadataAssertionsRejectMissingOrIncorrectValues) {
+    auto config = configuration();
+    config.expected_metadata["leg_winding_version"] = "paired_branch107_v1";
+    EXPECT_NO_THROW((rmcs_rl::PolicyModel{config}));
+    config.expected_metadata["leg_winding_version"] = "wrong";
+    EXPECT_THROW((rmcs_rl::PolicyModel{config}), std::invalid_argument);
+    config.expected_metadata.clear();
+    config.expected_metadata["nonexistent_training_contract"] = "";
+    EXPECT_THROW((rmcs_rl::PolicyModel{config}), std::invalid_argument);
 }
 
 TEST(WheelLegPolicyContract, RejectsDifferentObservationHistory) {

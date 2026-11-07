@@ -16,7 +16,7 @@ namespace rmcs_rl {
 
 inline constexpr std::size_t kNoSlot = std::numeric_limits<std::size_t>::max();
 
-enum class TermKind { kPath, kJointPos, kJointVel, kJointTorque, kLastAction, kConstant };
+enum class TermKind { kPath, kSources, kJointPos, kJointVel, kJointTorque, kLastAction, kConstant };
 
 enum class Take { kScalar, kComponent, kVector, kGravity, kArray };
 
@@ -50,12 +50,21 @@ struct ObsTerm {
     std::vector<std::size_t> joints;
     std::vector<std::string> joint_names;
     std::vector<std::size_t> joint_slots;
+    std::vector<std::string> sources;
     std::vector<double> joint_defaults;
     bool relative = false;
     bool zero = false;
 
     std::vector<std::size_t> action_indices;
     std::vector<double> constants;
+
+    std::size_t source_size = 0;
+    std::vector<std::size_t> selection;
+    double offset = 0.0;
+    bool float32 = false;
+    bool has_source_clip = false;
+    double source_clip_min = 0.0;
+    double source_clip_max = 0.0;
 
     double scale = 1.0;
     bool has_clip = false;
@@ -72,6 +81,7 @@ struct ActionTerm {
     std::string output;
     std::string id;
     double scale = 1.0;
+    double offset = 0.0;
     bool has_clip = false;
     double clip_min = 0.0;
     double clip_max = 0.0;

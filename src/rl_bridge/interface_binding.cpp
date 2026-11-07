@@ -16,6 +16,7 @@ void bind_observation_terms(
         case TermKind::kLastAction: break;
         case TermKind::kJointPos:
         case TermKind::kJointVel:
+        case TermKind::kSources:
         case TermKind::kJointTorque: {
             if (term.zero)
                 break;
@@ -23,6 +24,11 @@ void bind_observation_terms(
                              : term.kind == TermKind::kJointVel ? 'v'
                                                                 : 't';
             term.joint_slots.clear();
+            if (!term.sources.empty()) {
+                for (const auto& source : term.sources)
+                    term.joint_slots.push_back(resolve(source, {Binding::kDouble}, true, "scalar sources"));
+                break;
+            }
             for (const auto index : term.joints)
                 term.joint_slots.push_back(resolve(
                     joint_path(joints, joints.names[index], field), {Binding::kDouble}, true,

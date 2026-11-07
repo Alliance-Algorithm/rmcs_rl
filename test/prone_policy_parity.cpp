@@ -14,7 +14,7 @@ int main(int argc, char** argv) {
     try {
         rmcs_rl::PolicyConfig config;
         config.path = argv[1];
-        config.model_type = "wheel_leg_v202";
+        config.model_type = "generic";
         config.expected_model_spec_sha256 =
             "7f62e0b47546a047219c078bdaa44fc2d82553af04b36b72ec1a94be29a22e18";
         config.expected_leg_winding_version = "paired_branch107_v1";

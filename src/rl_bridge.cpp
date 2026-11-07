@@ -45,8 +45,11 @@ public:
         for (const auto& term : config.action_terms) {
             action_outputs_.push_back(std::make_unique<OutputInterface<double>>());
             register_output(term.output, *action_outputs_.back(), 0.0);
+            raw_outputs_.push_back(std::make_unique<OutputInterface<double>>());
+            register_output(term.output + "/raw", *raw_outputs_.back(), 0.0);
             for (const auto& [suffix, value] :
                  {std::pair{"/scale", term.scale},
+                  std::pair{"/offset", term.offset},
                   std::pair{
                       "/clip_min",
                       term.has_clip ? term.clip_min : -std::numeric_limits<double>::infinity()},
@@ -84,8 +87,8 @@ public:
             config.observation_frame_sequence_path);
         register_output(
             config.rl_base + "/observation_frame_interface", frame_path_output_,
-            config.observation_frame_sequence_path.empty() ? std::string{}
-                                                           : config.obs_terms.front().path);
+             config.observation_frame_sequence_path.empty() || config.obs_terms.size() != 1
+                 ? std::string{} : config.obs_terms.front().path);
         register_output(config.rl_base + "/performance/inference_us", inference_time_us_, 0.0);
     }
 
@@ -120,6 +123,7 @@ public:
                 value = written_[i];
             }
             **action_outputs_[i] = value;
+            **raw_outputs_[i] = valid ? action.action[i] : std::numeric_limits<double>::quiet_NaN();
         }
         *valid_output_ = valid ? 1.0 : 0.0;
         *healthy_output_ = healthy ? 1.0 : 0.0;
@@ -143,6 +147,7 @@ private:
     InvalidMode invalid_mode_;
     std::vector<double> written_;
     std::vector<std::unique_ptr<OutputInterface<double>>> action_outputs_, contract_outputs_;
+    std::vector<std::unique_ptr<OutputInterface<double>>> raw_outputs_;
     OutputInterface<double> valid_output_, healthy_output_, action_age_output_, inference_time_us_;
     OutputInterface<double> policy_rate_output_;
     OutputInterface<std::string> model_spec_output_, observation_contract_output_;
@@ -181,7 +186,7 @@ public:
                 auto name = term.id;
                 if (term.dim > 1) {
                     if (term.take == Take::kVector || term.take == Take::kGravity)
-                        name += std::string{"/"} + "xyz"[i];
+                        name += "/element_" + std::to_string(i);
                     else if (!term.joint_names.empty())
                         name += "/" + term.joint_names[i];
                     else if (term.take == Take::kArray)
@@ -200,6 +205,8 @@ public:
         own_output_paths_.insert(config_.rl_base + "/action_age");
         own_output_paths_.insert(config_.rl_base + "/obs_seq");
         last_actions_.assign(config_.action_size, 0.0);
+        register_output(config_.rl_base + "/input/frame", observation_frame_output_, std::vector<double>(config_.obs_frame_size));
+        own_output_paths_.insert(config_.rl_base + "/input/frame");
     }
 
     void before_pairing(const OutputInfoMap& output_map) override {
@@ -286,7 +293,8 @@ private:
             for (std::size_t i = 0; i < config_.action_size; ++i) {
                 const auto& term = config_.action_terms[i];
                 last_actions_[i] =
-                    term.scale == 0.0 ? 0.0 : map_action(action_.action[i], term) / term.scale;
+                    term.scale == 0.0 ? 0.0
+                                      : (map_action(action_.action[i], term) - term.offset) / term.scale;
             }
             action_feedback_.store(action_.submitted_at, last_actions_);
             last_feedback_obs_seq_ = action_.sequence;
@@ -392,6 +400,7 @@ private:
             std::copy(stacked.begin(), stacked.end(), observation_buffer_.begin());
             for (std::size_t i = 0; i < observation_outputs_.size(); ++i)
                 **observation_outputs_[i] = frame_buffer_[i];
+            std::copy(frame_buffer_.begin(), frame_buffer_.end(), observation_frame_output_->begin());
             std::uint64_t context = 0;
             if (context_slot_ != kNoSlot && !read_unsigned(slots_[context_slot_], context))
                 throw std::runtime_error("RlBridge: invalid inference context");
@@ -464,9 +473,11 @@ private:
         std::fill(action_.action.begin(), action_.action.end(), 0.0);
         for (auto& output : observation_outputs_)
             **output = 0.0;
+        std::fill(observation_frame_output_->begin(), observation_frame_output_->end(), 0.0);
     }
 
     std::vector<Slot> slots_;
+    OutputInterface<std::vector<double>> observation_frame_output_;
     std::vector<std::unique_ptr<OutputInterface<double>>> observation_outputs_;
     std::shared_ptr<PolicyActionPublisher> action_source_;
 

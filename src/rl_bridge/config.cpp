@@ -9,6 +9,7 @@
 #include <rmcs_rl/parameters.hpp>
 #include <rmcs_rl/rl_bridge/observation_history.hpp>
 #include <rmcs_rl/rl_bridge/term_parser.hpp>
+#include <rmcs_rl/rl_bridge/structured_config.hpp>
 #include <rmcs_rl/rl_bridge/utility.hpp>
 
 namespace rmcs_rl {
@@ -18,12 +19,17 @@ PolicyIoConfig load_policy_io_config(rclcpp::Node& node) {
     config.rl_base = string_or(node, "rl_base", "/rl");
     config.joint_config = load_joint_config(node);
     const auto action_specs = string_array_or(node, "action_terms");
-    if (action_specs.empty())
+    const bool structured = node.has_parameter("actions.order");
+    if (structured && !action_specs.empty())
+        throw std::invalid_argument("actions.order and legacy action_terms cannot be combined");
+    if (action_specs.empty() && !structured)
         throw std::invalid_argument("RlBridge: required parameter 'action_terms' is missing");
     std::unordered_set<std::string> output_paths;
     std::set<std::size_t> action_indices;
-    for (const auto& spec : action_specs) {
-        auto term = parse_action_term(spec);
+    auto actions = structured ? load_action_terms(node) : std::vector<ActionTerm>{};
+    for (const auto& spec : action_specs)
+        actions.push_back(parse_action_term(spec));
+    for (auto& term : actions) {
         if (!output_paths.emplace(term.output).second)
             throw std::invalid_argument(
                 "RlBridge: two action terms map to the same output "
@@ -50,11 +56,18 @@ PolicyIoConfig load_policy_io_config(rclcpp::Node& node) {
             "RlBridge: rl_action_size=" + std::to_string(*declared) + " but action_terms has "
             + std::to_string(config.action_size) + " entries");
     const auto observation_specs = string_array_or(node, "observation_terms");
-    if (observation_specs.empty())
+    const bool structured_observations = node.has_parameter("observations.order");
+    if (structured != structured_observations)
+        throw std::invalid_argument("observations.order and actions.order must be configured together");
+    if (structured && !observation_specs.empty())
+        throw std::invalid_argument("observations.order and legacy observation_terms cannot be combined");
+    if (observation_specs.empty() && !structured)
         throw std::invalid_argument(
             "RlBridge: required parameter 'observation_terms' is "
             "missing");
     const TermParseContext context{node, config.joint_config, config.action_size};
+    if (structured)
+        config.obs_terms = load_observation_terms(node);
     for (const auto& spec : observation_specs)
         config.obs_terms.push_back(parse_obs_term(spec, context));
 
@@ -125,13 +138,15 @@ BridgeConfig load_bridge_config(rclcpp::Node& node) {
     config.context_path = string_or(node, "context_interface", "");
     config.observation_frame_sequence_path =
         string_or(node, "observation_frame_sequence_interface", "");
-    if (!config.observation_frame_sequence_path.empty()) {
+    if (!config.observation_frame_sequence_path.empty() && !node.has_parameter("observations.order")) {
         if (config.history_length != 1 || config.obs_terms.size() != 1)
             throw std::invalid_argument(
                 "RlBridge: external frames require one array and history_length=1");
         const auto& frame = config.obs_terms.front();
         if (frame.kind != TermKind::kPath || frame.take != Take::kArray || frame.index != 0
-            || frame.dim != config.obs_frame_size || frame.scale != 1.0 || frame.has_clip
+             || frame.dim != config.obs_frame_size || frame.scale != 1.0 || frame.has_clip
+             || frame.offset != 0.0 || !frame.selection.empty()
+             || frame.float32 || frame.has_source_clip
             || config.history_period.count() != 0)
             throw std::invalid_argument(
                 "RlBridge: external frame must be a complete unscaled array");

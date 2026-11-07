@@ -13,7 +13,7 @@
 namespace rmcs_rl {
 
 double map_action(double value, const ActionTerm& term) {
-    value *= term.scale;
+    value = value * term.scale + term.offset;
     return term.has_clip ? std::clamp(value, term.clip_min, term.clip_max) : value;
 }
 

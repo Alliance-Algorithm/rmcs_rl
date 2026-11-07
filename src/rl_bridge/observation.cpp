@@ -13,25 +13,39 @@ bool build_observation(
     const std::vector<ObsTerm>& terms, const std::vector<Slot>& slots,
     const std::vector<double>& last_actions, std::size_t obs_size, std::vector<double>& obs) {
     obs.assign(obs_size, 0.0);
-    const auto push = [&obs](
-                          std::size_t index, double value, double scale, bool has_clip,
-                          double clip_min, double clip_max, bool& ok) {
-        if (!is_finite(value)) {
-            ok = false;
-            obs[index] = value;
-            return;
-        }
-        double result = value * scale;
-        if (has_clip)
-            result = std::clamp(result, clip_min, clip_max);
-        if (!is_finite(result))
-            ok = false;
-        obs[index] = result;
-    };
-
     for (const auto& term : terms) {
         if (term.index > obs_size || term.dim > obs_size - term.index)
             return false;
+        const auto push = [&obs, &term](
+                              std::size_t index, double value, double scale, bool has_clip,
+                              double clip_min, double clip_max, bool& ok) {
+            if (!term.selection.empty()
+                && std::ranges::find(term.selection, index - term.index) == term.selection.end())
+                return;
+            const auto quantize = [&term](double v) {
+                return term.float32 ? static_cast<double>(static_cast<float>(v)) : v;
+            };
+            double result = quantize(value);
+            if (!is_finite(value) || !is_finite(result)) {
+                ok = false;
+                return;
+            }
+            if (term.has_source_clip)
+                result = std::clamp(
+                    result, quantize(term.source_clip_min), quantize(term.source_clip_max));
+            result = quantize(result * quantize(scale));
+            result = quantize(result + quantize(term.offset));
+            if (has_clip)
+                result = std::clamp(result, clip_min, clip_max);
+            if (!is_finite(value) || !is_finite(result))
+                ok = false;
+            if (term.selection.empty())
+                obs[index] = result;
+            else
+                for (std::size_t i = 0; i < term.selection.size(); ++i)
+                    if (term.selection[i] == index - term.index)
+                        obs[term.index + i] = result;
+        };
         bool ok = true;
         switch (term.kind) {
         case TermKind::kPath: {
@@ -86,9 +100,10 @@ bool build_observation(
                     || !entry.array_value->ready())
                     return false;
                 const auto& values = **entry.array_value;
-                if (values.size() != term.dim)
+                const auto size = term.source_size == 0 ? term.dim : term.source_size;
+                if (values.size() != size)
                     return false;
-                for (std::size_t i = 0; i < term.dim; ++i)
+                for (std::size_t i = 0; i < size; ++i)
                     push(
                         term.index + i, values[i], term.scale, term.has_clip, term.clip_min,
                         term.clip_max, ok);
@@ -122,8 +137,9 @@ bool build_observation(
             break;
         }
         case TermKind::kJointVel:
+        case TermKind::kSources:
         case TermKind::kJointTorque: {
-            for (std::size_t j = 0; j < term.joints.size(); ++j) {
+            for (std::size_t j = 0; j < term.joint_slots.size(); ++j) {
                 double value = 0.0;
                 if (!read_double(slots[term.joint_slots[j]], value))
                     return false;
