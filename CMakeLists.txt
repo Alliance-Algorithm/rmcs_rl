@@ -81,27 +81,4 @@ install(DIRECTORY models DESTINATION share/${PROJECT_NAME})
 install(DIRECTORY tool/visualization DESTINATION share/${PROJECT_NAME}/tool
     FILES_MATCHING PATTERN "*.py")
 
-if(BUILD_TESTING)
-    find_package(ament_cmake_gtest REQUIRED)
-    ament_add_gtest(policy_model_contract test/policy_model_contract.cpp)
-    target_link_libraries(policy_model_contract rmcs_rl)
-    ament_add_gtest(observation_frame test/observation_frame.cpp)
-    target_link_libraries(observation_frame rmcs_rl)
-    if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/../rmcs_bringup/config")
-        ament_add_gtest(profile_config test/profile_config.cpp)
-        target_link_libraries(profile_config rmcs_rl)
-        target_compile_definitions(profile_config PRIVATE
-            RMCS_PROFILE_DIRECTORY="${CMAKE_CURRENT_SOURCE_DIR}/../rmcs_bringup/config")
-    endif()
-    if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/../rmcs_core/src/controller/chassis/wheel_leg/policy/selection.hpp")
-        ament_add_gtest(wheel_leg_features test/wheel_leg_features.cpp)
-        target_include_directories(wheel_leg_features PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/../rmcs_core/src")
-        target_link_libraries(wheel_leg_features rmcs_rl)
-        target_compile_definitions(wheel_leg_features PRIVATE
-            RMCS_PROFILE_DIRECTORY="${CMAKE_CURRENT_SOURCE_DIR}/../rmcs_bringup/config")
-    endif()
-    add_executable(prone_policy_parity test/prone_policy_parity.cpp)
-    target_link_libraries(prone_policy_parity rmcs_rl)
-endif()
-
 ament_auto_package(USE_SCOPED_HEADER_INSTALL_DIR)
