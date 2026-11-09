@@ -38,7 +38,12 @@ bool PolicyWorker::try_take(Result& result) {
     std::swap(result.sequence, result_.sequence);
     std::swap(result.generation, result_.generation);
     std::swap(result.submitted_at, result_.submitted_at);
+    std::swap(result.queued_at, result_.queued_at);
+    std::swap(result.inference_started_at, result_.inference_started_at);
+    std::swap(result.inference_completed_at, result_.inference_completed_at);
+    std::swap(result.ready_at, result_.ready_at);
     std::swap(result.context, result_.context);
+    std::swap(result.source_steady_ns, result_.source_steady_ns);
     std::swap(result.inference_microseconds, result_.inference_microseconds);
     std::swap(result.success, result_.success);
     result.error.swap(result_.error);
@@ -53,7 +58,9 @@ void PolicyWorker::run_() {
         std::uint64_t sequence;
         std::uint64_t generation;
         std::uint64_t context;
+        std::uint64_t source_ns;
         Clock::time_point submitted_at;
+        Clock::time_point queued_at;
         {
             std::unique_lock lock{input_mutex_};
             input_ready_.wait(
@@ -65,7 +72,9 @@ void PolicyWorker::run_() {
             sequence = pending_sequence_;
             generation = pending_generation_;
             submitted_at = pending_submitted_at_;
+            queued_at = pending_queued_at_;
             context = pending_context_;
+            source_ns = pending_source_ns_;
             pending_ = false;
         }
 
@@ -83,10 +92,16 @@ void PolicyWorker::run_() {
         }
         {
             std::lock_guard lock{result_mutex_};
+            if (result_ready_)
+                ++result_overwritten_;
             result_.sequence = sequence;
             result_.generation = generation;
             result_.submitted_at = submitted_at;
+            result_.queued_at = queued_at;
+            result_.inference_started_at = started;
+            result_.inference_completed_at = completed;
             result_.context = context;
+            result_.source_steady_ns = source_ns;
             result_.inference_microseconds =
                 std::chrono::duration<double, std::micro>{completed - started}.count();
             result_.success = success;
@@ -96,6 +111,7 @@ void PolicyWorker::run_() {
                 result_.action.insert(
                     result_.action.end(), action_buffer_.begin(), action_buffer_.end());
             }
+            result_.ready_at = Clock::now();
             result_ready_ = true;
         }
         if (!success)

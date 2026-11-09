@@ -76,6 +76,8 @@ install(DIRECTORY ${ONNXRUNTIME_ROOT_DIR}/lib/ DESTINATION lib FILES_MATCHING PA
 # Local stdin/stdout simulation only; never launches the hardware executor.
 ament_auto_add_executable(wheel_leg_policy_host tool/simulation/wheel_leg_policy_host.cpp)
 target_link_libraries(wheel_leg_policy_host nlohmann_json::nlohmann_json)
+ament_auto_add_executable(wheel_leg_latency_bench tool/simulation/wheel_leg_latency_bench.cpp)
+target_link_libraries(wheel_leg_latency_bench rmcs_rl)
 
 install(DIRECTORY models DESTINATION share/${PROJECT_NAME})
 install(DIRECTORY tool/visualization DESTINATION share/${PROJECT_NAME}/tool

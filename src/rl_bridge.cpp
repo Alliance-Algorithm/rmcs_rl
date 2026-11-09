@@ -1,4 +1,5 @@
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cmath>
 #include <cstddef>
@@ -48,8 +49,7 @@ public:
             raw_outputs_.push_back(std::make_unique<OutputInterface<double>>());
             register_output(term.output + "/raw", *raw_outputs_.back(), 0.0);
             for (const auto& [suffix, value] :
-                 {std::pair{"/scale", term.scale},
-                  std::pair{"/offset", term.offset},
+                 {std::pair{"/scale", term.scale}, std::pair{"/offset", term.offset},
                   std::pair{
                       "/clip_min",
                       term.has_clip ? term.clip_min : -std::numeric_limits<double>::infinity()},
@@ -87,9 +87,16 @@ public:
             config.observation_frame_sequence_path);
         register_output(
             config.rl_base + "/observation_frame_interface", frame_path_output_,
-             config.observation_frame_sequence_path.empty() || config.obs_terms.size() != 1
-                 ? std::string{} : config.obs_terms.front().path);
+            config.observation_frame_sequence_path.empty() || config.obs_terms.size() != 1
+                ? std::string{}
+                : config.obs_terms.front().path);
         register_output(config.rl_base + "/performance/inference_us", inference_time_us_, 0.0);
+        for (std::size_t i = 0; i < latency_ns_.size(); ++i) {
+            constexpr std::array names{"queued_ns",       "inference_start_ns", "inference_end_ns",
+                                       "result_ready_ns", "first_publish_ns",   "source_frame_ns"};
+            register_output(
+                config.rl_base + "/latency/" + names[i], latency_ns_[i], std::uint64_t{0});
+        }
     }
 
     void before_pairing(const OutputInfoMap& output_map) override {
@@ -105,7 +112,12 @@ public:
         publish_(have_reset ? std::optional{count} : std::nullopt);
     }
 
-    void reset() { std::fill(written_.begin(), written_.end(), 0.0); }
+    void reset() {
+        std::fill(written_.begin(), written_.end(), 0.0);
+        published_sequence_ = published_generation_ = 0;
+        for (auto& stamp : latency_ns_)
+            *stamp = 0;
+    }
 
     void publish(
         const PolicyWorker::Result& action, bool valid, bool healthy, double age,
@@ -136,6 +148,22 @@ public:
                                            action.submitted_at.time_since_epoch())
                                            .count());
         *inference_time_us_ = action.inference_microseconds;
+        const auto ns = [](auto time) -> std::uint64_t {
+            return std::chrono::duration_cast<std::chrono::nanoseconds>(time.time_since_epoch())
+                .count();
+        };
+        *latency_ns_[0] = ns(action.queued_at);
+        *latency_ns_[1] = ns(action.inference_started_at);
+        *latency_ns_[2] = ns(action.inference_completed_at);
+        *latency_ns_[3] = ns(action.ready_at);
+        *latency_ns_[5] = action.source_steady_ns;
+        if (valid
+            && (published_sequence_ != action.sequence
+                || published_generation_ != action.generation)) {
+            *latency_ns_[4] = ns(PolicyWorker::Clock::now());
+            published_sequence_ = action.sequence;
+            published_generation_ = action.generation;
+        }
     }
 
 private:
@@ -154,6 +182,8 @@ private:
     OutputInterface<std::string> frame_sequence_path_output_, frame_path_output_;
     OutputInterface<std::size_t> obs_seq_output_, action_seq_output_, action_context_output_;
     OutputInterface<std::uint64_t> action_ns_output_;
+    std::array<OutputInterface<std::uint64_t>, 6> latency_ns_;
+    std::uint64_t published_sequence_ = 0, published_generation_ = 0;
     OutputInterface<std::size_t> observation_size_output_, action_size_output_;
     OutputInterface<std::size_t> history_length_output_, feature_size_output_;
 };
@@ -205,8 +235,24 @@ public:
         own_output_paths_.insert(config_.rl_base + "/action_age");
         own_output_paths_.insert(config_.rl_base + "/obs_seq");
         last_actions_.assign(config_.action_size, 0.0);
-        register_output(config_.rl_base + "/input/frame", observation_frame_output_, std::vector<double>(config_.obs_frame_size));
-        own_output_paths_.insert(config_.rl_base + "/input/frame");
+        const auto input_frame = config_.rl_base + "/input/frame";
+        const bool external_frame = std::ranges::any_of(
+            config_.obs_terms, [&](const auto& term) { return term.path == input_frame; });
+        const auto frame_output =
+            config_.rl_base + (external_frame ? "/observation/frame" : "/input/frame");
+        register_output(
+            frame_output, observation_frame_output_, std::vector<double>(config_.obs_frame_size));
+        own_output_paths_.insert(frame_output);
+        if (config_.observation_frame_sequence_path.ends_with("/frame_sequence")) {
+            auto source_stamp = config_.observation_frame_sequence_path;
+            source_stamp.replace(source_stamp.size() - 14, 14, "frame_steady_ns");
+            register_input(source_stamp, source_frame_ns_, false);
+        }
+        constexpr std::array counters{
+            "submit_attempts", "submit_rejected", "pending_overwritten", "result_overwritten"};
+        for (std::size_t i = 0; i < counters.size(); ++i)
+            register_output(
+                config_.rl_base + "/latency/" + counters[i], worker_counters_[i], std::uint64_t{0});
     }
 
     void before_pairing(const OutputInfoMap& output_map) override {
@@ -230,6 +276,10 @@ public:
 
     void update() override {
         const auto now = std::chrono::steady_clock::now();
+        *worker_counters_[0] = worker_.submit_attempts();
+        *worker_counters_[1] = worker_.submit_rejected();
+        *worker_counters_[2] = worker_.pending_overwritten();
+        *worker_counters_[3] = worker_.result_overwritten();
         maybe_handle_reset_();
         const bool enabled = read_enable_();
         double flat_hold_value = 0.0;
@@ -293,8 +343,9 @@ private:
             for (std::size_t i = 0; i < config_.action_size; ++i) {
                 const auto& term = config_.action_terms[i];
                 last_actions_[i] =
-                    term.scale == 0.0 ? 0.0
-                                      : (map_action(action_.action[i], term) - term.offset) / term.scale;
+                    term.scale == 0.0
+                        ? 0.0
+                        : (map_action(action_.action[i], term) - term.offset) / term.scale;
             }
             action_feedback_.store(action_.submitted_at, last_actions_);
             last_feedback_obs_seq_ = action_.sequence;
@@ -400,13 +451,14 @@ private:
             std::copy(stacked.begin(), stacked.end(), observation_buffer_.begin());
             for (std::size_t i = 0; i < observation_outputs_.size(); ++i)
                 **observation_outputs_[i] = frame_buffer_[i];
-            std::copy(frame_buffer_.begin(), frame_buffer_.end(), observation_frame_output_->begin());
+            std::copy(
+                frame_buffer_.begin(), frame_buffer_.end(), observation_frame_output_->begin());
             std::uint64_t context = 0;
             if (context_slot_ != kNoSlot && !read_unsigned(slots_[context_slot_], context))
                 throw std::runtime_error("RlBridge: invalid inference context");
             worker_.submit(
                 std::span<const double>{observation_buffer_}, observation_sequence_, generation_,
-                now, context);
+                now, context, source_frame_ns_.ready() ? *source_frame_ns_ : 0);
         } else {
             reset_runtime_(false);
             ++obs_invalid_count_;
@@ -478,6 +530,8 @@ private:
 
     std::vector<Slot> slots_;
     OutputInterface<std::vector<double>> observation_frame_output_;
+    InputInterface<std::uint64_t> source_frame_ns_;
+    std::array<OutputInterface<std::uint64_t>, 4> worker_counters_;
     std::vector<std::unique_ptr<OutputInterface<double>>> observation_outputs_;
     std::shared_ptr<PolicyActionPublisher> action_source_;
 
