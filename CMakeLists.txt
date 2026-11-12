@@ -4,7 +4,6 @@ project(rmcs_rl)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
-set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wno-packed-bitfield-compat")
 
 if(CMAKE_COMPILER_IS_GNUCXX OR CMAKE_CXX_COMPILER_ID MATCHES "Clang")
     add_compile_options(-O2 -Wall -Wextra -Wpedantic)
@@ -12,17 +11,6 @@ endif()
 
 find_package(ament_cmake_auto REQUIRED)
 ament_auto_find_build_dependencies()
-
-find_package(rosidl_default_generators REQUIRED)
-
-rosidl_generate_interfaces(${PROJECT_NAME}
-    "msg/Observation.msg"
-    "msg/Action.msg"
-    "msg/PolicyStatus.msg"
-    DEPENDENCIES std_msgs
-)
-
-rosidl_get_typesupport_target(cpp_typesupport_target ${PROJECT_NAME} rosidl_typesupport_cpp)
 
 set(ONNXRUNTIME_VERSION 1.20.0)
 if(NOT DEFINED ONNXRUNTIME_PLATFORM)
@@ -49,64 +37,33 @@ if(NOT EXISTS ${ONNXRUNTIME_ROOT_DIR}/include/onnxruntime_cxx_api.h)
     endif()
 endif()
 
-ament_auto_add_library(rmcs_rl_bridge SHARED
+ament_auto_add_library(${PROJECT_NAME} SHARED
+    src/policy/onnx_runtime.cpp
+    src/policy/policy_model.cpp
+    src/policy/policy_worker.cpp
     src/rl_bridge.cpp
     src/rl_bridge/config.cpp
-    src/rl_bridge/observation_history.cpp
-    src/rl_bridge/utility.cpp
-    src/parameters.cpp
-    src/rl_bridge/joint_config.cpp
-    src/rl_bridge/term_parser.cpp
-    src/rl_bridge/interface_binding.cpp
-    src/rl_bridge/observation.cpp
-    src/rl_bridge/action_channel.cpp
-    src/policy_server_launcher.cpp
+    src/visualization/wheel_leg_mirror.cpp
 )
-target_include_directories(rmcs_rl_bridge PUBLIC
-    $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/include>
-    $<INSTALL_INTERFACE:include/rmcs_rl>
+target_include_directories(${PROJECT_NAME}
+    PUBLIC $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/src>
+    PRIVATE ${ONNXRUNTIME_ROOT_DIR}/include
 )
-target_link_libraries(rmcs_rl_bridge ${cpp_typesupport_target})
-
-ament_auto_add_executable(policy_server
-    src/policy_server.cpp
-    src/policy/policy_model.cpp
-    src/policy/onnx_runtime.cpp
-    src/parameters.cpp
-)
-target_include_directories(policy_server PRIVATE
-    ${ONNXRUNTIME_ROOT_DIR}/include
-    ${PROJECT_SOURCE_DIR}/include
-)
-target_link_libraries(policy_server ${ONNXRUNTIME_ROOT_DIR}/lib/libonnxruntime.so)
-target_link_libraries(policy_server ${cpp_typesupport_target})
-install(TARGETS policy_server DESTINATION lib/${PROJECT_NAME})
+target_link_libraries(${PROJECT_NAME} ${ONNXRUNTIME_ROOT_DIR}/lib/libonnxruntime.so)
+set_target_properties(${PROJECT_NAME} PROPERTIES INSTALL_RPATH "$ORIGIN")
+install(DIRECTORY ${ONNXRUNTIME_ROOT_DIR}/lib/ DESTINATION lib FILES_MATCHING PATTERN "*.so*")
 
 pluginlib_export_plugin_description_file(rmcs_executor plugins.xml)
 
+# Host-only tools; neither creates hardware nor sends control output.
+ament_auto_add_executable(wheel_leg_policy_host tool/simulation/wheel_leg_policy_host.cpp)
+target_link_libraries(wheel_leg_policy_host nlohmann_json::nlohmann_json)
+ament_auto_add_executable(wheel_leg_latency_bench tool/simulation/wheel_leg_latency_bench.cpp)
+target_link_libraries(wheel_leg_latency_bench ${PROJECT_NAME})
+
 install(DIRECTORY models DESTINATION share/${PROJECT_NAME})
-install(DIRECTORY launch DESTINATION share/${PROJECT_NAME})
+install(DIRECTORY model_receipts DESTINATION share/${PROJECT_NAME})
+install(DIRECTORY tool/visualization DESTINATION share/${PROJECT_NAME}/tool
+    FILES_MATCHING PATTERN "*.py")
 
-if(BUILD_TESTING)
-    find_package(ament_cmake_gtest REQUIRED)
-    ament_add_gtest(runtime_test
-        test/runtime_test.cpp
-        src/policy/policy_model.cpp
-        src/policy/onnx_runtime.cpp
-    )
-    target_include_directories(runtime_test PRIVATE src ${ONNXRUNTIME_ROOT_DIR}/include)
-    target_link_libraries(runtime_test rmcs_rl_bridge ${ONNXRUNTIME_ROOT_DIR}/lib/libonnxruntime.so)
-    target_compile_definitions(runtime_test PRIVATE
-        RMCS_RL_IDENTITY_FIXTURE="${PROJECT_SOURCE_DIR}/test/data/normalized_identity.onnx"
-        RMCS_RL_SEQ_FIXTURE="${PROJECT_SOURCE_DIR}/test/data/seq_identity.onnx"
-        RMCS_RL_SEQ_MISMATCH_FIXTURE="${PROJECT_SOURCE_DIR}/test/data/seq_history_mismatch.onnx"
-        RMCS_RL_SEQ_LAYOUT_MISMATCH_FIXTURE="${PROJECT_SOURCE_DIR}/test/data/seq_layout_mismatch.onnx"
-        RMCS_RL_SEQ_LAYOUT_ONLY_FIXTURE="${PROJECT_SOURCE_DIR}/test/data/seq_layout_only.onnx"
-        RMCS_RL_SEQ_LAYOUT_DYNAMIC_FIXTURE="${PROJECT_SOURCE_DIR}/test/data/seq_layout_dynamic.onnx"
-        RMCS_RL_EXTRA_FIXTURE="${PROJECT_SOURCE_DIR}/test/data/extra_input_identity.onnx"
-        RMCS_RL_TYPED_EXTRA_FIXTURE="${PROJECT_SOURCE_DIR}/test/data/typed_extra_input_identity.onnx")
-endif()
-
-ament_export_dependencies(rosidl_default_runtime)
-
-ament_auto_package(USE_SCOPED_HEADER_INSTALL_DIR)
+ament_auto_package()

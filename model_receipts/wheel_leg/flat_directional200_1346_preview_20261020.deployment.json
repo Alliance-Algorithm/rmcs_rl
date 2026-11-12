@@ -1,0 +1,22 @@
+{
+  "schema": "rmcs-flat-policy-deployment-v1",
+  "model_sha256": "60ecd3dd9c7e9cb2bfe5aab258c3fb96804fde23d3487acd2c7f7036487ff103",
+  "model_filename": "flat_directional200_1346_preview_20261020.onnx",
+  "source_model_sha256": "a065c4688ff2dc86cde929125cd494af9460a4b307d1ea32f3bf9f0f36786dcf",
+  "graph_unchanged": true,
+  "model_spec_sha256": "0ac82045ab584f20091538aa782d93ea545382dc701faca1f8ae92aeb7cd1997",
+  "training_plan_sha256": "5dfd8f889e3b762d5d1bf69c46441ddfe3805ae119797979f99ae46ad101abf1",
+  "training_contract_sha256": "220ef77aee31090f902265788a3c4d4eb7e37dda0c3226c6acb63a12761892a3",
+  "source_verification_sha256": "f40410a74ff5bece3a969fc3bbc390fdc3c3a201f0b22b129f1cbc07b9710cf6",
+  "layout_hash": "b01b98ea22393b3cad9a5e986debccab4091e3ac28493a31c68007444e9e4375",
+  "policy_hz": 200.0,
+  "physics_hz": 1000,
+  "inference_samples": 256,
+  "action_timeout_seconds": 0.015,
+  "vx_max_m_s": 3.0,
+  "yaw_rate_max_rad_s": 4.0,
+  "heading_hold_yaw_rate_max_rad_s": 4.0,
+  "inference_max_abs_difference": 0.0,
+  "behavior_qualified": false,
+  "hardware_deployment_ready": false
+}

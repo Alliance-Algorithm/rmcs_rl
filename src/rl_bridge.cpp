@@ -3,399 +3,336 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <format>
 #include <limits>
 #include <memory>
-#include <sstream>
-#include <stdexcept>
 #include <string>
-#include <unordered_set>
+#include <string_view>
 #include <utility>
 #include <vector>
 
-#include <rclcpp/logging.hpp>
 #include <rclcpp/node.hpp>
-#include <rclcpp/publisher.hpp>
-#include <rclcpp/qos.hpp>
-#include <rclcpp/subscription.hpp>
 #include <rmcs_executor/component.hpp>
-#include <rmcs_rl/msg/action.hpp>
-#include <rmcs_rl/msg/observation.hpp>
+#include <rmcs_utility/rclcpp/node_mixin.hpp>
 
-#include <rmcs_rl/rl_bridge/action_channel.hpp>
-#include <rmcs_rl/rl_bridge/action_feedback_history.hpp>
-#include <rmcs_rl/rl_bridge/config.hpp>
-#include <rmcs_rl/rl_bridge/interface_binding.hpp>
-#include <rmcs_rl/rl_bridge/joint_config.hpp>
-#include <rmcs_rl/rl_bridge/observation.hpp>
-#include <rmcs_rl/rl_bridge/observation_history.hpp>
-#include <rmcs_rl/rl_bridge/observation_timeline.hpp>
-#include <rmcs_rl/rl_bridge/types.hpp>
-#include <rmcs_rl/rl_bridge/utility.hpp>
-#include <rmcs_rl/rl_layout.hpp>
+#include "policy/policy_worker.hpp"
+#include "rl_bridge/config.hpp"
+#include "rl_bridge/observation_builder.hpp"
+#include "rl_bridge/observation_frame_gate.hpp"
+#include "rl_bridge/observation_history.hpp"
+#include "rl_bridge/observation_timeline.hpp"
+#include "rl_bridge/policy_actions.hpp"
+#include "rl_bridge/policy_status.hpp"
 
 namespace rmcs_rl {
 
-class RlBridge final
+class RlBridge
     : public rmcs_executor::Component
-    , public rclcpp::Node {
-public:
-    explicit RlBridge()
-        : Node(
-              get_component_name(),
-              rclcpp::NodeOptions{}.automatically_declare_parameters_from_overrides(true))
-        , config_(load_bridge_config(*this))
-        , history_(config_.obs_frame_size, config_.history_length, config_.history_period)
-        , action_feedback_(config_.action_size) {
+    , public rclcpp::Node
+    , public rmcs_utility::NodeMixin {
 
-        for (const auto& term : config_.action_terms) {
-            action_outputs_.push_back(std::make_unique<OutputInterface<double>>());
-            register_output(term.output, *action_outputs_.back(), 0.0);
-            own_output_paths_.insert(term.output);
+    using Clock = PolicyWorker::Clock;
+
+public:
+    RlBridge()
+        : Node{get_component_name(), node::options()}
+        , config_(load_bridge_config(*this))
+        , action_publisher_(
+              create_partner_component<ActionPublisher>(get_component_name() + "_actions", *this))
+        , worker_(config_.policy)
+        , actions_(*action_publisher_, config_.action_terms, config_.invalid_action)
+        , status_(*action_publisher_, *this, config_, worker_.info())
+        , observation_(config_.observation_terms)
+        , history_(config_.frame_size, config_.history_length)
+        , timeline_(config_.policy_period)
+        , previous_action_(config_.action_terms.size()) {
+        action_.action.resize(config_.action_terms.size());
+        result_buffer_.action.reserve(config_.action_terms.size());
+
+        if (!config_.reset_interface.empty()) {
+            register_input(config_.reset_interface, reset_count_, false);
+            action_publisher_->register_input(config_.reset_interface, publisher_reset_count_);
         }
-        register_output(config_.rl_base + "/valid", valid_output_, 0.0);
-        register_output(config_.rl_base + "/healthy", healthy_output_, 0.0);
+        if (!config_.enable_interface.empty())
+            register_input(config_.enable_interface, enable_, false);
+        if (!config_.frame_sequence_interface.empty())
+            register_input(config_.frame_sequence_interface, frame_sequence_);
+
         register_output(
-            config_.rl_base + "/action_age", action_age_output_,
-            std::numeric_limits<double>::quiet_NaN());
-        register_output(config_.rl_base + "/obs_seq", obs_seq_output_, std::size_t{0});
-        own_output_paths_.insert(config_.rl_base + "/valid");
-        own_output_paths_.insert(config_.rl_base + "/healthy");
-        own_output_paths_.insert(config_.rl_base + "/action_age");
-        own_output_paths_.insert(config_.rl_base + "/obs_seq");
-        setup_topics_();
-        last_actions_.assign(config_.action_size, 0.0);
-        written_.assign(config_.action_size, 0.0);
-        action_channel_.resize(config_.action_size);
-        read_snapshot_.action.assign(config_.action_size, 0.0);
+            config_.rl_base + "/input/frame", frame_, std::vector<double>(config_.frame_size));
     }
 
+    RlBridge(const RlBridge&) = delete;
+    RlBridge& operator=(const RlBridge&) = delete;
+    RlBridge(RlBridge&&) = delete;
+    RlBridge& operator=(RlBridge&&) = delete;
+
+    ~RlBridge() override = default;
+
     void before_pairing(const OutputInfoMap& output_map) override {
-        bind_observation_slots_(output_map);
-        bind_control_slots_(output_map);
+        observation_.bind(*this, output_map);
+        log_layout();
+    }
 
-        for (const auto& slot : slots_)
-            if (own_output_paths_.count(slot.path) != 0)
-                throw std::runtime_error(
-                    "RlBridge: interface \"" + slot.path
-                    + "\" is produced by RlBridge itself (self reference)");
-
-        obs_signature_ = obs_layout_signature(config_.obs_terms, config_.history_length);
-        actions_signature_ = actions_layout_signature(config_.action_terms);
-        layout_hash_ = rmcs_rl::layout_hash(
-            obs_signature_, actions_signature_, config_.obs_size, config_.action_size);
-
-        log_layout_();
-        RCLCPP_INFO(
-            get_logger(), "contract: obs_size=%zu action_size=%zu policy_rate=%.3f Hz",
-            config_.obs_size, config_.action_size, config_.policy_rate);
-        RCLCPP_INFO(
-            get_logger(), "layout_hash=%s (obs/action signatures below)",
-            hex16(layout_hash_).c_str());
-        RCLCPP_INFO(get_logger(), "  obs signature    : %s", obs_signature_.c_str());
-        RCLCPP_INFO(get_logger(), "  action signature : %s", actions_signature_.c_str());
-        RCLCPP_INFO(
-            get_logger(), "topics: %s/obs -> %s/action (best_effort, keep_last=1)",
-            config_.rl_base.c_str(), config_.rl_base.c_str());
+    void before_updating() override {
+        if (!enable_.ready())
+            enable_.make_and_bind_directly(config_.enable_default);
+        if (!reset_count_.ready())
+            reset_count_.make_and_bind_directly(std::size_t{0});
+        if (!publisher_reset_count_.ready())
+            publisher_reset_count_.make_and_bind_directly(std::size_t{0});
     }
 
     void update() override {
-        const auto now = std::chrono::steady_clock::now();
+        status_.update_worker(worker_);
+        update_reset_count(*reset_count_);
+        update_enabled(*enable_);
+        if (last_enabled_)
+            update_observation(Clock::now());
+    }
 
-        maybe_handle_reset_();
-        const bool enabled = read_enable_();
-        double flat_hold_value = 0.0;
-        const bool flat_hold = flat_hold_slot_ != kNoSlot
-            && read_double(slots_[flat_hold_slot_], flat_hold_value)
-            && std::isfinite(flat_hold_value) && flat_hold_value != 0.0;
-        if (enabled != last_enabled_ || flat_hold != last_flat_hold_) {
-            reset_runtime_();
-            last_enabled_ = enabled;
-            last_flat_hold_ = flat_hold;
+    void update_actions() {
+        update_reset_count(*publisher_reset_count_);
+
+        const auto now = Clock::now();
+        receive_result();
+        const auto check = check_action(now);
+        if (check.valid) {
+            actions_.publish(action_.action);
+            update_previous_action();
+        } else {
+            actions_.publish_invalid();
         }
-        if (!enabled) {
-            reset_action_state(last_actions_, written_);
-            history_.reset();
-        }
-        if (enabled)
-            maybe_publish_observation_(now);
-
-        ActionSnapshot& snapshot = read_snapshot_;
-        const bool has_snapshot = action_channel_.try_read(snapshot);
-
-        double age = std::numeric_limits<double>::quiet_NaN();
-        bool seq_ok = false;
-        bool finite = true;
-        if (has_snapshot) {
-            age = timeline_.age(snapshot.obs_seq, now);
-            seq_ok = std::isfinite(age);
-            finite = std::all_of(snapshot.action.begin(), snapshot.action.end(), [](double value) {
-                return std::isfinite(value);
-            });
-            check_contract_(snapshot);
-        }
-
-        const bool fresh = has_snapshot && is_finite(age) && age <= config_.max_action_age;
-        const bool valid = enabled && contract_ok_ && has_snapshot && fresh && seq_ok && finite;
-
-        // The action fed into history must match the flat-ground command that is executed.
-        if (valid && flat_hold)
-            std::fill(snapshot.action.begin(), snapshot.action.end(), 0.0);
-        write_actions(
-            valid, snapshot, config_.action_terms, config_.invalid_mode, written_, action_outputs_);
-
-        if (valid) {
-            if (config_.history_period.count() == 0) {
-                last_actions_ = snapshot.action;
-            } else if (snapshot.obs_seq != last_feedback_obs_seq_) {
-                const auto observation_time = now - std::chrono::duration_cast<std::chrono::nanoseconds>(
-                    std::chrono::duration<double>(age));
-                action_feedback_.store(observation_time, snapshot.action);
-                last_feedback_obs_seq_ = snapshot.obs_seq;
-            }
-        }
-
-        *valid_output_ = valid ? 1.0 : 0.0;
-        *healthy_output_ = (contract_ok_ && fresh) ? 1.0 : 0.0;
-        *action_age_output_ = age;
-        *obs_seq_output_ = timeline_.sequence();
-
-        if (last_valid_ && !valid)
-            reset_runtime_();
-        if (valid != last_valid_) {
-            if (valid) {
-                RCLCPP_INFO(
-                    get_logger(), "valid=1 (obs_seq=%llu model_id=%s action_age=%.4f s)",
-                    static_cast<unsigned long long>(snapshot.obs_seq),
-                    hex16(snapshot.model_id).c_str(), age);
-            } else {
-                RCLCPP_WARN(
-                    get_logger(), "valid=0: %s",
-                    invalid_reason(enabled, contract_ok_, has_snapshot, fresh, seq_ok, finite)
-                        .c_str());
-            }
-            last_valid_ = valid;
-        }
+        status_.update_action({
+            .result = action_,
+            .ready = action_ready_,
+            .valid = check.valid,
+            .healthy = worker_.healthy() && !worker_failed_,
+            .age = check.age,
+            .observation_sequence = observation_sequence_,
+        });
+        update_validity(check);
     }
 
 private:
-    void setup_topics_() {
-        obs_publisher_ = create_publisher<rmcs_rl::msg::Observation>(
-            config_.rl_base + "/obs", rclcpp::QoS{rclcpp::KeepLast(1)}.best_effort());
-        action_subscription_ = create_subscription<rmcs_rl::msg::Action>(
-            config_.rl_base + "/action", rclcpp::QoS{rclcpp::KeepLast(1)}.best_effort(),
-            [this](rmcs_rl::msg::Action::UniquePtr message) { on_action_(std::move(message)); });
-    }
+    struct ActionCheck {
+        bool ready = false;
+        bool fresh = false;
+        bool sequence_ok = false;
+        bool finite = false;
+        bool valid = false;
+        double age = std::numeric_limits<double>::quiet_NaN();
+    };
 
-    void bind_observation_slots_(const OutputInfoMap& output_map) {
-        for (auto& term : config_.obs_terms) {
-            switch (term.kind) {
-            case TermKind::kConstant:
-            case TermKind::kLastAction: break;
-            case TermKind::kJointPos:
-            case TermKind::kJointVel:
-            case TermKind::kJointTorque: {
-                for (std::size_t j = 0; j < term.joints.size(); ++j) {
-                    const auto& joint = config_.joint_config.names[term.joints[j]];
-                    const char field = term.kind == TermKind::kJointPos ? 'a'
-                                     : term.kind == TermKind::kJointVel ? 'v'
-                                                                        : 't';
-                    const auto path = joint_path(config_.joint_config, joint, field);
-                    term.joint_slots.push_back(acquire_slot(
-                        *this, path, {Binding::kDouble}, true, output_map, slots_, "joint term"));
-                }
-                break;
-            }
-            case TermKind::kPath: {
-                std::vector<Binding> candidates;
-                if (term.has_binding) {
-                    candidates = {term.binding};
-                } else {
-                    switch (term.take) {
-                    case Take::kScalar:
-                        candidates = {
-                            Binding::kDouble, Binding::kBool, Binding::kInt, Binding::kSize};
-                        break;
-                    case Take::kComponent:
-                    case Take::kVector:
-                        candidates = {Binding::kVector3, Binding::kDirectionVector};
-                        break;
-                    case Take::kGravity: candidates = {Binding::kQuaternion}; break;
-                    }
-                }
-                term.slot = acquire_slot(
-                    *this, term.path, candidates, !term.has_default, output_map, slots_,
-                    "observation term");
-                break;
-            }
-            }
-        }
-    }
-
-    void bind_control_slots_(const OutputInfoMap& output_map) {
-        if (!config_.enable_path.empty())
-            enable_slot_ = acquire_slot(
-                *this, config_.enable_path, {Binding::kBool, Binding::kDouble}, false, output_map,
-                slots_, "enable interface");
-
-        if (!config_.reset_path.empty())
-            reset_slot_ = acquire_slot(
-                *this, config_.reset_path, {Binding::kSize, Binding::kInt, Binding::kDouble}, false,
-                output_map, slots_, "reset interface");
-        if (!config_.flat_hold_path.empty())
-            flat_hold_slot_ = acquire_slot(
-                *this, config_.flat_hold_path, {Binding::kBool, Binding::kDouble}, true,
-                output_map, slots_, "flat hold interface");
-    }
-
-    void maybe_handle_reset_() {
-        if (reset_slot_ == kNoSlot)
+    void update_reset_count(std::size_t reset_count) {
+        if (reset_count == last_reset_count_)
             return;
-        std::uint64_t reset_count = 0;
-        if (read_unsigned(slots_[reset_slot_], reset_count) && reset_count != last_reset_count_) {
-            last_reset_count_ = reset_count;
-            reset_runtime_();
-        }
+        last_reset_count_ = reset_count;
+        frame_gate_.reset();
+        reset_session();
+        worker_.reset();
     }
 
-    void maybe_publish_observation_(std::chrono::steady_clock::time_point now) {
-        if (!timeline_.due(now, config_.pub_period))
+    void update_enabled(bool enabled) {
+        if (enabled == last_enabled_)
             return;
-
-        std::vector<double> obs;
-        if (config_.history_period.count() > 0)
-            last_actions_ = action_feedback_.sample(now, config_.history_period);
-        if (build_observation(
-                config_.obs_terms, slots_, last_actions_, config_.obs_frame_size, obs)) {
-            publish_observation_(history_.append(obs, now), now);
-        } else {
-            reset_runtime_();
-            ++obs_invalid_count_;
-            RCLCPP_WARN_THROTTLE(
-                get_logger(), *get_clock(), 1000,
-                "observation sources not ready or non-finite; no obs published (%llu frames "
-                "skipped)",
-                static_cast<unsigned long long>(obs_invalid_count_));
-        }
+        last_enabled_ = enabled;
+        frame_gate_.reset();
+        reset_session();
     }
 
-    bool read_enable_() const {
-        if (enable_slot_ == kNoSlot)
-            return config_.enable_default;
-        double raw = 0.0;
-        if (!read_double(slots_[enable_slot_], raw))
-            return config_.enable_default;
-        return std::isfinite(raw) && raw != 0.0;
-    }
-
-    void check_contract_(const ActionSnapshot& snapshot) {
-        if (snapshot.layout_hash != layout_hash_) {
-            if (contract_ok_) {
-                contract_ok_ = false;
-                RCLCPP_FATAL(
-                    get_logger(),
-                    "contract mismatch: action layout_hash=%s != bridge layout_hash=%s "
-                    "(policy process and bridge disagree; refusing to output actions)",
-                    hex16(snapshot.layout_hash).c_str(), hex16(layout_hash_).c_str());
-            }
-        }
-    }
-
-    void log_layout_() const {
-        RCLCPP_INFO(get_logger(), "observation layout (obs_size=%zu):", config_.obs_size);
-        for (const auto& term : config_.obs_terms) {
-            std::ostringstream line;
-            line << "  [" << term.index << ":" << term.index + term.dim << ") " << term.id
-                 << "  scale=" << format_number(term.scale);
-            if (term.has_default)
-                line << " default=" << format_number(term.default_value);
-            if (term.has_clip)
-                line << " clip=" << format_number(term.clip_min) << ":"
-                     << format_number(term.clip_max);
-            if (!term.path.empty()) {
-                line << " <- " << term.path;
-                if (term.slot != kNoSlot)
-                    line << " (" << binding_name(slots_[term.slot].binding) << ")";
-                else
-                    line << " (default)";
-            }
-            RCLCPP_INFO(get_logger(), "%s", line.str().c_str());
-        }
-        RCLCPP_INFO(get_logger(), "action layout (action_size=%zu):", config_.action_size);
-        for (const auto& term : config_.action_terms) {
-            std::ostringstream line;
-            line << "  #" << term.index << " " << term.id << " -> " << term.output;
-            if (term.scale != 1.0)
-                line << " scale=" << format_number(term.scale);
-            RCLCPP_INFO(get_logger(), "%s", line.str().c_str());
-        }
-    }
-
-    void publish_observation_(
-        const std::vector<double>& obs, std::chrono::steady_clock::time_point now) {
-        rmcs_rl::msg::Observation message;
-        message.header.stamp = get_clock()->now();
-        message.obs_seq = timeline_.publish(now, config_.pub_period);
-        message.layout_hash = layout_hash_;
-        message.obs = obs;
-        obs_publisher_->publish(message);
-    }
-
-    void on_action_(rmcs_rl::msg::Action::UniquePtr message) {
-        if (message->action.size() != config_.action_size) {
-            RCLCPP_ERROR_THROTTLE(
-                get_logger(), *get_clock(), 1000, "ignoring action with %zu values (expected %zu)",
-                message->action.size(), config_.action_size);
+    void update_observation(Clock::time_point now) {
+        if (config_.frame_sequence_interface.empty()) {
+            if (timeline_.due(now))
+                submit_observation(now);
             return;
         }
-        action_channel_.store(*message);
+        switch (frame_gate_.observe(*frame_sequence_)) {
+        case ObservationFrameGate::Decision::kSubmit: submit_observation(now); break;
+        case ObservationFrameGate::Decision::kReset: reset_session(); break;
+        case ObservationFrameGate::Decision::kWait: break;
+        }
     }
 
-    void reset_runtime_() {
-        reset_action_state(last_actions_, written_);
+    void submit_observation(Clock::time_point now) {
+        if (const auto built = observation_.build(previous_action_, *frame_); !built) {
+            reset_session();
+            ++skipped_frames_;
+            if (now - last_skip_warning_ >= std::chrono::seconds{1}) {
+                last_skip_warning_ = now;
+                node::warn(
+                    "observation '{}' is not ready or non-finite; {} frames skipped", built.error(),
+                    skipped_frames_);
+            }
+            return;
+        }
+        const auto observation = history_.append(*frame_);
+        observation_sequence_ = ++next_observation_sequence_;
+        timeline_.advance(now);
+        worker_.submit(observation, observation_sequence_, generation_, now);
+    }
+
+    void receive_result() {
+        if (!worker_.try_take(result_buffer_) || result_buffer_.generation != generation_)
+            return;
+        if (!result_buffer_.success) {
+            worker_failed_ = true;
+            action_ready_ = false;
+            node::error("RL inference failed: {}", result_buffer_.error);
+            return;
+        }
+        if (result_buffer_.sequence > action_.sequence
+            && result_buffer_.sequence <= observation_sequence_) {
+            std::swap(action_, result_buffer_);
+            action_ready_ = true;
+        }
+    }
+
+    ActionCheck check_action(Clock::time_point now) const {
+        if (!action_ready_)
+            return {};
+        ActionCheck check{.ready = true};
+        check.age = std::chrono::duration<double>(now - action_.submitted_at).count();
+        check.fresh = std::isfinite(check.age) && check.age <= config_.inference_timeout
+                   && check.age <= config_.max_action_age;
+        check.sequence_ok =
+            action_.generation == generation_ && action_.sequence <= observation_sequence_;
+        check.finite =
+            std::ranges::all_of(action_.action, [](double value) { return std::isfinite(value); });
+        check.valid =
+            last_enabled_ && !worker_failed_ && check.fresh && check.sequence_ok && check.finite;
+        return check;
+    }
+
+    std::string_view invalid_reason(const ActionCheck& check) const {
+        if (worker_failed_)
+            return "inference worker failed";
+        if (!last_enabled_)
+            return "disabled by enable interface";
+        if (!check.ready)
+            return "no inference result available";
+        if (!check.finite)
+            return "action contains non-finite values";
+        if (!check.sequence_ok)
+            return "action is from an invalid or previous reset generation";
+        if (!check.fresh)
+            return "inference result is stale";
+        return "unknown";
+    }
+
+    void update_previous_action() {
+        if (action_.sequence == feedback_sequence_)
+            return;
+        actions_.normalize(action_.action, previous_action_);
+        feedback_sequence_ = action_.sequence;
+    }
+
+    void update_validity(const ActionCheck& check) {
+        if (check.valid == last_valid_)
+            return;
+        last_valid_ = check.valid;
+        if (check.valid) {
+            node::info("valid=1 (obs_seq={} action_age={:.4f} s)", action_.sequence, check.age);
+            return;
+        }
+        node::warn("valid=0: {}", invalid_reason(check));
+        reset_session();
+    }
+
+    void reset_session() {
+        ++generation_;
+        action_ready_ = false;
+        worker_failed_ = false;
+        observation_sequence_ = next_observation_sequence_;
+        feedback_sequence_ = 0;
+        std::ranges::fill(action_.action, 0.0);
+        std::ranges::fill(previous_action_, 0.0);
+        actions_.reset();
+        status_.reset();
         history_.reset();
-        action_feedback_.reset();
-        last_feedback_obs_seq_ = 0;
         timeline_.reset();
+        std::ranges::fill(*frame_, 0.0);
     }
 
-    std::vector<Slot> slots_;
-    std::vector<std::unique_ptr<OutputInterface<double>>> action_outputs_;
+    void log_layout() const {
+        node::info("observation layout (obs_size={}):", config_.observation_size);
+        for (std::size_t i = 0; i < config_.observation_terms.size(); ++i) {
+            const auto& term = config_.observation_terms[i];
+            auto line = std::format(
+                "  [{}:{}) {}  scale={}", term.index, term.index + term.size, term.name,
+                term.scale);
+            if (term.default_value)
+                line += std::format(" default={}", *term.default_value);
+            if (term.clip)
+                line += std::format(" clip={}:{}", term.clip->lower, term.clip->upper);
+            if (!term.source.empty())
+                line += std::format(" <- {} ({})", term.source, observation_.source_type(i));
+            node::info("{}", line);
+        }
 
-    OutputInterface<double> valid_output_{};
-    OutputInterface<double> healthy_output_{};
-    OutputInterface<double> action_age_output_{};
-    OutputInterface<std::size_t> obs_seq_output_{};
+        node::info("action layout (action_size={}):", config_.action_terms.size());
+        for (std::size_t i = 0; i < config_.action_terms.size(); ++i) {
+            const auto& term = config_.action_terms[i];
+            auto line = std::format("  #{} {} -> {}", i, term.name, term.output);
+            if (term.scale != 1.0)
+                line += std::format(" scale={}", term.scale);
+            node::info("{}", line);
+        }
+
+        const auto& model = worker_.info();
+        node::info(
+            "contract: obs_size={} action_size={} policy_rate={:.3f} Hz", config_.observation_size,
+            config_.action_terms.size(), config_.policy_rate);
+        node::info(
+            "in-process policy worker: model={}, obs={}, action={}", model.path,
+            model.observation_size, model.action_size);
+    }
 
     BridgeConfig config_;
-    std::unordered_set<std::string> own_output_paths_;
 
-    std::size_t enable_slot_ = kNoSlot;
-    std::size_t reset_slot_ = kNoSlot;
-    std::size_t flat_hold_slot_ = kNoSlot;
+    class ActionPublisher : public rmcs_executor::Component {
+    public:
+        explicit ActionPublisher(RlBridge& bridge)
+            : bridge_(bridge) {}
 
-    std::string obs_signature_;
-    std::string actions_signature_;
-    std::uint64_t layout_hash_ = 0;
+        void update() override { bridge_.update_actions(); }
 
-    std::vector<double> last_actions_;
-    std::vector<double> written_;
+    private:
+        RlBridge& bridge_;
+    };
+    std::shared_ptr<ActionPublisher> action_publisher_;
+
+    PolicyWorker worker_;
+    PolicyActions actions_;
+    PolicyStatus status_;
+
+    ObservationBuilder observation_;
     ObservationHistory history_;
-    ActionFeedbackHistory action_feedback_;
-    std::uint64_t last_feedback_obs_seq_ = 0;
-
     ObservationTimeline timeline_;
-    std::uint64_t last_reset_count_ = 0;
-    std::uint64_t obs_invalid_count_ = 0;
-    bool contract_ok_ = true;
+    ObservationFrameGate frame_gate_;
+
+    InputInterface<bool> enable_;
+    InputInterface<std::size_t> reset_count_;
+    InputInterface<std::size_t> publisher_reset_count_;
+    InputInterface<std::size_t> frame_sequence_;
+    OutputInterface<std::vector<double>> frame_;
+
+    PolicyWorker::Result action_;
+    PolicyWorker::Result result_buffer_;
+    std::vector<double> previous_action_;
+
+    std::uint64_t generation_ = 0;
+    std::uint64_t next_observation_sequence_ = 0;
+    std::uint64_t observation_sequence_ = 0;
+    std::uint64_t feedback_sequence_ = 0;
+    std::size_t last_reset_count_ = 0;
+    bool worker_failed_ = false;
+    bool action_ready_ = false;
     bool last_valid_ = false;
     bool last_enabled_ = false;
-    bool last_flat_hold_ = false;
 
-    ActionChannel action_channel_;
-    ActionSnapshot read_snapshot_;
-
-    rclcpp::Publisher<rmcs_rl::msg::Observation>::SharedPtr obs_publisher_;
-    rclcpp::Subscription<rmcs_rl::msg::Action>::SharedPtr action_subscription_;
+    std::uint64_t skipped_frames_ = 0;
+    Clock::time_point last_skip_warning_{};
 };
 
 } // namespace rmcs_rl
