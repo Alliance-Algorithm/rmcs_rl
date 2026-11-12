@@ -62,6 +62,7 @@ ament_auto_add_executable(wheel_leg_latency_bench tool/simulation/wheel_leg_late
 target_link_libraries(wheel_leg_latency_bench ${PROJECT_NAME})
 
 install(DIRECTORY models DESTINATION share/${PROJECT_NAME})
+install(DIRECTORY model_receipts DESTINATION share/${PROJECT_NAME})
 install(DIRECTORY tool/visualization DESTINATION share/${PROJECT_NAME}/tool
     FILES_MATCHING PATTERN "*.py")
 

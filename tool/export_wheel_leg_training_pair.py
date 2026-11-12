@@ -18,6 +18,8 @@ from torch import nn
 
 ROOT = Path(__file__).resolve().parents[4]
 CONTRACT = ROOT / "rmcs_ws/src/rmcs_bringup/config/contracts/wheel_leg_training_pair_20261103.json"
+DEFAULT_OUTPUT = ROOT / "rmcs_ws/src/rmcs_rl/models/wheel_leg"
+DEFAULT_RECEIPT_OUTPUT = ROOT / "rmcs_ws/src/rmcs_rl/model_receipts/wheel_leg"
 
 
 def digest(path):
@@ -81,7 +83,8 @@ def prone_actor(training_root, checkpoint, contract):
         TensorDict({"policy": x}, batch_size=[len(x)]))
 
 
-def export(module, native, checkpoint, target, profile, *, updates, contract, source_uri):
+def export(module, native, checkpoint, target, profile, *, updates, contract, source_uri,
+           receipt_output):
     require(all(torch.isfinite(value).all() for value in module.state_dict().values()),
             "Actor contains nonfinite state")
     sample = np.random.default_rng(107).uniform(-5., 5., (1024, 35)).astype(np.float32)
@@ -120,7 +123,9 @@ def export(module, native, checkpoint, target, profile, *, updates, contract, so
         onnx_sha256=digest(target), pair_contract_sha256=digest(CONTRACT), metadata=metadata,
         parity_samples=len(sample), max_absolute_error=error,
         behavior_qualified=False, hardware_tested=False, live_training_modified=False)
-    target.with_suffix(".deployment.json").write_text(json.dumps(receipt, indent=2) + "\n")
+    receipt_output.mkdir(parents=True, exist_ok=True)
+    (receipt_output / target.with_suffix(".deployment.json").name).write_text(
+        json.dumps(receipt, indent=2) + "\n")
     return receipt
 
 
@@ -134,8 +139,14 @@ def main():
     parser.add_argument("--wheelbipe-checkpoint-sha256", required=True,
                         help="SHA256 read independently on Kaiser before copying")
     parser.add_argument("--wheelbipe-source-path", required=True)
-    parser.add_argument("--output", type=Path, default=ROOT / "rmcs_ws/src/rmcs_rl/models/wheel_leg")
+    parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT)
+    parser.add_argument("--receipt-output", type=Path, default=None,
+                        help="Receipt directory; defaults to model_receipts/wheel_leg in the package, "
+                             "or a sibling model_receipts directory for a custom --output")
     args = parser.parse_args()
+    if args.receipt_output is None:
+        args.receipt_output = (DEFAULT_RECEIPT_OUTPUT if args.output.resolve() == DEFAULT_OUTPUT.resolve()
+                               else args.output.parent / "model_receipts" / args.output.name)
     torch.set_num_threads(1)
     pair = json.loads(CONTRACT.read_text())
     require(digest(args.wheelbipe_checkpoint) == args.wheelbipe_checkpoint_sha256,
@@ -146,7 +157,8 @@ def main():
                 "Pair export requires --training-root and --prone-checkpoint")
         actor, updates, native = prone_actor(args.training_root, args.prone_checkpoint, pair["prone"])
         results.append(export(actor, native, args.prone_checkpoint, args.output / "prone_motion_v4_100hz.onnx",
-            "prone", updates=updates, contract=pair["prone"], source_uri=str(args.prone_checkpoint.resolve())))
+            "prone", updates=updates, contract=pair["prone"], source_uri=str(args.prone_checkpoint.resolve()),
+            receipt_output=args.receipt_output))
     data = torch.load(args.wheelbipe_checkpoint, map_location="cpu", weights_only=False)
     state = data["model_state_dict"]
     require(not any("normalizer" in key for key in state), "Unexpected Wheelbipe normalizer")
@@ -155,7 +167,7 @@ def main():
             and args.wheelbipe_output_name.endswith(".onnx"), "Expected an ONNX filename")
     results.append(export(actor, actor, args.wheelbipe_checkpoint, args.output / args.wheelbipe_output_name,
         "wheelbipe", updates=int(data["iter"]) + 1, contract=pair["wheelbipe"],
-        source_uri=args.wheelbipe_source_path))
+        source_uri=args.wheelbipe_source_path, receipt_output=args.receipt_output))
     print(json.dumps([{key: row[key] for key in ("profile", "completed_updates", "max_absolute_error",
                                                 "onnx_sha256")} for row in results], indent=2))
 

@@ -18,6 +18,9 @@ RMCS 组件：在小 PC 上以进程内方式运行 ONNX 策略。整车标定�
 
 2. **模型。** 把 `.onnx` 放到 `models/<robot>/`。相对路径的 `rl_model_path` 在安装后的
    `share/rmcs_rl` 内解析，所以源码树里能用的路径安装后同样能用。
+   模型的 `.deployment.json` 导出回执放在 `model_receipts/<robot>/`，随软件一同安装；
+   它记录来源、哈希和验证状态，不参与推理。轮腿快照导出工具支持 `--receipt-output`
+   指定回执目录；自定义 `--output` 时默认写入其同级 `model_receipts/<输出目录名>/`。
 
 3. **接线。** bridge 是被动的：每个观测都是它读取的输入，每个动作都是它发布的输出。轮腿平台：
 
