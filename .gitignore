@@ -1,5 +1,37 @@
-*.pyc
+# Python tooling
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Standalone CMake build and index caches
+build/
+compile_commands.json
+.cache/
+
+# Local recordings and diagnostic exports
+*.jsonl
+*.npz
+*.csv
+record/
+
+# Editor and OS clutter
+.DS_Store
+.idea/
+*.swp
+
+# Editor temp files
 *~
 .#*
 
-/planning/docs
+# For Agent Development
+.opencode/
+.claude/
+.codex/
+.mimo/
+.dsh/
+CLAUDE.md
+AGENT.md

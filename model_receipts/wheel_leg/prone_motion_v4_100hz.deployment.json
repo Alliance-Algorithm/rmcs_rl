@@ -1,0 +1,31 @@
+{
+  "schema": "rmcs-wheel-leg-snapshot-export-v1",
+  "profile": "prone",
+  "checkpoint": "/home/noir/Documents/workspace/isaac_wheeled_rl_train/runs/prone_motion/v4_standard_getup_standing_bridge_seed107_env256_20261103/model_00500.pt",
+  "checkpoint_sha256": "cb206f332599e1885166accc42f5bd2675acee946a3644602a6ee28291c09c76",
+  "completed_updates": 500,
+  "training_budget": 10000,
+  "training_complete": false,
+  "onnx_sha256": "5e57f89ddb39efe36b1c5ce353606d2d3a289e65438b117ef25e0b379f3aa9c6",
+  "pair_contract_sha256": "acddedb9db2d5f02e492512b4a469223c8ec37ef46c00c4dc772198cadf43c36",
+  "metadata": {
+    "rmcs_model_spec_sha256": "8a9d759525c48955e8965b2e14b9e158c1d8fc9f3d68f33e4024a3c94bf8f812",
+    "leg_target_model_spec_sha256": "8a9d759525c48955e8965b2e14b9e158c1d8fc9f3d68f33e4024a3c94bf8f812",
+    "leg_winding_version": "paired_branch107_v1",
+    "rmcs_observation_contract_sha256": "6613ab1b2a538fc31558b668117dbcb77bed4f84e93133d9c087c5752ec6c967",
+    "rmcs_observation_version": "wheel-leg-prone-motion-v4-odom-v2",
+    "rmcs_obs_normalization": "embedded",
+    "policy_hz": "100",
+    "feedback_pd_hz": "200",
+    "gas_spring_compensation_enabled": "true",
+    "rmcs_checkpoint_sha256": "cb206f332599e1885166accc42f5bd2675acee946a3644602a6ee28291c09c76",
+    "completed_updates": "500",
+    "behavior_qualified": "false",
+    "hardware_tested": "false"
+  },
+  "parity_samples": 1024,
+  "max_absolute_error": 7.62939453125e-06,
+  "behavior_qualified": false,
+  "hardware_tested": false,
+  "live_training_modified": false
+}

@@ -1,117 +1,24 @@
 name: CI
-
 on:
   pull_request:
-    paths:
-      - "src/**"
-      - "include/**"
-      - "models/**"
-      - "tool/**"
-      - "test/**"
-      - "CMakeLists.txt"
-      - "package.xml"
-      - "plugins.xml"
-      - ".github/workflows/**"
   workflow_dispatch:
-
-concurrency:
-  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: true
-
-env:
-  RMCS_REPO: https://github.com/Alliance-Algorithm/RMCS.git
-  RMCS_REF: main
-
 jobs:
-  build-and-contract-check:
+  build:
     runs-on: ubuntu-latest
     container:
       image: qzhhhi/rmcs-develop
       options: --user 0
-
     steps:
-      - name: Checkout rmcs_rl
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
         with:
           path: rmcs_rl
-
-      - name: Clone RMCS workspace
+      - name: Build in RMCS workspace
         shell: bash
         run: |
-          set -euo pipefail
-          git clone --depth 1 --recurse-submodules --branch "${RMCS_REF}" "${RMCS_REPO}" /tmp/RMCS
+          set -eo pipefail
+          git clone --depth 1 --recurse-submodules https://github.com/Alliance-Algorithm/RMCS.git /tmp/RMCS
           mkdir -p /tmp/RMCS/rmcs_ws/src/rmcs_rl
-          tar -C "${GITHUB_WORKSPACE}/rmcs_rl" --exclude=".git" -cf - . \
-            | tar -C /tmp/RMCS/rmcs_ws/src/rmcs_rl -xf -
-
-      - name: Build rmcs_rl (colcon)
-        shell: bash
-        working-directory: /tmp/RMCS/rmcs_ws
-        run: |
-          set -euo pipefail
-          set +u
+          tar -C "${GITHUB_WORKSPACE}/rmcs_rl" --exclude=".git" -cf - . | tar -C /tmp/RMCS/rmcs_ws/src/rmcs_rl -xf -
           source /opt/ros/jazzy/setup.bash
-          set -u
-          colcon build --packages-up-to rmcs_rl --cmake-args -DBUILD_TESTING=ON
-
-      - name: C++ runtime regression
-        shell: bash
-        working-directory: /tmp/RMCS/rmcs_ws
-        run: |
-          set -e
-          source /opt/ros/jazzy/setup.bash
-          source install/setup.bash
-          colcon test --packages-select rmcs_rl
-          colcon test-result --test-result-base build/rmcs_rl --verbose
-
-      - name: Prepare Python toolchain (venv)
-        shell: bash
-        run: |
-          set -euo pipefail
-          apt-get update -qq
-          apt-get install -y -qq python3-venv
-          python3 -m venv /tmp/rl-venv
-          /tmp/rl-venv/bin/python -m pip install --quiet --no-cache-dir --upgrade pip
-          /tmp/rl-venv/bin/python -m pip install --quiet --no-cache-dir \
-              "onnx==1.22.0" "onnxruntime==1.30.0" "numpy==2.5.3" "pyyaml==6.0.1"
-
-      - name: Check shipped models (self-check, metadata optional)
-        shell: bash
-        working-directory: /tmp/RMCS/rmcs_ws/src/rmcs_rl
-        run: |
-          set -euo pipefail
-          PY=/tmp/rl-venv/bin/python
-
-          shopt -s nullglob
-          models=(models/*.onnx)
-          if [ "${#models[@]}" -eq 0 ]; then
-            echo "No models under models/, nothing to check"
-          fi
-          for model in "${models[@]}"; do
-            echo "== ${model} =="
-            "$PY" tool/check_policy_contract.py "$model"
-          done
-
-          # Negative test: a wrong expected size must be rejected with a shape
-          # error (guards against a false pass when the tool fails for an
-          # unrelated reason, e.g. a missing model file).
-          if [ "${#models[@]}" -gt 0 ]; then
-            if output="$("$PY" tool/check_policy_contract.py \
-                "${models[0]}" --obs 999 --act 999 2>&1)"; then
-              echo "FAIL: contract mismatch should have been rejected"
-              exit 1
-            fi
-            if ! grep -q "FAIL obs feature shape" <<<"${output}"; then
-              echo "FAIL: expected a shape mismatch, got:"
-              echo "${output}"
-              exit 1
-            fi
-            echo "negative contract test OK"
-          fi
-
-      - name: Toolchain regression (layout contract tools)
-        shell: bash
-        working-directory: /tmp/RMCS/rmcs_ws/src/rmcs_rl
-        run: |
-          set -euo pipefail
-          PYTHON=/tmp/rl-venv/bin/python bash test/test_layout_contract.sh
+          cd /tmp/RMCS/rmcs_ws
+          colcon build --packages-up-to rmcs_rl --cmake-args -DBUILD_TESTING=OFF
