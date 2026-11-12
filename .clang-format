@@ -1,28 +1,18 @@
-Language: Cpp
 BasedOnStyle: LLVM
 
-# RMCS uses spaces and four-space indentation.
-UseTab: Never
+ColumnLimit: 100
+
 IndentWidth: 4
-TabWidth: 4
 ContinuationIndentWidth: 4
 ConstructorInitializerIndentWidth: 4
 AccessModifierOffset: -4
 
-Standard: Latest
-ColumnLimit: 100
+Standard: c++20
+
 MaxEmptyLinesToKeep: 1
 
-BreakBeforeBraces: Attach
-BreakConstructorInitializers: BeforeComma
-BreakInheritanceList: BeforeComma
-BreakBeforeBinaryOperators: NonAssignment
-
 AlignAfterOpenBracket: AlwaysBreak
-AlignOperands: AlignAfterOperator
-AlignTrailingComments:
-  Kind: Always
-  OverEmptyLines: 64
+
 AlignConsecutiveAssignments:
   Enabled: false
 AlignConsecutiveBitFields:
@@ -35,19 +25,30 @@ AlignConsecutiveMacros:
   Enabled: true
   AcrossEmptyLines: false
   AcrossComments: false
-
+# AlignConsecutiveShortCaseStatements:
+#     Enabled: false
+AlignEscapedNewlines: Left
+AlignOperands: AlignAfterOperator
+AlignTrailingComments:
+  Kind: Always
+  OverEmptyLines: 64
 PointerAlignment: Left
-IndentPPDirectives: AfterHash
-PPIndentWidth: 1
-IndentWrappedFunctionNames: true
 
 AllowAllArgumentsOnNextLine: true
 AllowAllParametersOfDeclarationOnNextLine: true
 AllowShortBlocksOnASingleLine: Empty
 AllowShortCaseLabelsOnASingleLine: true
 
+IndentPPDirectives: AfterHash
+PPIndentWidth: 1
+
+BreakBeforeBinaryOperators: NonAssignment
+BreakBeforeConceptDeclarations: Always
+BreakConstructorInitializers: BeforeComma
+BreakInheritanceList: BeforeComma
 FixNamespaceComments: true
 IncludeBlocks: Preserve
+IndentWrappedFunctionNames: true
 
 AlwaysBreakTemplateDeclarations: Yes
 IndentRequiresClause: false

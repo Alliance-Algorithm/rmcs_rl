@@ -4,18 +4,12 @@ project(rmcs_rl)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
-set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wno-packed-bitfield-compat")
 
 if(CMAKE_COMPILER_IS_GNUCXX OR CMAKE_CXX_COMPILER_ID MATCHES "Clang")
     add_compile_options(-O2 -Wall -Wextra -Wpedantic)
 endif()
 
 find_package(ament_cmake_auto REQUIRED)
-find_package(rmcs_executor REQUIRED)
-find_package(rmcs_description REQUIRED)
-find_package(rmcs_msgs REQUIRED)
-find_package(OpenSSL REQUIRED)
-find_package(nlohmann_json REQUIRED)
 ament_auto_find_build_dependencies()
 
 set(ONNXRUNTIME_VERSION 1.20.0)
@@ -43,44 +37,32 @@ if(NOT EXISTS ${ONNXRUNTIME_ROOT_DIR}/include/onnxruntime_cxx_api.h)
     endif()
 endif()
 
-ament_auto_add_library(rmcs_rl SHARED
-    src/policy/configuration.cpp
-    src/policy/policy_model.cpp
+ament_auto_add_library(${PROJECT_NAME} SHARED
     src/policy/onnx_runtime.cpp
+    src/policy/policy_model.cpp
     src/policy/policy_worker.cpp
-    src/parameters.cpp
     src/rl_bridge.cpp
     src/rl_bridge/config.cpp
-    src/rl_bridge/structured_config.cpp
-    src/rl_bridge/observation_history.cpp
-    src/rl_bridge/utility.cpp
-    src/rl_bridge/joint_config.cpp
-    src/rl_bridge/term_parser.cpp
-    src/rl_bridge/interface_binding.cpp
-    src/rl_bridge/observation.cpp
     src/visualization/wheel_leg_mirror.cpp
 )
-ament_target_dependencies(rmcs_rl rmcs_executor rmcs_description rmcs_msgs rmcs_utility rclcpp)
-target_include_directories(rmcs_rl PUBLIC
-    $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/include>
-    $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/src>
-    $<INSTALL_INTERFACE:include/rmcs_rl>
-    ${ONNXRUNTIME_ROOT_DIR}/include
+target_include_directories(${PROJECT_NAME}
+    PUBLIC $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/src>
+    PRIVATE ${ONNXRUNTIME_ROOT_DIR}/include
 )
-target_link_libraries(rmcs_rl
-    ${ONNXRUNTIME_ROOT_DIR}/lib/libonnxruntime.so OpenSSL::Crypto nlohmann_json::nlohmann_json)
-set_target_properties(rmcs_rl PROPERTIES INSTALL_RPATH "$ORIGIN")
-pluginlib_export_plugin_description_file(rmcs_executor plugins.xml)
+target_link_libraries(${PROJECT_NAME} ${ONNXRUNTIME_ROOT_DIR}/lib/libonnxruntime.so)
+set_target_properties(${PROJECT_NAME} PROPERTIES INSTALL_RPATH "$ORIGIN")
 install(DIRECTORY ${ONNXRUNTIME_ROOT_DIR}/lib/ DESTINATION lib FILES_MATCHING PATTERN "*.so*")
 
-# Local stdin/stdout simulation only; never launches the hardware executor.
+pluginlib_export_plugin_description_file(rmcs_executor plugins.xml)
+
+# Host-only tools; neither creates hardware nor sends control output.
 ament_auto_add_executable(wheel_leg_policy_host tool/simulation/wheel_leg_policy_host.cpp)
 target_link_libraries(wheel_leg_policy_host nlohmann_json::nlohmann_json)
 ament_auto_add_executable(wheel_leg_latency_bench tool/simulation/wheel_leg_latency_bench.cpp)
-target_link_libraries(wheel_leg_latency_bench rmcs_rl)
+target_link_libraries(wheel_leg_latency_bench ${PROJECT_NAME})
 
 install(DIRECTORY models DESTINATION share/${PROJECT_NAME})
 install(DIRECTORY tool/visualization DESTINATION share/${PROJECT_NAME}/tool
     FILES_MATCHING PATTERN "*.py")
 
-ament_auto_package(USE_SCOPED_HEADER_INSTALL_DIR)
+ament_auto_package()

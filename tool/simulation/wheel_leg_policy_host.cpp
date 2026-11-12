@@ -22,8 +22,9 @@ namespace rmcs_executor {
 // as the executor. It deliberately has no hardware/component-list loader.
 class Executor {
 public:
-    static void append(std::vector<std::shared_ptr<Component>>& list,
-                       const std::shared_ptr<Component>& component) {
+    static void append(
+        std::vector<std::shared_ptr<Component>>& list,
+        const std::shared_ptr<Component>& component) {
         list.push_back(component);
         for (const auto& partner : component->partner_component_list_)
             append(list, partner);
@@ -32,7 +33,8 @@ public:
         Component::OutputInfoMap info;
         for (const auto& component : list)
             for (const auto& output : component->output_list_)
-                if (!info.emplace(output.name, Component::OutputInfo{output.type, output.kind}).second)
+                if (!info.emplace(output.name, Component::OutputInfo{output.type, output.kind})
+                         .second)
                     throw std::runtime_error("duplicate simulation output: " + output.name);
         for (const auto& component : list)
             component->before_pairing(info);
@@ -55,7 +57,8 @@ public:
             component->before_updating();
     }
     template <class T>
-    static const T& read(const std::vector<std::shared_ptr<Component>>& list, const std::string& name) {
+    static const T&
+        read(const std::vector<std::shared_ptr<Component>>& list, const std::string& name) {
         for (const auto& component : list)
             for (const auto& output : component->output_list_)
                 if (output.name == name && output.type == typeid(T))
@@ -94,8 +97,12 @@ public:
         const auto orientation = value.at("quaternion_wxyz").get<std::array<double, 4>>();
         const auto gyro = value.at("gyro_body").get<std::array<double, 3>>();
         const auto cmd = value.at("command").get<std::array<double, 3>>();
-        for (int i = 0; i < 6; ++i) { *q_[i] = q[i]; *dq_[i] = dq[i]; }
-        *orientation_ = Eigen::Quaterniond{orientation[0], orientation[1], orientation[2], orientation[3]};
+        for (int i = 0; i < 6; ++i) {
+            *q_[i] = q[i];
+            *dq_[i] = dq[i];
+        }
+        *orientation_ =
+            Eigen::Quaterniond{orientation[0], orientation[1], orientation[2], orientation[3]};
         *gyro_ = Eigen::Vector3d{gyro[0], gyro[1], gyro[2]};
         command_->vector = Eigen::Vector3d{cmd[0], cmd[1], cmd[2]};
         *height_ = value.at("height").get<double>();
@@ -107,8 +114,10 @@ public:
         ++*tick_;
         *timestamp_ = std::chrono::steady_clock::now();
     }
-    inline static constexpr std::array<const char*, 6> names{
-        "left_hip_joint", "left_knee_joint", "right_hip_joint", "right_knee_joint", "left_wheel", "right_wheel"};
+    inline static constexpr std::array<const char*, 6> names{"left_hip_joint",  "left_knee_joint",
+                                                             "right_hip_joint", "right_knee_joint",
+                                                             "left_wheel",      "right_wheel"};
+
 private:
     OutputInterface<double> rate_, height_;
     OutputInterface<std::size_t> tick_, reset_;
@@ -136,13 +145,19 @@ int main(int argc, char** argv) {
             Executor::append(components, result);
             return result;
         };
-        auto estimator = load("wheel_leg_state_estimator", "rmcs_core::controller::chassis::WheelLegStateEstimator");
-        auto controller = load("wheel_leg_rl_controller", "rmcs_core::controller::chassis::WheelLegRlController");
-        auto observation = load("wheel_leg_observation", "rmcs_core::controller::chassis::WheelLegObservation");
+        auto estimator = load(
+            "wheel_leg_state_estimator", "rmcs_core::controller::chassis::WheelLegStateEstimator");
+        auto controller =
+            load("wheel_leg_rl_controller", "rmcs_core::controller::chassis::WheelLegRlController");
+        auto observation =
+            load("wheel_leg_observation", "rmcs_core::controller::chassis::WheelLegObservation");
         auto bridge = load("rl_bridge", "rmcs_rl::RlBridge");
         Executor::pair(components);
-        std::cout << nlohmann::json{{"ready", true}, {"hardware_created", false},
-            {"executor_hz", 1000}, {"pd_hz", 200}, {"policy_hz", 50}}.dump() << std::endl;
+        std::cout
+            << nlohmann::
+                   json{{"ready", true}, {"hardware_created", false}, {"executor_hz", 1000}, {"pd_hz", 200}, {"policy_hz", 50}}
+                       .dump()
+            << std::endl;
         for (std::string line; std::getline(std::cin, line);) {
             const auto input = nlohmann::json::parse(line);
             feedback->accept(input);
@@ -157,20 +172,19 @@ int main(int argc, char** argv) {
                     if (component != feedback && component != estimator && component != controller
                         && component != observation && component != bridge)
                         component->update();
-                controller->update(); observation->update(); bridge->update();
+                controller->update();
+                observation->update();
+                bridge->update();
             }
             std::array<double, 6> effort{};
             for (int i = 0; i < 6; ++i)
-                effort[i] = Executor::read<double>(components,
+                effort[i] = Executor::read<double>(
+                    components,
                     std::string{"/wheel_leg/"} + SimulationFeedback::names[i] + "/control_torque");
-            std::cout << nlohmann::json{{"effort_api", effort},
-                {"state", Executor::read<int>(components, "/wheel_leg/rl/state")},
-                {"phase", Executor::read<int>(components, "/wheel_leg/recovery/phase")},
-                {"fault", Executor::read<int>(components, "/wheel_leg/recovery/fault")},
-                {"fault_latched", Executor::read<bool>(components, "/wheel_leg/rl/fault_latched")},
-                {"action_seq", Executor::read<std::size_t>(components, "/wheel_leg/rl/action_seq")},
-                {"applied_action", Executor::read<std::array<double, 6>>(components, "/wheel_leg/rl/applied_action")},
-                {"enable", Executor::read<bool>(components, "/wheel_leg/enable_request")}}.dump() << std::endl;
+            std::cout
+                << nlohmann::json{{"effort_api", effort}, {"state", Executor::read<int>(components, "/wheel_leg/rl/state")}, {"phase", Executor::read<int>(components, "/wheel_leg/recovery/phase")}, {"fault", Executor::read<int>(components, "/wheel_leg/recovery/fault")}, {"fault_latched", Executor::read<bool>(components, "/wheel_leg/rl/fault_latched")}, {"action_seq", Executor::read<std::size_t>(components, "/wheel_leg/rl/action_seq")}, {"applied_action", Executor::read<std::array<double, 6>>(components, "/wheel_leg/rl/applied_action")}, {"enable", Executor::read<bool>(components, "/wheel_leg/enable_request")}}
+                       .dump()
+                << std::endl;
         }
         rclcpp::shutdown();
     } catch (const std::exception& error) {

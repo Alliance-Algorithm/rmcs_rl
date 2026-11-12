@@ -46,15 +46,14 @@ int main(int argc, char** argv) {
         while (Clock::now() - start < std::chrono::duration<double>{seconds}) {
             const auto now = Clock::now();
             if (now >= next_submit) {
-                if (!worker.submit(
-                        std::span<const double>{observation}, ++sequence, 1, now, 0, ns(now)))
+                if (!worker.submit(observation, ++sequence, 1, now))
                     throw std::runtime_error("Observation rejected during benchmark");
                 next_submit += std::chrono::microseconds{static_cast<long>(1e6 / hz)};
             }
             if (worker.try_take(result)) {
                 if (!result.success)
                     throw std::runtime_error(result.error);
-                stream << result.sequence << ',' << result.source_steady_ns << ','
+                stream << result.sequence << ',' << ns(result.submitted_at) << ','
                        << ns(result.queued_at) << ',' << ns(result.inference_started_at) << ','
                        << ns(result.inference_completed_at) << ',' << ns(result.ready_at) << ','
                        << ns(Clock::now()) << '\n';

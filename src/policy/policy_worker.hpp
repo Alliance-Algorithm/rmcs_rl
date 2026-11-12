@@ -1,19 +1,19 @@
 #pragma once
 
-#include <algorithm>
 #include <atomic>
 #include <chrono>
-#include <concepts>
 #include <condition_variable>
-#include <cstddef>
 #include <cstdint>
+#include <expected>
 #include <mutex>
 #include <span>
+#include <stop_token>
 #include <string>
 #include <thread>
 #include <vector>
 
-#include "policy_model.hpp"
+#include "policy/policy_config.hpp"
+#include "policy/policy_model.hpp"
 
 namespace rmcs_rl {
 
@@ -25,96 +25,77 @@ public:
         std::uint64_t sequence = 0;
         std::uint64_t generation = 0;
         Clock::time_point submitted_at{};
-        Clock::time_point queued_at{}, inference_started_at{}, inference_completed_at{}, ready_at{};
-        std::uint64_t context = 0;
-        std::uint64_t source_steady_ns = 0;
-        double inference_microseconds = 0.0;
+        Clock::time_point queued_at{};
+        Clock::time_point inference_started_at{};
+        Clock::time_point inference_completed_at{};
+        Clock::time_point ready_at{};
         bool success = false;
         std::string error;
         std::vector<double> action;
     };
 
-    explicit PolicyWorker(PolicyConfig config);
-    ~PolicyWorker();
+    explicit PolicyWorker(const PolicyConfig& config);
 
     PolicyWorker(const PolicyWorker&) = delete;
     PolicyWorker& operator=(const PolicyWorker&) = delete;
+    PolicyWorker(PolicyWorker&&) = delete;
+    PolicyWorker& operator=(PolicyWorker&&) = delete;
 
-    [[nodiscard]] const PolicyModel::Info& info() const { return model_.info(); }
-    [[nodiscard]] bool healthy() const;
-    [[nodiscard]] std::string error() const;
-    std::uint64_t submit_attempts() const {
-        return submit_attempts_.load(std::memory_order_relaxed);
-    }
-    std::uint64_t submit_rejected() const {
-        return submit_rejected_.load(std::memory_order_relaxed);
-    }
-    std::uint64_t pending_overwritten() const {
-        return pending_overwritten_.load(std::memory_order_relaxed);
-    }
-    std::uint64_t result_overwritten() const {
-        return result_overwritten_.load(std::memory_order_relaxed);
-    }
+    ~PolicyWorker() = default;
 
-    template <std::floating_point T>
+    const PolicyModel::Info& info() const { return model_.info(); }
+    bool healthy() const { return healthy_.load(std::memory_order::acquire); }
+
+    std::uint64_t submit_attempts() const { return submit_attempts_.load(); }
+    std::uint64_t submit_rejected() const { return submit_rejected_.load(); }
+    std::uint64_t pending_overwritten() const { return pending_overwritten_.load(); }
+    std::uint64_t result_overwritten() const { return result_overwritten_.load(); }
+
     bool submit(
-        std::span<const T> observation, std::uint64_t sequence, std::uint64_t generation,
-        Clock::time_point submitted_at, std::uint64_t context = 0,
-        std::uint64_t source_steady_ns = 0) {
-        ++submit_attempts_;
-        if (observation.size() != pending_observation_.size()) {
-            ++submit_rejected_;
-            return false;
-        }
-        const std::unique_lock lock{input_mutex_, std::try_to_lock};
-        if (!lock.owns_lock() || stopping_.load(std::memory_order_acquire)
-            || !healthy_.load(std::memory_order_acquire)) {
-            ++submit_rejected_;
-            return false;
-        }
-        if (pending_)
-            ++pending_overwritten_;
-        std::transform(
-            observation.begin(), observation.end(), pending_observation_.begin(),
-            [](T value) { return static_cast<double>(value); });
-        pending_sequence_ = sequence;
-        pending_generation_ = generation;
-        pending_submitted_at_ = submitted_at;
-        pending_context_ = context;
-        pending_source_ns_ = source_steady_ns;
-        pending_queued_at_ = Clock::now();
-        pending_ = true;
-        input_ready_.notify_one();
-        return true;
-    }
+        std::span<const double> observation, std::uint64_t sequence, std::uint64_t generation,
+        Clock::time_point submitted_at);
     bool try_take(Result& result);
 
+    // Drops pending and in-flight work and clears a latched inference failure.
+    void reset();
+
 private:
-    void run_();
+    struct Request {
+        std::uint64_t sequence = 0;
+        std::uint64_t generation = 0;
+        Clock::time_point submitted_at{};
+        Clock::time_point queued_at{};
+    };
+
+    void run(const std::stop_token& stop);
+    void store_result(
+        const Request& request, Clock::time_point started, Clock::time_point completed,
+        std::expected<void, std::string> outcome);
 
     PolicyModel model_;
+
+    std::mutex input_mutex_;
+    std::condition_variable_any input_ready_;
     std::vector<double> pending_observation_;
-    std::vector<double> input_buffer_;
-    std::vector<double> action_buffer_;
-    std::uint64_t pending_sequence_ = 0;
-    std::uint64_t pending_generation_ = 0;
-    Clock::time_point pending_submitted_at_{};
-    Clock::time_point pending_queued_at_{};
-    std::uint64_t pending_context_ = 0;
-    std::uint64_t pending_source_ns_ = 0;
+    Request pending_request_;
+    std::uint64_t reset_epoch_ = 0;
     bool pending_ = false;
-    std::atomic<bool> stopping_{false};
-    std::atomic<bool> healthy_{true};
-    std::atomic<std::uint64_t> submit_attempts_{0}, submit_rejected_{0};
-    std::atomic<std::uint64_t> pending_overwritten_{0}, result_overwritten_{0};
-    std::string error_;
-    mutable std::mutex input_mutex_;
-    mutable std::mutex error_mutex_;
+
     std::mutex result_mutex_;
-    std::condition_variable input_ready_;
     Result result_;
     bool result_ready_ = false;
-    std::jthread worker_;
+
+    std::atomic<bool> healthy_{true};
+    std::atomic<std::uint64_t> submit_attempts_{0};
+    std::atomic<std::uint64_t> submit_rejected_{0};
+    std::atomic<std::uint64_t> pending_overwritten_{0};
+    std::atomic<std::uint64_t> result_overwritten_{0};
+
+    std::vector<double> input_buffer_;
+    std::vector<double> action_buffer_;
+
+    // Declared last: stops and joins before the state above is destroyed.
+    std::jthread thread_;
 };
 
 } // namespace rmcs_rl

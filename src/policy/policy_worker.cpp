@@ -1,122 +1,126 @@
-#include "policy_worker.hpp"
+#include "policy/policy_worker.hpp"
 
 #include <algorithm>
-#include <cmath>
-#include <stdexcept>
 #include <utility>
 
 namespace rmcs_rl {
 
-PolicyWorker::PolicyWorker(PolicyConfig config)
+PolicyWorker::PolicyWorker(const PolicyConfig& config)
     : model_(config)
-    , pending_observation_(model_.info().obs_size)
-    , input_buffer_(model_.info().obs_size)
-    , action_buffer_(model_.info().action_size)
-    , result_{} {
+    , pending_observation_(model_.info().observation_size)
+    , input_buffer_(model_.info().observation_size)
+    , action_buffer_(model_.info().action_size) {
     result_.action.reserve(model_.info().action_size);
-    worker_ = std::jthread([this] { run_(); });
+    thread_ = std::jthread{[this](const std::stop_token& stop) { run(stop); }};
 }
 
-PolicyWorker::~PolicyWorker() {
-    stopping_.store(true, std::memory_order_release);
+bool PolicyWorker::submit(
+    std::span<const double> observation, std::uint64_t sequence, std::uint64_t generation,
+    Clock::time_point submitted_at) {
+    ++submit_attempts_;
+    if (observation.size() != pending_observation_.size()) [[unlikely]] {
+        ++submit_rejected_;
+        return false;
+    }
+
+    const std::unique_lock lock{input_mutex_, std::try_to_lock};
+    if (!lock.owns_lock() || !healthy_.load(std::memory_order::acquire)) {
+        ++submit_rejected_;
+        return false;
+    }
+    if (pending_)
+        ++pending_overwritten_;
+    std::ranges::copy(observation, pending_observation_.begin());
+    pending_request_ = {
+        .sequence = sequence,
+        .generation = generation,
+        .submitted_at = submitted_at,
+        .queued_at = Clock::now(),
+    };
+    pending_ = true;
     input_ready_.notify_one();
-    if (worker_.joinable())
-        worker_.join();
-}
-
-bool PolicyWorker::healthy() const { return healthy_.load(std::memory_order_acquire); }
-
-std::string PolicyWorker::error() const {
-    const std::lock_guard lock{error_mutex_};
-    return error_;
+    return true;
 }
 
 bool PolicyWorker::try_take(Result& result) {
     const std::unique_lock lock{result_mutex_, std::try_to_lock};
     if (!lock.owns_lock() || !result_ready_)
         return false;
-    std::swap(result.sequence, result_.sequence);
-    std::swap(result.generation, result_.generation);
-    std::swap(result.submitted_at, result_.submitted_at);
-    std::swap(result.queued_at, result_.queued_at);
-    std::swap(result.inference_started_at, result_.inference_started_at);
-    std::swap(result.inference_completed_at, result_.inference_completed_at);
-    std::swap(result.ready_at, result_.ready_at);
-    std::swap(result.context, result_.context);
-    std::swap(result.source_steady_ns, result_.source_steady_ns);
-    std::swap(result.inference_microseconds, result_.inference_microseconds);
-    std::swap(result.success, result_.success);
-    result.error.swap(result_.error);
-    result.action.clear();
-    result.action.insert(result.action.end(), result_.action.begin(), result_.action.end());
+    std::swap(result, result_);
     result_ready_ = false;
     return true;
 }
 
-void PolicyWorker::run_() {
+void PolicyWorker::reset() {
+    {
+        const std::lock_guard lock{input_mutex_};
+        ++reset_epoch_;
+        pending_ = false;
+        healthy_.store(true, std::memory_order::release);
+    }
+    input_ready_.notify_one();
+}
+
+void PolicyWorker::run(const std::stop_token& stop) {
     while (true) {
-        std::uint64_t sequence;
-        std::uint64_t generation;
-        std::uint64_t context;
-        std::uint64_t source_ns;
-        Clock::time_point submitted_at;
-        Clock::time_point queued_at;
+        Request request;
+        std::uint64_t reset_epoch;
         {
             std::unique_lock lock{input_mutex_};
-            input_ready_.wait(
-                lock, [this] { return pending_ || stopping_.load(std::memory_order_acquire); });
-            if (stopping_.load(std::memory_order_acquire))
+            if (!input_ready_.wait(lock, stop, [this] { return pending_; })
+                || stop.stop_requested())
                 return;
-            std::copy(
-                pending_observation_.begin(), pending_observation_.end(), input_buffer_.begin());
-            sequence = pending_sequence_;
-            generation = pending_generation_;
-            submitted_at = pending_submitted_at_;
-            queued_at = pending_queued_at_;
-            context = pending_context_;
-            source_ns = pending_source_ns_;
+            std::ranges::copy(pending_observation_, input_buffer_.begin());
+            request = pending_request_;
+            reset_epoch = reset_epoch_;
             pending_ = false;
         }
 
-        std::string error;
         const auto started = Clock::now();
-        const bool success = model_.run(input_buffer_, action_buffer_, error);
+        auto outcome = model_.run(input_buffer_, action_buffer_);
         const auto completed = Clock::now();
 
+        const bool success = outcome.has_value();
         {
-            if (!success) {
-                healthy_.store(false, std::memory_order_release);
-                const std::lock_guard error_lock{error_mutex_};
-                error_ = error;
-            }
+            const std::lock_guard lock{input_mutex_};
+            if (reset_epoch != reset_epoch_)
+                continue;
+            if (!success)
+                healthy_.store(false, std::memory_order::release);
         }
-        {
-            std::lock_guard lock{result_mutex_};
-            if (result_ready_)
-                ++result_overwritten_;
-            result_.sequence = sequence;
-            result_.generation = generation;
-            result_.submitted_at = submitted_at;
-            result_.queued_at = queued_at;
-            result_.inference_started_at = started;
-            result_.inference_completed_at = completed;
-            result_.context = context;
-            result_.source_steady_ns = source_ns;
-            result_.inference_microseconds =
-                std::chrono::duration<double, std::micro>{completed - started}.count();
-            result_.success = success;
-            result_.error = std::move(error);
-            if (success) {
-                result_.action.clear();
-                result_.action.insert(
-                    result_.action.end(), action_buffer_.begin(), action_buffer_.end());
-            }
-            result_.ready_at = Clock::now();
-            result_ready_ = true;
+        store_result(request, started, completed, std::move(outcome));
+
+        if (!success) {
+            std::unique_lock lock{input_mutex_};
+            if (!input_ready_.wait(
+                    lock, stop, [this] { return healthy_.load(std::memory_order::acquire); }))
+                return;
         }
-        if (!success)
-            return;
     }
+}
+
+void PolicyWorker::store_result(
+    const Request& request, Clock::time_point started, Clock::time_point completed,
+    std::expected<void, std::string> outcome) {
+    const std::lock_guard lock{result_mutex_};
+    if (result_ready_)
+        ++result_overwritten_;
+    result_.sequence = request.sequence;
+    result_.generation = request.generation;
+    result_.submitted_at = request.submitted_at;
+    result_.queued_at = request.queued_at;
+    result_.inference_started_at = started;
+    result_.inference_completed_at = completed;
+    result_.success = outcome.has_value();
+    if (result_.success) {
+        result_.error.clear();
+        result_.action.assign(action_buffer_.begin(), action_buffer_.end());
+    } else {
+        result_.error = std::move(outcome.error());
+        result_.action.clear();
+    }
+    result_.ready_at = Clock::now();
+    result_ready_ = true;
 }
 
 } // namespace rmcs_rl

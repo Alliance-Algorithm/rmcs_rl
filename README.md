@@ -1,215 +1,167 @@
 # rmcs_rl
 
-Generic YAML observation/action interfaces and in-process ONNX policy workers for
-RMCS. Vehicle calibration, PD and actuator limits live in `rmcs_core`.
-Wheel-leg self-righting belongs to the policy; there is no host recovery script.
+RMCS 组件：在小 PC 上以进程内方式运行 ONNX 策略。整车标定、PD 控制与执行器限幅留在
+`rmcs_core`；本包只负责组装观测、执行推理并发布策略动作。
 
-## Wheel-leg live mirror
+| 组件 | 源文件 | 用途 |
+|---|---|---|
+| `rmcs_rl::RlBridge` | `src/rl_bridge.cpp` | YAML 定义的观测与动作、ONNX Runtime worker |
+| `rmcs_rl::WheelLegMirrorComponent` | `src/visualization/wheel_leg_mirror.cpp` | 供 Isaac Sim 镜像显示的轮腿遥测，见 [docs/wheel_leg_live_mirror.md](docs/wheel_leg_live_mirror.md) |
 
-`rmcs_rl::WheelLegMirrorComponent` publishes measured joints, body IMU and
-estimator references for the Isaac Sim kinematic mirror. Its implementation
-is in `src/visualization/wheel_leg_mirror.cpp`; the Foxglove receiver and
-JSONL recording/replay utilities are in `tool/visualization/`.
+## 快速开始
 
-Enable it in the vehicle YAML, alongside the existing wheel-leg hardware,
-chassis and state-estimator components:
+一个策略配置需要四样东西：ONNX Runtime、`models/` 下的模型、车型 YAML 里的观测与控制组件，
+以及把它们绑定起来的 bridge 参数。`rmcs_bringup/config` 中的轮腿配置就是参考接线。
 
-```yaml
-rmcs_executor:
-  ros__parameters:
-    components:
-      # Append to the existing component list.
-      - rmcs_rl::WheelLegMirrorComponent -> wheel_leg_mirror
+1. **依赖。** `tool/install_rl_deps.sh local` 下载 ONNX Runtime 1.20.0 并校验 SHA-256；
+   `remote <host>` 通过 SSH 在机器人上做同样的事。
 
-wheel_leg_mirror:
-  ros__parameters:
-    enabled: true
-    update_rate: 100.0
-```
+2. **模型。** 把 `.onnx` 放到 `models/<robot>/`。相对路径的 `rl_model_path` 在安装后的
+   `share/rmcs_rl` 内解析，所以源码树里能用的路径安装后同样能用。
 
-Loading the component enables telemetry at 100 Hz by default; the parameter
-block can be omitted if those defaults are suitable. `enabled: false` disables
-all of its inputs and publishers. It works with traditional and RL wheel-leg
-profiles and does not require an `RlBridge` instance or a policy model.
+3. **接线。** bridge 是被动的：每个观测都是它读取的输入，每个动作都是它发布的输出。轮腿平台：
 
-`enabled` controls this telemetry component, not actuator enable. In the
-`wheel-leg-infantry-wheelbipe-recovery` profile it stays on while chassis
-control and DM drives are disabled. `control_enabled` and `dm_control_ready`
-are diagnostic labels only. The viewer uses fresh measured encoders and IMU
-even when estimator references are invalid. It applies no gravity, contact,
-tilt or angular-speed gate; nominal joint limits produce diagnostics without
-clamping measured poses. Stale/invalid raw data and unsolved CAD loop closure
-remain explicit display errors. Motor safety and enable logic are unchanged.
+   ```yaml
+   rmcs_executor:
+     ros__parameters:
+       components:
+         - rmcs_core::controller::chassis::WheelLegObservation -> wheel_leg_observation
+         - rmcs_core::controller::chassis::WheelLegRlController -> wheel_leg_rl_controller
+         - rmcs_rl::RlBridge -> rl_bridge
+   ```
 
-Calibration stays in `rmcs_core::controller::chassis::WheelLegStateEstimator`,
-which supplies `model_offsets`, `calibration_sha256` and
-`calibration_model_spec_sha256` under `/wheel_leg/state/`. The mirror reads
-these interfaces rather than including private vehicle headers or copying
-calibration tables. It publishes the same `/wheel_leg/telemetry/*` messages
-and recording schema as the earlier core broadcaster.
+   | 接口 | 生产者 | bridge 参数 |
+   |---|---|---|
+   | `/wheel_leg/rl/features/*` | `WheelLegObservation` | `observations.<name>.source` |
+   | `/wheel_leg/rl/input/enable` | `WheelLegRlController` | `enable_interface` |
+   | `/chassis/reset_count` | `WheelLegChassisController` | `reset_interface` |
+   | `/wheel_leg/rl/input/frame_sequence` | `WheelLegObservation` | `observation_frame_sequence_interface` |
 
-Build with `build-rmcs --packages-select rmcs_rl rmcs_core rmcs_bringup`. Run
-Foxglove bridge in the robot's ROS environment; the Isaac GUI remains on the
-viewing computer and connects over WebSocket. The parent repository's
-`docs/zh-cn/wheel_leg_live_mirror.md` describes the complete configuration and
-the training repository's `docs/WHEEL_LEG_LIVE_MIRROR.md` describes GUI startup,
-joint-name mapping and measured-pose checks.
+   换到其它车型时，用它自己的组件发布同样的四类接口，再把 source 指过去；bridge 里没有任何
+   轮腿专属逻辑。每个 source 都必须由执行器能排在 `rl_bridge` 之前的组件产出——可选输入
+   同样计入依赖图。
 
-## Policy deployment
+4. **契约。** 保留 `expected_model_spec_sha256`、`expected_observation_contract_sha256` 与
+   `expected_observation_version`（见[模型检查](#模型检查)）。它们是启动期唯一的防线：防止
+   模型与错误的观测布局配对；删掉它们，加载失败就会变成静默输出错误动作。
 
-### Structured observation and action configuration
+5. **验证。** 下游开始动作之前，`valid` 与 `healthy` 必须都为 `1`：
 
-New profiles use ordered names and parameter blocks rather than `key=value`
-strings. Both the deformable suspension profile and wheel-leg profiles use this
-format. Nested mappings are ROS parameter namespaces; `order` is a string array.
+   ```sh
+   ros2 topic echo /wheel_leg/rl/valid
+   ros2 topic echo /wheel_leg/rl/healthy
+   ros2 topic echo /wheel_leg/rl/action_seq
+   ```
+
+   `valid` 在 bridge 使能、worker 健康、当前会话新鲜且动作有限之前一直是 `0`。失败处理与
+   症状对照见 [docs/troubleshooting.md](docs/troubleshooting.md)。
+
+## RlBridge 配置
 
 ```yaml
 rl_bridge:
   ros__parameters:
-    rl_model_path: models/actor.onnx
+    rl_base: /robot/rl
+    rl_model_path: models/robot/actor.onnx
+    model_type: mlp
     policy_rate: 50.0
+    history_length: 1
     observations:
       order: [gyro, command]
-      gyro:
-        source: /robot/gyro
-        type: vector3
-        scale: 0.5
-        clip: [-10.0, 10.0]
-      command:
-        source: /robot/command
-        type: vector3
-        select: [0, 2]
+      gyro: {source: /robot/gyro, type: vector3, scale: 0.5, clip: [-10.0, 10.0]}
+      command: {source: /robot/command, type: array, size: 3, select: [0, 2]}
     actions:
       order: [left, right]
-      left:
-        output: /robot/policy/left
-        scale: 0.25
-      right:
-        output: /robot/policy/right
-        scale: 0.25
+      left: {output: /robot/policy/left, scale: 0.25}
+      right: {output: /robot/policy/right, scale: 0.25, clip: [-1.0, 1.0]}
     expected_metadata:
       training_contract: robot_v1
 ```
 
-Supported observation types are `scalar` (default), `vector3`, `array` with
-`size`, `scalars` with an ordered `sources` string array, `projected_gravity`
-from a quaternion, `constant` with a numeric `value` array, and `previous_action`.
-`select` selects/reorders source indices and may repeat indices. Processing is
-selection, `value * scale + offset`, then optional `clip: [lower, upper]`.
-`scale` and `offset` are scalar values applied to the whole term. A scalar source
-may specify a finite `default` for an absent interface. Input and action sizes
-are inferred; existing size parameters remain optional assertions.
+相对路径的 `rl_model_path` 在安装后的 `rmcs_rl` share 目录内解析。
 
-`source_clip` optionally clips before scaling. `precision: float32` rounds the
-source and arithmetic to float32, preserving training-time preprocessing order;
-the default is float64. Nonfinite sources are rejected before clipping.
+| 参数 | 默认值 | 含义 |
+|---|---|---|
+| `rl_base` | `/rl` | bridge 状态接口的前缀 |
+| `policy_rate` | `50.0` | 没有帧序号时的提交频率；模型带 `policy_hz` 时必须与之一致 |
+| `history_length` | `1` | 按从旧到新堆叠的帧数；reset 后的第一帧填满整个历史 |
+| `max_action_age`、`inference_timeout` | `2 / policy_rate` | 动作失效前可容忍的秒数 |
+| `invalid_value` | `"nan"` | 失效期间的动作输出：`"nan"`、`"zero"` 或 `"hold"` |
+| `enable_interface` | `<rl_base>/enable` | 可选的 `bool`；缺失时退回 `enable_default`（`false`） |
+| `reset_interface` | 无 | `std::size_t` 计数器；任何变化都开启新会话 |
+| `observation_frame_sequence_interface` | 无 | `std::size_t`；每个新的正序号提交一次，而不是按频率 |
+| `rl_obs_size`、`rl_feature_size`、`rl_action_size` | 无 | 可选的尺寸断言 |
 
-`previous_action` means the bridge's mapped/clipped action converted back to
-normalized units, not measured or guaranteed actuator execution. A vehicle that
-needs applied-action history must explicitly publish and bind that source.
-`expected_metadata` checks arbitrary string metadata keys at model startup;
-missing keys also fail validation. ONNX graphs own architecture and weights;
-tensor rank does not identify a model as an MLP or Transformer. `model_type:auto`
-therefore uses generic tensor validation. Vehicle-specific model type names are
-no longer accepted; use explicit metadata assertions instead.
+### 观测
 
-Legacy `observation_terms`/`action_terms` remain available for migration, but
-cannot be mixed with the structured format. Producer-sequence-triggered
-structured observations may contain multiple named features. Their producer
-must update all features before advancing the sequence. Legacy complete-frame
-mode retains its stricter single-array contract.
+`observations.order` 决定观测帧的布局。每个命名块支持：
 
-Wheel-leg publishes unnormalized command, height, gyro, velocity and action
-feedback. YAML owns their preprocessing, feature concatenation, wheelbipe channel
-permutation, and physical action scaling/clipping. The controller consumes leg
-offsets and wheel speeds, retaining only mechanical winding and actuator safety.
-`action_history_source: raw|mapped` selects raw actor feedback or inverse-mapped
-executed feedback. Every action publishes `/raw`, `/scale`, `/offset`, and clip
-metadata alongside its decoded value. Observation telemetry at
-`<rl_base>/input/frame` now comes from the actual shared observation assembler.
-Standing odometry still uses a frozen training-reference calculation at 100 Hz;
-it explicitly rejects other rates until that stateful reference is generalized.
-Mechanical observation conventions and reference-profile selection remain
-vehicle-side. This is not yet a completely model-independent vehicle adapter.
+| 键 | 含义 |
+|---|---|
+| `type` | `scalar`（默认）、`vector3`、带 `size` 的 `array`、由四元数计算的 `projected_gravity`、带 `sources` 列表的 `scalars`、带数值 `value` 列表的 `constant`、`previous_action` |
+| `source` | `scalar`、`vector3`、`array` 与 `projected_gravity` 的接口路径 |
+| `select` | 按顺序保留的源下标；下标可重复 |
+| `default` | `scalar` 源未被产出时使用的有限值 |
+| `precision` | 对源和每一步运算做 `float64`（默认）或 `float32` 舍入 |
+| `source_clip`、`scale`、`offset`、`clip` | 按此顺序施加：`clip(source_clip(x) * scale + offset)` |
 
-Set `rl_bridge.rl_model_path` in the vehicle profile and restart. Relative paths
-resolve inside the installed `rmcs_rl` share directory. `observation_terms` owns
-feature order, source binding, scaling and clipping; `action_terms` owns actor
-channel routing, target scaling and clipping. `history_length`, optional
-`history_rate` and size assertions describe the model input contract.
+`scalar` 绑定 `double`、`bool`、`int` 或 `std::size_t`；`vector3` 绑定 `Eigen::Vector3d` 或
+`BaseLink::DirectionVector`；`array` 绑定 `std::vector<double>`。出现非有限值或某个源未就绪，
+整帧被拒并重启会话。
 
-The loader checks tensor types, ranks, dimensions and a trial inference. The
-paired-107 wheel-leg profile also validates model-spec and winding metadata.
-When ONNX supplies `policy_hz`, the loader rejects a different YAML `policy_rate`.
-`expected_observation_contract_sha256` additionally requires matching
-`rmcs_observation_contract_sha256` and `policy_hz` ONNX metadata.
-Observation normalization metadata is optional numerical preprocessing.
+`previous_action` 是 bridge 映射并限幅后的动作换算回归一化单位的结果，不是执行器实测动作。
+需要"实际施加动作"历史的车型必须自己发布该接口并绑定为源。
 
-`RlBridge` creates a policy worker thread and an RMCS action publisher partner.
-The publisher runs before action consumers; consumers publish calibrated inputs
-and the bridge assembles the next observation after them. This supports feedback
-without a cycle in the executor dependency graph. The
-executor never waits for ONNX inference. Results carry a monotonic sequence,
-reset generation, submission timestamp and optional opaque context. Results
-from a previous generation or beyond `inference_timeout` / `max_action_age`
-cannot become valid actions. The publisher binds the reset source directly, so
-reset invalidates pending results before the control component runs.
+### 动作与接口
 
-The bridge publishes scaled actions at the configured `output=` interfaces,
-alongside `/scale`, `/clip_min` and `/clip_max` metadata for each target. It
-also publishes `/valid`, `/healthy`, `/action_seq`, `/action_context` and
-`/action_steady_ns` under `rl_base`. `/healthy` reports worker health; `/valid`
-additionally requires an enabled session and a fresh finite action. Consumers
-must gate actuation on validity and their own control/safety state. Observation
-telemetry is available under `<rl_base>/observation/<term-name>`.
+每个 `actions.<name>` 块按顺序把一路模型输出映射到 `output`：`clip(raw * scale + offset)`。
+动作发布 partner（`<component>_actions`）在动作消费者之前运行，发布：
 
-For wheel-leg, the bringup profile `wheel-leg-infantry-rl.yaml` uses
-`rmcs_core::controller::chassis::WheelLegRlController` and `rmcs_rl::RlBridge`.
-The controller supplies calibrated joint/IMU coordinates, command conditioning
-and executed action history. Unified policies use a complete controller-owned
-frame; the bridge copies the frame and runs inference.
-Leg actions are nominal-position offsets in model radians. Wheel actions are
-wheel-side speeds in rad/s. The controller applies paired winding, measured
-hinge guards, feedback freshness, feedback PD and hardware torque limits.
-PREPARE waits with zero effort for drive readiness and the first valid policy
-action. The policy then controls all six axes without a scripted pose, upright
-capture or handover blend. The original GPL license remains in `rmcs_core`.
+| 接口 | 类型 | 含义 |
+|---|---|---|
+| `<output>` | `double` | 映射后的动作；失效期间为 `invalid_value` 指定的动作 |
+| `<output>/raw`、`/scale`、`/offset`、`/clip_min`、`/clip_max` | `double` | 模型原始输出（失效时为 NaN）与映射关系 |
+| `<rl_base>/valid` | `double` | 已使能、worker 健康、当前会话、结果新鲜且有限 |
+| `<rl_base>/healthy` | `double` | 推理 worker 健康状态 |
+| `<rl_base>/action_seq`、`/action_steady_ns`、`/action_age`、`/obs_seq` | | 结果序号、提交时间与年龄 |
+| `<rl_base>/policy_rate`、`/model_spec_sha256`、`/observation_contract_sha256` | | 已加载模型的契约 |
+| `<rl_base>/performance/inference_us`、`/latency/*` | | worker 耗时与队列计数 |
+
+bridge 自身在 `<rl_base>/input/frame` 发布组装好的观测帧。消费者必须用 `valid` 与自身安全
+状态共同作为动作门控。
+
+执行器从不等待推理。reset、使能变化、序号回退、帧被拒或有效性丢失都会开启新会话；旧会话的
+结果被丢弃。推理失败保持闭锁，直到 `reset_interface` 变化。
+
+### 模型检查
+
+启动期模型必须是单个 float32 输入（rank 1–3）、单个 float32 输出且尺寸与配置一致，并且零观测
+必须产生有限动作。`model_type: mlp` 额外要求 rank 2 或 3，`transformer` 要求 rank 3。可选检查：
+
+- `expected_model_spec_sha256` 对照 `leg_target_model_spec_sha256` 或 `rmcs_model_spec_sha256`；
+- `expected_observation_contract_sha256`，同时要求 `policy_hz` 元数据；
+- `expected_observation_version` 对照 `rmcs_observation_version`；
+- `expected_obs_normalization: embedded|none` 对照 `rmcs_obs_normalization`；
+- `expected_metadata.<key>` 对照任意字符串元数据。
+
+`normalization_from_metadata`（默认 `true`）应用 `rmcs_obs_mean`/`rmcs_obs_std` 与
+`rmcs_obs_clip`/`rmcs_action_clip` 元数据；`obs_clip` 与 `action_clip` 覆盖这些限幅。
+
+## 轮腿配置
+
+`wheel-leg-infantry-prone-v4`、`wheel-leg-infantry-wheelbipe`、
+`wheel-leg-infantry-wheelbipe-recovery` 与 `wheel-leg-infantry-wheelbipe-jump-v4` 会同时加载
+`RlBridge` 和 `rmcs_core::controller::chassis::WheelLegObservation`、`WheelLegRlController`。
+观测组件在 `/wheel_leg/rl/features/` 下发布未归一化特征和帧序号；bridge 负责缩放与排序，
+控制器用自己的反馈与安全守卫执行动作。
+
+## 工具
+
+- `tool/simulation/wheel_leg_policy_host.cpp`：本地仿真用的 stdin/stdout host；只加载轮腿
+  状态估计、控制器、观测与 bridge 插件。
+- `tool/simulation/wheel_leg_latency_bench.cpp`：仅主机端的 ONNX worker 时延基准。
+- `tool/visualization/wheel_leg_telemetry.py`：实时镜像接收与 JSONL 记录。
 
 ```sh
-build-rmcs --packages-select rmcs_rl rmcs_core rmcs_bringup --cmake-args -DBUILD_TESTING=ON
-colcon test --merge-install --packages-select rmcs_rl rmcs_core
+build-rmcs --packages-select rmcs_rl rmcs_core rmcs_bringup
 ```
-
-The integration test constructs only in-memory snapshots and production software
-components. It checks direct policy entry from fallen poses, reset/rearm and
-feedback guards. It does not establish physical self-righting or vehicle timing.
-
-The optional directional wheel-leg preview uses 200 Hz policy / 1000 Hz feedback and
-15 ms action expiry. `tool/prepare_wheel_leg_model.py` validates its source preview
-package, training contract, mechanical model and YAML layout before stamping
-the missing paired-107/layout metadata. It preserves graph bytes and compares
-256 batch-one inferences, recording the final SHA256 in `.deployment.json`.
-Without `--stamp` it checks an already prepared deployment. The original
-preview package remains unchanged and the candidate remains unqualified.
-
-The legacy vehicle YAML preserves `recovery_candidate.onnx` at 50 Hz.
-`wheel-leg-infantry-unified-rl.yaml` selects `self_wake_V1.0.onnx` at 200 Hz,
-with 1000 Hz host torque PD, 35 single-frame observations and six actions.
-It is an experimental actor with `behavior_qualified=false` and no hardware
-acceptance. Its model SHA256 is
-`48d4880f2b928512be54bea0e4b24f09fc3c47057c3c36dba87066ab34d7e443`.
-
-For producer-owned frames, set `observation_frame_sequence_interface` and use
-one unscaled `take=array type=double_array dim=35` observation term with
-`history_length=1`. Each new positive sequence submits once; duplicate sequences
-do not refresh action age. Sequence rollback blocks until a session reset.
-The controller owns the standing-displacement reference and applied-action
-history. Slots 14/15 contain filtered standing wheel-coordinate displacement
-in metres times 20, computed from continuous wheel angles, legs and IMU gravity.
-They are not raw wheel angles. Raw leg actions allow ±16 (offset ±4 rad);
-wheel actions allow ±9 (speed ±90 rad/s).
-
-The observation contract is
-`db0fc6121c73121dcd39eef0524ecfeab4b3aa69aa7f5700d4205499af2402a9`.
-The parent repository's `rmcs_core/tools/verify_wheel_leg_unified.py` checks
-the export package, current profile, frozen helpers and inference vectors.

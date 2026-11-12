@@ -1,8 +1,12 @@
-#include "policy_model.hpp"
+#include "policy/policy_model.hpp"
 
 #include <algorithm>
 #include <cmath>
+#include <optional>
 #include <stdexcept>
+#include <vector>
+
+#include "policy/onnx_runtime.hpp"
 
 namespace rmcs_rl {
 namespace {
@@ -30,142 +34,171 @@ std::vector<double> parse_numbers(const std::string& text, const char* key) {
     return result;
 }
 
-std::optional<double> clip_metadata(const OnnxRuntime& runtime, const char* key) {
-    const auto text = runtime.metadata(key);
-    if (!text || text->empty())
-        return std::nullopt;
-    const double value = parse_number(*text, key);
-    if (value <= 0.0)
-        throw std::invalid_argument(std::string{key} + " must be positive");
-    return value;
+bool all_finite(std::span<const float> values) {
+    return std::ranges::all_of(values, [](float value) { return std::isfinite(value); });
 }
 
 } // namespace
 
-PolicyModel::PolicyModel(const Config& config)
-    : runtime_(
-          OnnxRuntime::Config{
-              config.path, config.input_name, config.output_name, config.model_type,
-              config.expected_model_spec_sha256, config.expected_leg_winding_version,
-              config.sequence_length, config.feature_size, config.observation_size,
-              config.action_size, config.extra_input_values}) {
-    info_.path = config.path;
-    for (const auto& [key, expected] : config.expected_metadata)
-        if (runtime_.metadata(key.c_str()) != std::optional<std::string>{expected})
-            throw std::invalid_argument("model metadata mismatch: expected_metadata." + key);
-    info_.model_spec_sha256 = runtime_.info().model_spec_sha256;
-    info_.observation_contract_sha256 =
-        runtime_.metadata("rmcs_observation_contract_sha256").value_or("");
-    if (!config.expected_observation_contract_sha256.empty()
-        && info_.observation_contract_sha256 != config.expected_observation_contract_sha256)
-        throw std::invalid_argument("model observation contract does not match its preprocessor");
-    if (!config.expected_observation_version.empty()
-        && runtime_.metadata("rmcs_observation_version").value_or("")
-               != config.expected_observation_version)
-        throw std::invalid_argument("model observation version does not match its preprocessor");
-    if (!config.expected_obs_normalization.empty()) {
-        if ((config.expected_obs_normalization != "embedded"
-             && config.expected_obs_normalization != "none")
-            || runtime_.metadata("rmcs_obs_normalization").value_or("")
-                   != config.expected_obs_normalization)
-            throw std::invalid_argument(
-                "model observation normalization does not match the configured training contract");
-        if (runtime_.metadata("rmcs_obs_mean") || runtime_.metadata("rmcs_obs_std"))
-            throw std::invalid_argument(
-                "explicit normalization cannot also declare external mean/std");
-    }
-    info_.obs_size = runtime_.input_size();
-    info_.action_size = runtime_.output_size();
-    info_.model_type = runtime_.info().model_type;
-    info_.input_rank = runtime_.info().input_rank;
-    info_.output_rank = runtime_.info().output_rank;
-    info_.sequence_length = runtime_.info().sequence_length;
-    info_.feature_size = runtime_.info().feature_size;
-    if (!std::isfinite(config.expected_policy_rate) || config.expected_policy_rate < 0.0)
-        throw std::invalid_argument("expected policy rate must be finite and non-negative");
-    const auto rate = runtime_.metadata("policy_hz");
-    if (!config.expected_observation_contract_sha256.empty() && !rate)
-        throw std::invalid_argument("explicit observation contract requires policy_hz metadata");
-    if (rate) {
-        const double model_rate = parse_number(*rate, "policy_hz");
-        if (model_rate <= 0.0
-            || (config.expected_policy_rate > 0.0
-                && std::abs(model_rate - config.expected_policy_rate) > 1e-6))
-            throw std::invalid_argument("model policy_hz metadata does not match policy_rate");
-    }
-    load_normalization(config);
-    obs_buffer_.resize(info_.obs_size);
-    action_buffer_.resize(info_.action_size);
-    runtime_.run(obs_buffer_, action_buffer_);
-    if (!std::all_of(action_buffer_.begin(), action_buffer_.end(), [](float value) {
-            return std::isfinite(value);
-        }))
-        throw std::runtime_error("startup inference produced non-finite actions: " + config.path);
-}
+struct PolicyModel::Impl {
+    explicit Impl(const PolicyConfig& config)
+        : runtime(config) {
+        info.path = config.path;
+        info.model_spec_sha256 = metadata("leg_target_model_spec_sha256")
+                                     .value_or(metadata("rmcs_model_spec_sha256").value_or(""));
+        info.observation_contract_sha256 =
+            metadata("rmcs_observation_contract_sha256").value_or("");
+        info.observation_size = runtime.input_size();
+        info.action_size = runtime.output_size();
 
-void PolicyModel::load_normalization(const Config& config) {
-    if (config.normalization_from_metadata) {
-        const auto mean = runtime_.metadata("rmcs_obs_mean");
-        const auto deviation = runtime_.metadata("rmcs_obs_std");
-        if (mean.has_value() != deviation.has_value())
-            throw std::invalid_argument("rmcs_obs_mean and rmcs_obs_std must appear together");
-        if (mean && deviation) {
-            obs_mean_ = parse_numbers(*mean, "rmcs_obs_mean");
-            obs_std_ = parse_numbers(*deviation, "rmcs_obs_std");
-            if (obs_mean_.size() != info_.obs_size || obs_std_.size() != info_.obs_size)
-                throw std::invalid_argument("normalization metadata does not match obs_size");
-            if (std::any_of(
-                    obs_std_.begin(), obs_std_.end(), [](double value) { return value <= 0; }))
-                throw std::invalid_argument("rmcs_obs_std must be positive");
+        check_contract(config);
+        load_preprocessing(config);
+
+        observation_buffer.resize(info.observation_size);
+        action_buffer.resize(info.action_size);
+        runtime.run(observation_buffer, action_buffer);
+        if (!all_finite(action_buffer))
+            throw std::runtime_error(
+                "startup inference produced non-finite actions: " + config.path);
+    }
+
+    std::optional<std::string> metadata(const char* key) const { return runtime.metadata(key); }
+
+    void check_contract(const PolicyConfig& config) const {
+        if (!config.expected_model_spec_sha256.empty()
+            && info.model_spec_sha256 != config.expected_model_spec_sha256)
+            throw std::invalid_argument("model_spec_sha256 does not match the configured contract");
+        for (const auto& [key, expected] : config.expected_metadata)
+            if (metadata(key.c_str()) != std::optional<std::string>{expected})
+                throw std::invalid_argument("model metadata mismatch: expected_metadata." + key);
+
+        if (!config.expected_observation_contract_sha256.empty()
+            && info.observation_contract_sha256 != config.expected_observation_contract_sha256)
+            throw std::invalid_argument(
+                "model observation contract does not match its preprocessor");
+        if (!config.expected_observation_version.empty()
+            && metadata("rmcs_observation_version").value_or("")
+                   != config.expected_observation_version)
+            throw std::invalid_argument(
+                "model observation version does not match its preprocessor");
+        if (!config.expected_obs_normalization.empty()) {
+            if ((config.expected_obs_normalization != "embedded"
+                 && config.expected_obs_normalization != "none")
+                || metadata("rmcs_obs_normalization").value_or("")
+                       != config.expected_obs_normalization)
+                throw std::invalid_argument(
+                    "model observation normalization does not match the configured training "
+                    "contract");
+            if (metadata("rmcs_obs_mean") || metadata("rmcs_obs_std"))
+                throw std::invalid_argument(
+                    "explicit normalization cannot also declare external mean/std");
         }
-        obs_clip_ = clip_metadata(runtime_, "rmcs_obs_clip");
-        action_clip_ = clip_metadata(runtime_, "rmcs_action_clip");
-    }
-    if (config.obs_clip)
-        obs_clip_ = config.obs_clip;
-    if (config.action_clip)
-        action_clip_ = config.action_clip;
-    for (const auto clip : {obs_clip_, action_clip_})
-        if (clip && (!std::isfinite(*clip) || *clip < 0.0))
-            throw std::invalid_argument("clip parameter must be finite and non-negative");
-}
 
-bool PolicyModel::run(
-    std::span<const double> observation, std::span<double> action, std::string& error) {
-    error.clear();
-    if (observation.size() != info_.obs_size || action.size() != info_.action_size) {
-        error = "observation/action dimensions do not match model";
-        return false;
-    }
-    for (std::size_t i = 0; i < observation.size(); ++i) {
-        double value = observation[i];
-        if (!obs_mean_.empty())
-            value = (value - obs_mean_[i]) / obs_std_[i];
-        if (obs_clip_)
-            value = std::clamp(value, -*obs_clip_, *obs_clip_);
-        obs_buffer_[i] = static_cast<float>(value);
-        if (!std::isfinite(obs_buffer_[i])) {
-            error = "non-finite observation at index " + std::to_string(i);
-            return false;
+        if (!std::isfinite(config.expected_policy_rate) || config.expected_policy_rate < 0.0)
+            throw std::invalid_argument("expected policy rate must be finite and non-negative");
+        const auto rate = metadata("policy_hz");
+        if (!config.expected_observation_contract_sha256.empty() && !rate)
+            throw std::invalid_argument(
+                "explicit observation contract requires policy_hz metadata");
+        if (rate) {
+            const double model_rate = parse_number(*rate, "policy_hz");
+            if (model_rate <= 0.0
+                || (config.expected_policy_rate > 0.0
+                    && std::abs(model_rate - config.expected_policy_rate) > 1e-6))
+                throw std::invalid_argument("model policy_hz metadata does not match policy_rate");
         }
     }
-    try {
-        runtime_.run(obs_buffer_, action_buffer_);
-    } catch (const std::exception& exception) {
-        error = exception.what();
-        return false;
+
+    void load_preprocessing(const PolicyConfig& config) {
+        if (config.normalization_from_metadata) {
+            const auto mean = metadata("rmcs_obs_mean");
+            const auto deviation = metadata("rmcs_obs_std");
+            if (mean.has_value() != deviation.has_value())
+                throw std::invalid_argument("rmcs_obs_mean and rmcs_obs_std must appear together");
+            if (mean && deviation) {
+                obs_mean = parse_numbers(*mean, "rmcs_obs_mean");
+                obs_std = parse_numbers(*deviation, "rmcs_obs_std");
+                if (obs_mean.size() != info.observation_size
+                    || obs_std.size() != info.observation_size)
+                    throw std::invalid_argument("normalization metadata does not match obs_size");
+                if (std::ranges::any_of(obs_std, [](double value) { return value <= 0; }))
+                    throw std::invalid_argument("rmcs_obs_std must be positive");
+            }
+            obs_clip = clip_metadata("rmcs_obs_clip");
+            action_clip = clip_metadata("rmcs_action_clip");
+        }
+        if (config.obs_clip)
+            obs_clip = config.obs_clip;
+        if (config.action_clip)
+            action_clip = config.action_clip;
+        for (const auto clip : {obs_clip, action_clip})
+            if (clip && (!std::isfinite(*clip) || *clip < 0.0))
+                throw std::invalid_argument("clip parameter must be finite and non-negative");
     }
-    if (!std::all_of(action_buffer_.begin(), action_buffer_.end(), [](float value) {
-            return std::isfinite(value);
-        })) {
-        error = "policy output contains non-finite values";
-        return false;
+
+    std::optional<double> clip_metadata(const char* key) const {
+        const auto text = metadata(key);
+        if (!text || text->empty())
+            return std::nullopt;
+        const double value = parse_number(*text, key);
+        if (value <= 0.0)
+            throw std::invalid_argument(std::string{key} + " must be positive");
+        return value;
     }
-    for (std::size_t i = 0; i < action.size(); ++i) {
-        const double value = action_buffer_[i];
-        action[i] = action_clip_ ? std::clamp(value, -*action_clip_, *action_clip_) : value;
+
+    std::expected<void, std::string>
+        run(std::span<const double> observation, std::span<double> action) {
+        if (observation.size() != info.observation_size || action.size() != info.action_size)
+            return std::unexpected{"observation/action dimensions do not match model"};
+
+        for (std::size_t i = 0; i < observation.size(); ++i) {
+            double value = observation[i];
+            if (!obs_mean.empty())
+                value = (value - obs_mean[i]) / obs_std[i];
+            if (obs_clip)
+                value = std::clamp(value, -*obs_clip, *obs_clip);
+            observation_buffer[i] = static_cast<float>(value);
+            if (!std::isfinite(observation_buffer[i]))
+                return std::unexpected{"non-finite observation at index " + std::to_string(i)};
+        }
+
+        try {
+            runtime.run(observation_buffer, action_buffer);
+        } catch (const std::exception& exception) {
+            return std::unexpected{exception.what()};
+        }
+        if (!all_finite(action_buffer))
+            return std::unexpected{"policy output contains non-finite values"};
+
+        for (std::size_t i = 0; i < action.size(); ++i) {
+            const double value = action_buffer[i];
+            action[i] = action_clip ? std::clamp(value, -*action_clip, *action_clip) : value;
+        }
+        return {};
     }
-    return true;
+
+    OnnxRuntime runtime;
+    Info info;
+
+    std::vector<double> obs_mean;
+    std::vector<double> obs_std;
+    std::optional<double> obs_clip;
+    std::optional<double> action_clip;
+
+    std::vector<float> observation_buffer;
+    std::vector<float> action_buffer;
+};
+
+PolicyModel::PolicyModel(const PolicyConfig& config)
+    : impl_(std::make_unique<Impl>(config)) {}
+
+PolicyModel::~PolicyModel() = default;
+
+const PolicyModel::Info& PolicyModel::info() const { return impl_->info; }
+
+std::expected<void, std::string>
+    PolicyModel::run(std::span<const double> observation, std::span<double> action) {
+    return impl_->run(observation, action);
 }
 
 } // namespace rmcs_rl
