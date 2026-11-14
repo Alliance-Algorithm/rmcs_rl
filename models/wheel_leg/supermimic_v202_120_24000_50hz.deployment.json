@@ -1,0 +1,13 @@
+{
+  "checkpoint": "/home/chen/Alliance/technology/RL/Supermimic/supermimic_wheelbipe/Runs/V202_02/v202120_run_01_20261108/remote/Supermimic/supermimic_wheelbipe/logs/v202120_run_01/ckpt_024000.pt",
+  "checkpoint_sha256": "8ba41adaf1c286999ecaa0d936fdd3b0e112e1abbf3224833f58d4be3efce3e9",
+  "iteration": 24000,
+  "onnx_sha256": "3b9aa5023afa6b7e8350c76f7eede6e20b7e81ccdb4d341f2f5dc5d46ec5c887",
+  "observation_contract_sha256": "4dfa4550ab97214786988917d22736fe5cef188e81b7d20d3850dc33459649f1",
+  "geometry_sha256": "baf86d4bf80c29c8b7286602e245edcbc4453b17dadfe54726a0ed50a80869a4",
+  "seed_max_gap_m": 2.5066074029959688e-14,
+  "actor_parity_frames": 128,
+  "actor_max_abs_error": 2.86102294921875e-06,
+  "hardware_tested": false,
+  "behavior_qualified": false
+}

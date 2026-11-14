@@ -66,4 +66,16 @@ install(DIRECTORY model_receipts DESTINATION share/${PROJECT_NAME})
 install(DIRECTORY tool/visualization DESTINATION share/${PROJECT_NAME}/tool
     FILES_MATCHING PATTERN "*.py")
 
+if(BUILD_TESTING)
+    find_package(ament_cmake_gtest REQUIRED)
+    add_executable(supermimic_policy_parity test/supermimic_policy_parity.cpp)
+    target_link_libraries(supermimic_policy_parity ${PROJECT_NAME})
+    if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/../rmcs_bringup/config")
+        ament_add_gtest(profile_config test/profile_config.cpp)
+        target_link_libraries(profile_config ${PROJECT_NAME})
+        target_compile_definitions(profile_config PRIVATE
+            RMCS_PROFILE_DIRECTORY="${CMAKE_CURRENT_SOURCE_DIR}/../rmcs_bringup/config")
+    endif()
+endif()
+
 ament_auto_package()
