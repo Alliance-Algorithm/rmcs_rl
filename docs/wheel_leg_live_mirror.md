@@ -1,3 +1,8 @@
+> StateMirror v2 replaces the live publisher described below. See [State mirror](state_mirror.md)
+> for current YAML, the generic receiver and v1 JSONL replay. The following reference applies
+> to the preserved legacy v1 publisher and old installations only. The policy component is
+> named `WheelLegController` in the refactored code.
+
 # 轮腿实车状态三维镜像遥测
 
 `rmcs_rl::WheelLegMirrorComponent` 将轮腿硬件反馈和状态估计参考结果发布为 ROS 2 消息，供本机 Isaac Sim 镜像按实测姿态显示。它和其他 RMCS 插件一样通过 YAML 组件列表加载，只有输入接口与 ROS 发布器。实现位于 `rmcs_ws/src/rmcs_rl/src/visualization/wheel_leg_mirror.cpp`。
@@ -125,4 +130,4 @@ RMCS `state_valid=false` 或汇总 `feedback_fresh=false` 时，镜像继续使�
 
 ## 与本机 PhysX 双车对比
 
-本仓库只提供遥测和本地策略宿主 `tool/simulation/wheel_leg_policy_host.cpp`，它通过 stdin/stdout 接收本机物理车反馈，加载本配置绑定的 `WheelLegStateEstimator`、`WheelLegRlController`、`WheelLegObservation` 和 `RlBridge`。它不加载 `rmcs_executor` 的硬件列表、不创建 CAN、不向实车输出控制。Isaac GUI 入口和 `Shift+R` 物理归位位于相邻 `isaac_wheeled_rl_train` 仓库。
+本仓库只提供遥测和本地策略宿主 `tool/simulation/wheel_leg_policy_host.cpp`，它通过 stdin/stdout 接收本机物理车反馈，加载本配置绑定的 `WheelLegStateEstimator`、`WheelLegController`、`WheelLegObservation` 和 `RlBridge`。它不加载 `rmcs_executor` 的硬件列表、不创建 CAN、不向实车输出控制。Isaac GUI 入口和 `Shift+R` 物理归位位于相邻 `isaac_wheeled_rl_train` 仓库。

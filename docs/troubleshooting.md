@@ -1,90 +1,82 @@
-# 故障排查
+# RL 桥排障
 
-策略链路出问题时，先看两个接口，再按日志里的 `valid=0: <reason>` 定位。
+## 1. 观察手段
+
+RMCS 组件接口不是 ROS 话题。先确认 YAML 中的生产者、路径和类型，再选择转发手段。
+StateMirror 可以把状态放入诊断键值；以下路径以 `/chassis/rl` 为例，使用其它 rl_base 时一并替换：
+
+```yaml
+values:
+  rl:
+    valid: /chassis/rl/valid
+    healthy: /chassis/rl/healthy
+    action_seq: /chassis/rl/action_seq
+```
+
+动作的 value/raw 是 double，可由 `rmcs_core::broadcaster::ValueBroadcaster` 转发；具体实例参数沿用
+同车配置中的 ValueBroadcaster 写法。bool、整数用 StateMirror。正常启动日志为：
+`policy <path>: obs=TxF action=N rate=… Hz`。先核对模型路径、历史长度、帧宽和动作数。
+
+部署前运行通用离线检查器（不需要 ROS；依赖 pyyaml、onnx、onnxruntime、numpy）：
 
 ```sh
-ros2 topic echo /wheel_leg/rl/valid        # 下游是否允许动作
-ros2 topic echo /wheel_leg/rl/healthy      # 推理 worker 是否健康
-ros2 topic echo /wheel_leg/rl/input/frame  # 实际送入模型的观测帧
+python3 tool/check_policy.py --config <bringup.yaml> --component rl_bridge
 ```
 
-`valid` 在六个条件同时成立时才为 `1`（`src/rl_bridge.cpp` 的 `update_actions`）：
+相对模型路径以 rmcs_rl 包目录为基准。`--model` 可临时指定候选模型；`--receipt` 保存检查回执。
+回执路径使用 `RMCS:<相对路径>`，文件身份由 SHA-256 确认。
 
-```
-valid = enabled && !worker_failed && has_action && fresh && sequence_ok && finite
-```
+## 2. 启动期报错
 
-`valid` 每次变化打一行日志，失效原因按固定顺序报出（`invalid_reason`）：
+| 报错原文 | 原因与对应键 |
+| --- | --- |
+| `model shape does not match configuration` | history_length、观测宽度或动作数与模型不一致；核对 observations/actions.order、size、select |
+| `model metadata mismatch: <key>` | expected_metadata 字符串不一致，数字字符串也严格比较；例如 `50` 与 `50.0` 不同 |
+| `model normalization does not match configuration` | rmcs_obs_mean/std 未成对出现、长度不等于 T×F、非有限或 std 非正 |
+| `invalid model clipping metadata` | rmcs_obs_clip 或 rmcs_action_clip 不是正有限数 |
+| `update_rate, policy_rate and history_rate must divide evenly` | 必须 update_rate 整除 policy_rate，policy_rate 整除 history_rate，且 0 < history_rate ≤ policy_rate ≤ update_rate |
+| 执行器缺少输入或类型不匹配 | source、sources、enable_interface、reset_interface、flat_hold_interface 的路径/类型或生产者错误 |
+| `Mirror interface has the wrong type: <path>` | 接口类型不适合指定的镜像槽位，例如关节角必须 double |
+| `Mirror cannot format interface <path>` | values 来源为不支持格式化的类型 |
+| `Loaded policy does not match the compiled jump policy` | 加载模型的部署合同 SHA 与编译进去的 jump_policy.hpp 不一致；模型、数据头与 YAML 必须一起更新 |
 
-| 日志 reason | 对应条件 |
-|---|---|
-| `inference worker failed` | `worker_failed_` |
-| `disabled by enable interface` | `last_enabled_` |
-| `no inference result available` | `has_action` |
-| `action contains non-finite values` | `finite` |
-| `action is from an invalid or previous reset generation` | `sequence_ok` |
-| `inference result is stale` | `fresh` |
+模型形状、元数据、归一化、裁剪和整除问题可先用 check_policy.py 离线复现。执行器接线、镜像
+类型和编译后的跳跃合同还需要原生加载验证，检查器不能凭 YAML 确认运行中的接口生产者。
 
-## 按原因处理
+## 3. valid=false
 
-### inference worker failed
+有效条件为：enable、已有结果、healthy、generation 一致、动作年龄不超过 max_action_age、输出全部有限。
 
-worker 失败后是**闭锁**，不会自动重试：只有 `reset_interface` 计数变化才清除（`reset_runtime()` 里同时置 `worker_failed_ = false` 并调用 `worker_.reset()`）。
+- 核对 enable_interface 的生产者和值；未使能不会提交观测。
+- 首次提交等待全局策略相位，最多 policy_divisor−1 个 tick，再加推理时间。
+- max_action_age 应覆盖实际推理与结果消费耗时；使用 latency bench 检查提交到取回的时间。
+- reset 或使能翻转会清历史和动作，短暂无效是预期行为。
+- flat hold 翻转也会出现一个策略周期加推理时间的窗口；deformable 通常约 6 ms，期间 arbiter 使用传统姿态。
+- 输出 NaN/Inf 会被拒绝。检查观测来源是否出现非有限值，以及推理错误日志。
 
-启动期失败直接抛异常、进程起不来，看的是报错原文：
+## 4. healthy=false
 
-| 报错 | 原因 |
-|---|---|
-| `model path must not be empty` | `rl_model_path` 为空或解析后不存在 |
-| `model must have exactly one input and one output` | 导出的图不是单入单出 |
-| `obs and actions element types must be float32` | 模型 IO 不是 float32 |
-| `input batch dimension must be 1 or dynamic` | batch 维写死成别的值 |
-| `supported policy output ranks are 1, 2, or 3` | 输出 rank 不对（`model_type` 还会再限制一侧） |
-| `startup inference produced non-finite actions` | 零观测推理出 NaN/Inf，模型本身有问题 |
-| `model_spec_sha256 does not match the configured contract` | 模型换了但 `expected_model_spec_sha256` 没更新 |
-| `model observation contract does not match its preprocessor` | 观测契约 sha 不符 |
-| `model observation version does not match its preprocessor` | `expected_observation_version` 不符 |
-| `model metadata mismatch: expected_metadata.<key>` | 自定义元数据不符 |
-| `model policy_hz metadata does not match policy_rate` | 模型标称频率与 `policy_rate` 不一致 |
-| `explicit observation contract requires policy_hz metadata` | 设了契约 sha，但模型缺 `policy_hz` 元数据 |
-| `rmcs_obs_mean and rmcs_obs_std must appear together` | 归一化元数据缺一半 |
+推理抛异常后闭锁，日志为 `inference failed: <error>`。只有 reset_interface 的计数变化才清除
+worker 故障。使能翻转与 flat hold 翻转只重置会话，不清除此闭锁；先解决异常原因，再遥控复位。
 
-运行期失败写进结果、不抛异常：
+## 5. 观测构建失败
 
-| 结果里的 error | 原因 |
-|---|---|
-| `observation/action dimensions do not match model` | 观测或动作维数与模型不符 |
-| `non-finite observation at index N` | 第 N 维观测是 NaN/Inf |
-| `policy output contains non-finite values` | 模型输出非有限 |
+每个策略 tick 都读取并检查当前来源。来源未就绪或有非有限值时，整帧丢弃并 reset()，历史和
+动作反馈一并清空。常见来源是上游初始 NaN，例如 deformable 的 feedback_current_raw。按
+observations.order 逐项检查来源路径、初值、发布顺序、array 长度和 select 下标。
 
-### disabled by enable interface
+## 6. 历史与 flat hold
 
-`enable_interface` 读到 `false`。没有组件产出该接口时退回 `enable_default`（默认 `false`），所以“接口没接上”和“被显式关掉”表现一样。轮腿车型上该接口由 `WheelLegRlController` 产出，不是遥控输入直接给的。
+policy_rate 控制推理频率，history_rate 控制模型输入历史的推进。每次策略 tick 都构建一帧；距
+上个历史样本未满一个历史周期时丢弃本帧，重新提交原堆叠。首帧填满所有槽，排列从旧到新。
 
-### no inference result available
+previous_action 取“产生该动作的观测提交 tick 不晚于当前 tick 减一个历史周期”的最新有效动作；
+没有新候选时保持原值，reset 后为 0。deformable 为 200 Hz 推理、100 Hz 历史，轮腿缺省二者均 50 Hz。
 
-还没有任何结果：要么刚启动，要么每一帧都在提交阶段就被拒。后者会留下：
+flat_hold_interface 配置后为必选 bool。为真且结果有效时，value 与 raw 均为 0，反馈给下一帧的动作
+也为 0。hold 变化会清会话与延迟缓冲，因此旧 generation 的结果不能重新发布。
 
-```
-observation sources not ready or non-finite; no obs published (<n> frames rejected)
-```
+## 7. reset 语义
 
-依次查：观测源是否有组件发布、`source` 路径是否拼错、块内 `size` 是否与实际消息长度一致。整帧被拒还会重启会话，`action_seq` 归零。
-
-### action contains non-finite values
-
-模型输出了 NaN/Inf。观测越界、对已归一化的特征又做了一次 `scale`、或漏了 `clip` 是最常见的三种；先用 `/wheel_leg/rl/input/frame` 看实际数值范围。
-
-### action is from an invalid or previous reset generation
-
-`sequence_ok` 要求 `action.generation == generation_` 且 `action.sequence <= observation_sequence_`。不满足说明手里这份结果是 reset 之前算完的，或者序号跑到了观测前面——通常是 `reset_interface` 接到了一个频繁变化的计数器。
-
-### inference result is stale
-
-`age > min(inference_timeout, max_action_age)`。推理耗时超预算（`policy_rate` 太高、模型太大、机器负载高），先用 `wheel_leg_latency_bench` 量一下再对表。
-
-## reset 语义
-
-- `reset_interface` 计数变化 → `reset_runtime()` + `worker_.reset()`：开始新会话，丢弃旧 generation 的结果。
-- 失败闭锁**只**在 reset 时清除；不接 `reset_interface` 等于失败后必须重启进程。
-- 遥测（`wheel_leg_mirror`）与策略是两条独立链路，手动搬动失能车辆时不受上述闭锁影响，见 `docs/wheel_leg_live_mirror.md`。
+reset_interface 计数变化重置会话及 worker；使能变化与 flat hold 翻转只重置会话。会话重置会增加
+generation、清历史、清动作反馈和有效状态。不要用使能开关替代清除推理故障所需的复位。

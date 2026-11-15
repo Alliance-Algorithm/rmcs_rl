@@ -12,14 +12,14 @@
   <depend>rclcpp</depend>
   <depend>pluginlib</depend>
   <depend>ament_index_cpp</depend>
+  <depend>rmcs_executor</depend>
+  <depend>rmcs_description</depend>
+  <depend>rmcs_utility</depend>
   <depend>std_msgs</depend>
   <depend>sensor_msgs</depend>
   <depend>geometry_msgs</depend>
   <depend>diagnostic_msgs</depend>
-  <depend>rmcs_executor</depend>
-  <depend>rmcs_description</depend>
   <depend>rmcs_msgs</depend>
-  <depend>rmcs_utility</depend>
   <depend>nlohmann_json</depend>
 
   <export>

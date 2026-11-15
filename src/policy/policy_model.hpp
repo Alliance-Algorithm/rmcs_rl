@@ -1,42 +1,36 @@
 #pragma once
 
 #include <cstddef>
-#include <expected>
-#include <memory>
+#include <cstdint>
+#include <map>
+#include <optional>
 #include <span>
 #include <string>
+#include <vector>
 
-#include "policy/policy_config.hpp"
+#include <onnxruntime_cxx_api.h>
 
 namespace rmcs_rl {
 
 class PolicyModel {
 public:
-    struct Info {
-        std::string path;
-        std::string model_spec_sha256;
-        std::string observation_contract_sha256;
-        std::size_t observation_size = 0;
-        std::size_t action_size = 0;
-    };
+    PolicyModel(
+        const std::string& path, std::size_t history_length, std::size_t frame_size,
+        std::size_t action_size, const std::map<std::string, std::string>& expected_metadata);
 
-    explicit PolicyModel(const PolicyConfig& config);
-
-    PolicyModel(const PolicyModel&) = delete;
-    PolicyModel& operator=(const PolicyModel&) = delete;
-    PolicyModel(PolicyModel&&) = delete;
-    PolicyModel& operator=(PolicyModel&&) = delete;
-
-    ~PolicyModel();
-
-    const Info& info() const;
-
-    std::expected<void, std::string>
-        run(std::span<const double> observation, std::span<double> action);
+    void run(std::span<const double> observation, std::span<double> action);
+    const std::map<std::string, std::string>& metadata() const { return metadata_; }
 
 private:
-    struct Impl;
-    std::unique_ptr<Impl> impl_;
+    Ort::Env env_{ORT_LOGGING_LEVEL_WARNING, "rmcs_rl"};
+    Ort::Session session_{nullptr};
+    Ort::MemoryInfo memory_info_{Ort::MemoryInfo::CreateCpu(OrtArenaAllocator, OrtMemTypeDefault)};
+    std::string input_name_, output_name_;
+    std::vector<std::int64_t> input_shape_;
+    std::vector<float> input_, output_;
+    std::vector<double> obs_mean_, obs_std_;
+    std::optional<double> obs_clip_, action_clip_;
+    std::map<std::string, std::string> metadata_;
 };
 
 } // namespace rmcs_rl
