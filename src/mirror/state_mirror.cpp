@@ -3,12 +3,17 @@
 #include <bit>
 #include <chrono>
 #include <cmath>
+#include <condition_variable>
 #include <cstdint>
 #include <format>
+#include <limits>
 #include <map>
 #include <memory>
+#include <mutex>
+#include <optional>
 #include <stdexcept>
 #include <string>
+#include <thread>
 #include <type_traits>
 #include <utility>
 #include <variant>
@@ -29,6 +34,60 @@
 #include <std_msgs/msg/header.hpp>
 
 namespace rmcs_rl {
+
+using DirectionVector = rmcs_description::BaseLink::DirectionVector;
+using ValueSlot = std::variant<
+    std::monostate, double, bool, int, std::uint64_t, std::string, rmcs_msgs::Switch,
+    rmcs_msgs::ChassisMode, rmcs_msgs::Keyboard, Eigen::Vector2d, Eigen::Vector3d, DirectionVector,
+    Eigen::Quaterniond, std::array<double, 2>, std::array<double, 4>, std::array<double, 6>,
+    std::vector<double>>;
+
+void append(
+    const std::string& key, const ValueSlot& slot,
+    std::vector<diagnostic_msgs::msg::KeyValue>& values) {
+    std::visit(
+        [&key, &values](const auto& value) {
+            using T = std::remove_cvref_t<decltype(value)>;
+            const auto add = [&values](const std::string& key, const auto& value) {
+                auto& entry = values.emplace_back();
+                entry.key = key;
+                if constexpr (std::is_same_v<std::remove_cvref_t<decltype(value)>, std::string>)
+                    entry.value = value;
+                else if constexpr (std::is_same_v<std::remove_cvref_t<decltype(value)>, bool>)
+                    entry.value = value ? "true" : "false";
+                else
+                    entry.value = std::format("{}", value);
+            };
+            if constexpr (std::is_same_v<T, std::monostate>) {
+                return;
+            } else if constexpr (std::is_arithmetic_v<T> || std::is_same_v<T, std::string>) {
+                add(key, value);
+            } else if constexpr (std::is_enum_v<T>) {
+                add(key, static_cast<int>(value));
+            } else if constexpr (std::is_same_v<T, rmcs_msgs::Keyboard>) {
+                add(key, std::bit_cast<std::uint16_t>(value));
+            } else if constexpr (std::is_same_v<T, Eigen::Quaterniond>) {
+                add(key + "/w", value.w());
+                add(key + "/x", value.x());
+                add(key + "/y", value.y());
+                add(key + "/z", value.z());
+            } else if constexpr (std::is_same_v<T, DirectionVector>) {
+                add(key + "/x", value.vector.x());
+                add(key + "/y", value.vector.y());
+                add(key + "/z", value.vector.z());
+            } else if constexpr (
+                std::is_same_v<T, Eigen::Vector2d> || std::is_same_v<T, Eigen::Vector3d>) {
+                add(key + "/x", value.x());
+                add(key + "/y", value.y());
+                if constexpr (std::is_same_v<T, Eigen::Vector3d>)
+                    add(key + "/z", value.z());
+            } else {
+                for (std::size_t i = 0; i < static_cast<std::size_t>(value.size()); ++i)
+                    add(key + "/" + std::to_string(i), value[i]);
+            }
+        },
+        slot);
+}
 
 class StateMirror
     : public rmcs_executor::Component
@@ -98,36 +157,78 @@ public:
             if (value.value->unsupported())
                 throw std::invalid_argument(
                     "Mirror cannot format interface " + value.value->path());
+        for (auto* snapshot : {&pending_, &working_}) {
+            snapshot->joint_position.resize(joints_.size());
+            snapshot->joint_velocity.resize(joints_.size());
+            snapshot->joint_age.resize(joints_.size());
+            snapshot->vectors.resize(vectors_.size());
+            snapshot->values.resize(values_.size());
+            for (std::size_t i = 0; i < values_.size(); ++i)
+                values_[i].value->capture(snapshot->values[i]);
+        }
+        publisher_ = std::jthread{[this](const std::stop_token& stop) { publish_loop(stop); }};
     }
 
     void update() override {
         const auto divisor = static_cast<std::size_t>(std::lround(*update_rate_ / rate_));
         if (*update_count_ % divisor != 0)
             return;
-        std_msgs::msg::Header header;
-        header.stamp = get_clock()->now();
-        header.frame_id = frame_id_;
-        std::string topics = topic_prefix_ + "/diagnostics";
-        if (publish_joints(header))
-            topics += "," + topic_prefix_ + "/joint_states";
-        if (publish_imu(header))
-            topics += "," + topic_prefix_ + "/imu_body";
-        for (const auto& vector : vectors_) {
-            if (!ready(vector.value))
-                continue;
-            geometry_msgs::msg::Vector3Stamped message;
-            message.header = header;
-            const auto value = vector.value->as_vector3();
-            message.vector.x = value.x();
-            message.vector.y = value.y();
-            message.vector.z = value.z();
-            vector.publisher->publish(message);
-            topics += "," + topic_prefix_ + "/" + vector.name;
+        std::unique_lock lock{mutex_, std::try_to_lock};
+        if (!lock.owns_lock() || has_pending_ || publishing_)
+            return;
+        auto& snapshot = pending_;
+        snapshot.stamp = get_clock()->now();
+        const auto now =
+            static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                           std::chrono::steady_clock::now().time_since_epoch())
+                                           .count());
+        snapshot.joints_ready = !joints_.empty();
+        for (std::size_t i = 0; i < joints_.size(); ++i) {
+            const auto& joint = joints_[i];
+            const bool available = ready(joint.position) && ready(joint.velocity);
+            snapshot.joints_ready &= available;
+            if (available) {
+                snapshot.joint_position[i] = joint.position->as_double();
+                snapshot.joint_velocity[i] = joint.velocity->as_double();
+            }
+            snapshot.joint_age[i] = !joint.stamp       ? kNaN
+                                  : ready(joint.stamp) ? joint.stamp->age(now)
+                                                       : -1.;
         }
-        publish_diagnostics(header, topics);
+        snapshot.imu_ready = imu_ && ready(imu_->orientation) && ready(imu_->angular_velocity);
+        if (snapshot.imu_ready) {
+            snapshot.imu_orientation = imu_->orientation->as_quaternion();
+            snapshot.imu_angular_velocity = imu_->angular_velocity->as_vector3();
+        }
+        snapshot.imu_age = !imu_ || !imu_->stamp ? kNaN
+                         : ready(imu_->stamp)    ? imu_->stamp->age(now)
+                                                 : -1.;
+        for (std::size_t i = 0; i < vectors_.size(); ++i) {
+            if (ready(vectors_[i].value))
+                snapshot.vectors[i] = vectors_[i].value->as_vector3();
+            else
+                snapshot.vectors[i].reset();
+        }
+        for (std::size_t i = 0; i < values_.size(); ++i)
+            values_[i].value->capture(snapshot.values[i]);
+        has_pending_ = true;
+        lock.unlock();
+        ready_.notify_one();
     }
 
 private:
+    static constexpr double kNaN = std::numeric_limits<double>::quiet_NaN();
+    struct Snapshot {
+        builtin_interfaces::msg::Time stamp;
+        bool joints_ready = false, imu_ready = false;
+        std::vector<double> joint_position, joint_velocity, joint_age;
+        Eigen::Quaterniond imu_orientation;
+        Eigen::Vector3d imu_angular_velocity;
+        double imu_age = kNaN;
+        std::vector<std::optional<Eigen::Vector3d>> vectors;
+        std::vector<ValueSlot> values;
+    };
+
     class Reader {
         template <typename T>
         using Interface = InputInterface<T>;
@@ -191,50 +292,12 @@ private:
             return stamp == 0 || stamp > now ? -1. : static_cast<double>(now - stamp) / 1e9;
         }
 
-        void append(
-            const std::string& key, std::vector<diagnostic_msgs::msg::KeyValue>& values) const {
-            std::visit(
-                [&key, &values](const auto& input) {
-                    using T = std::remove_cvref_t<decltype(*input)>;
-                    const auto add = [&values](const std::string& key, const auto& value) {
-                        auto& entry = values.emplace_back();
-                        entry.key = key;
-                        if constexpr (
-                            std::is_same_v<std::remove_cvref_t<decltype(value)>, std::string>)
-                            entry.value = value;
-                        else if constexpr (
-                            std::is_same_v<std::remove_cvref_t<decltype(value)>, bool>)
-                            entry.value = value ? "true" : "false";
-                        else
-                            entry.value = std::format("{}", value);
-                    };
-                    if constexpr (std::is_arithmetic_v<T> || std::is_same_v<T, std::string>) {
-                        add(key, *input);
-                    } else if constexpr (std::is_enum_v<T>) {
-                        add(key, static_cast<int>(*input));
-                    } else if constexpr (std::is_same_v<T, rmcs_msgs::Keyboard>) {
-                        add(key, std::bit_cast<std::uint16_t>(*input));
-                    } else if constexpr (std::is_same_v<T, Eigen::Quaterniond>) {
-                        add(key + "/w", input->w());
-                        add(key + "/x", input->x());
-                        add(key + "/y", input->y());
-                        add(key + "/z", input->z());
-                    } else if constexpr (std::is_same_v<T, DirectionVector>) {
-                        add(key + "/x", input->vector.x());
-                        add(key + "/y", input->vector.y());
-                        add(key + "/z", input->vector.z());
-                    } else if constexpr (
-                        std::is_same_v<T, Eigen::Vector2d> || std::is_same_v<T, Eigen::Vector3d>) {
-                        add(key + "/x", input->x());
-                        add(key + "/y", input->y());
-                        if constexpr (std::is_same_v<T, Eigen::Vector3d>)
-                            add(key + "/z", input->z());
-                    } else {
-                        for (std::size_t i = 0; i < static_cast<std::size_t>(input->size()); ++i)
-                            add(key + "/" + std::to_string(i), (*input)[i]);
-                    }
-                },
-                *input_);
+        void capture(ValueSlot& value) const {
+            if (!ready()) {
+                value = std::monostate{};
+                return;
+            }
+            std::visit([&value](const auto& input) { value = *input; }, *input_);
         }
 
     private:
@@ -284,44 +347,67 @@ private:
         return result.get();
     }
 
-    bool publish_joints(const std_msgs::msg::Header& header) const {
-        if (!joint_publisher_ || !std::ranges::all_of(joints_, [](const auto& joint) {
-                return ready(joint.position) && ready(joint.velocity);
-            }))
-            return false;
-        sensor_msgs::msg::JointState message;
-        message.header = header;
-        for (const auto& joint : joints_) {
-            message.name.push_back(joint.name);
-            message.position.push_back(joint.position->as_double());
-            message.velocity.push_back(joint.velocity->as_double());
+    void publish_loop(const std::stop_token& stop) {
+        while (true) {
+            {
+                std::unique_lock lock{mutex_};
+                if (!ready_.wait(lock, stop, [this] { return has_pending_; }))
+                    return;
+                std::swap(pending_, working_);
+                has_pending_ = false;
+                publishing_ = true;
+            }
+            publish(working_);
+            const std::lock_guard lock{mutex_};
+            publishing_ = false;
         }
-        joint_publisher_->publish(message);
-        return true;
     }
 
-    bool publish_imu(const std_msgs::msg::Header& header) const {
-        if (!imu_ || !ready(imu_->orientation) || !ready(imu_->angular_velocity))
-            return false;
-        sensor_msgs::msg::Imu message;
-        message.header = header;
-        const auto q = imu_->orientation->as_quaternion();
-        const auto gyro = imu_->angular_velocity->as_vector3();
-        message.orientation.w = q.w();
-        message.orientation.x = q.x();
-        message.orientation.y = q.y();
-        message.orientation.z = q.z();
-        message.angular_velocity.x = gyro.x();
-        message.angular_velocity.y = gyro.y();
-        message.angular_velocity.z = gyro.z();
-        message.linear_acceleration_covariance[0] = -1.;
-        if (!q.coeffs().allFinite() || std::abs(q.squaredNorm() - 1.) > .01)
-            message.orientation_covariance[0] = -1.;
-        imu_publisher_->publish(message);
-        return true;
-    }
-
-    void publish_diagnostics(const std_msgs::msg::Header& header, const std::string& topics) const {
+    void publish(const Snapshot& snapshot) const {
+        std_msgs::msg::Header header;
+        header.stamp = snapshot.stamp;
+        header.frame_id = frame_id_;
+        std::string topics = topic_prefix_ + "/diagnostics";
+        if (snapshot.joints_ready) {
+            sensor_msgs::msg::JointState message;
+            message.header = header;
+            for (const auto& joint : joints_)
+                message.name.push_back(joint.name);
+            message.position = snapshot.joint_position;
+            message.velocity = snapshot.joint_velocity;
+            joint_publisher_->publish(message);
+            topics += "," + topic_prefix_ + "/joint_states";
+        }
+        if (snapshot.imu_ready) {
+            sensor_msgs::msg::Imu message;
+            message.header = header;
+            const auto& q = snapshot.imu_orientation;
+            const auto& gyro = snapshot.imu_angular_velocity;
+            message.orientation.w = q.w();
+            message.orientation.x = q.x();
+            message.orientation.y = q.y();
+            message.orientation.z = q.z();
+            message.angular_velocity.x = gyro.x();
+            message.angular_velocity.y = gyro.y();
+            message.angular_velocity.z = gyro.z();
+            message.linear_acceleration_covariance[0] = -1.;
+            if (!q.coeffs().allFinite() || std::abs(q.squaredNorm() - 1.) > .01)
+                message.orientation_covariance[0] = -1.;
+            imu_publisher_->publish(message);
+            topics += "," + topic_prefix_ + "/imu_body";
+        }
+        for (std::size_t i = 0; i < vectors_.size(); ++i) {
+            if (!snapshot.vectors[i])
+                continue;
+            geometry_msgs::msg::Vector3Stamped message;
+            message.header = header;
+            const auto& value = *snapshot.vectors[i];
+            message.vector.x = value.x();
+            message.vector.y = value.y();
+            message.vector.z = value.z();
+            vectors_[i].publisher->publish(message);
+            topics += "," + topic_prefix_ + "/" + vectors_[i].name;
+        }
         diagnostic_msgs::msg::DiagnosticArray message;
         message.header = header;
         auto& status = message.status.emplace_back();
@@ -336,19 +422,13 @@ private:
         add("mirror/topics", topics);
         for (const auto& [key, value] : constants_)
             add(key, value);
-        for (const auto& value : values_)
-            if (ready(value.value))
-                value.value->append(value.key, status.values);
-        const auto now =
-            static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
-                                           std::chrono::steady_clock::now().time_since_epoch())
-                                           .count());
-        for (const auto& joint : joints_)
-            if (joint.stamp)
-                add("age_s/" + joint.name,
-                    std::format("{}", ready(joint.stamp) ? joint.stamp->age(now) : -1.));
-        if (imu_ && imu_->stamp)
-            add("age_s/imu", std::format("{}", ready(imu_->stamp) ? imu_->stamp->age(now) : -1.));
+        for (std::size_t i = 0; i < values_.size(); ++i)
+            append(values_[i].key, snapshot.values[i], status.values);
+        for (std::size_t i = 0; i < joints_.size(); ++i)
+            if (!std::isnan(snapshot.joint_age[i]))
+                add("age_s/" + joints_[i].name, std::format("{}", snapshot.joint_age[i]));
+        if (!std::isnan(snapshot.imu_age))
+            add("age_s/imu", std::format("{}", snapshot.imu_age));
         diagnostics_publisher_->publish(message);
     }
 
@@ -365,6 +445,11 @@ private:
     rclcpp::Publisher<sensor_msgs::msg::JointState>::SharedPtr joint_publisher_;
     rclcpp::Publisher<sensor_msgs::msg::Imu>::SharedPtr imu_publisher_;
     rclcpp::Publisher<diagnostic_msgs::msg::DiagnosticArray>::SharedPtr diagnostics_publisher_;
+    Snapshot pending_, working_;
+    std::mutex mutex_;
+    std::condition_variable_any ready_;
+    bool has_pending_ = false, publishing_ = false;
+    std::jthread publisher_;
 };
 
 } // namespace rmcs_rl

@@ -123,3 +123,7 @@ values 中另外包含：
 保留的 `wheel_leg_policy_host` 仍在使用历史上的 friend 访问适配器；改为正常加载的 `PipeFeedback` 插件是单独的后续工作。
 
 宿主接受可选的 `jump_request_count` 输入。响应包含 `state`、`enable`、`policy_valid`、`healthy`、`action_seq`、`applied_action` 与 `effort_api`，已删除的 recovery/fault 接口不再输出。旧字段的使用者需要先迁移，才能把这个宿主与重构后的控制器一起使用。宿主只用于本地仿真。
+
+The control thread only copies source values into preallocated snapshots. ROS messages and
+string formatting run in the mirror's dedicated publisher thread. A busy publisher causes
+that cycle to be dropped; the control thread never waits for publication.

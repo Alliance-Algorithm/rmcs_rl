@@ -167,7 +167,8 @@ def convert_v1(row):
 
     for key, value in row.items():
         if key not in {"stamp_ns", "positions", "velocities", "gimbal_positions", "gimbal_velocities",
-                       "quaternion_wxyz", "gyro_body", "gravity_rl", "gyro_rl", "kind", "record_time_s"}:
+                       "quaternion_wxyz", "gyro_body", "gravity_rl", "gyro_rl", "kind", "record_time_s",
+                       "rmcs_model_positions", "model_offsets"}:
             append(key, value)
     for i, value in enumerate(row.get("rmcs_model_positions", ())):
         values["state/position/" + str(i)] = str(value)
@@ -221,6 +222,9 @@ class LatestFrame:
 
     def event(self, name, *, dispatch=True, **data):
         self._row("event", dict(name=name, **data), dispatch=dispatch)
+
+    def replay_event(self, row):
+        self._row("event", {k: v for k, v in row.items() if k not in ("kind", "record_time_s")})
 
     def set_status(self, status):
         with self.lock:
@@ -290,7 +294,7 @@ class ReplayReader(threading.Thread):
                     if self.stopped.wait(max(0., started + elapsed / self.speed - time.monotonic())):
                         return
                     if kind == "event":
-                        self.latest._row("event", {k: v for k, v in row.items() if k not in ("kind", "record_time_s")})
+                        self.latest.replay_event(row)
                     else:
                         self.latest.put(Frame.from_dict(row), source="replay")
                         count += 1
