@@ -35,7 +35,8 @@ public:
     bool healthy() const { return healthy_.load(std::memory_order::acquire); }
     const std::map<std::string, std::string>& metadata() const { return model_.metadata(); }
     void submit(
-        std::span<const double> observation, std::uint64_t sequence, std::uint64_t generation);
+        std::span<const double> observation, std::uint64_t sequence, std::uint64_t generation,
+        Clock::time_point submitted_at);
     bool try_take(Result& result);
     void reset();
 

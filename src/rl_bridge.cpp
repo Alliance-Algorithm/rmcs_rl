@@ -49,6 +49,7 @@ public:
         node::param("reset_interface", reset_interface);
 
         register_input("/predefined/update_count", update_count_);
+        register_input("/predefined/timestamp", timestamp_);
         register_input("/predefined/update_rate", update_rate_);
         register_input(enable_interface, enable_);
         register_input(reset_interface, reset_count_);
@@ -154,7 +155,7 @@ private:
             last_history_tick_ = tick;
         }
         action_delay_.mark_submission(++observation_sequence_, tick);
-        worker_.submit(history_.values(), observation_sequence_, generation_);
+        worker_.submit(history_.values(), observation_sequence_, generation_, *timestamp_);
     }
 
     void receive_result() {
@@ -173,8 +174,7 @@ private:
 
     bool action_valid() const {
         const double age =
-            std::chrono::duration<double>(PolicyWorker::Clock::now() - action_.submitted_at)
-                .count();
+            std::chrono::duration<double>(*timestamp_ - action_.submitted_at).count();
         return last_enable_ && action_ready_ && worker_.healthy()
             && action_.generation == generation_ && age <= max_action_age_
             && std::ranges::all_of(
@@ -227,6 +227,7 @@ private:
     std::size_t policy_divisor_ = 0, history_divisor_ = 0;
     std::optional<std::size_t> last_history_tick_;
     InputInterface<std::size_t> update_count_;
+    InputInterface<PolicyWorker::Clock::time_point> timestamp_;
     InputInterface<double> update_rate_;
     InputInterface<bool> enable_, flat_hold_;
     InputInterface<std::size_t> reset_count_, publisher_reset_count_;

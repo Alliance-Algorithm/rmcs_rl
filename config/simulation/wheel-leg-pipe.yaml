@@ -1,0 +1,324 @@
+# Local pipe-driven simulation; install an accepted matching jump export before use.
+rmcs_executor:
+  ros__parameters:
+    clock: stepped
+    update_rate: 1000.0
+    components:
+    - rmcs_rl::PipeFeedback -> pipe_feedback
+    - rmcs_core::controller::chassis::WheelLegStateEstimator -> wheel_leg_state_estimator
+    - rmcs_core::controller::chassis::WheelLegObservation -> wheel_leg_observation
+    - rmcs_rl::RlBridge -> rl_bridge
+    - rmcs_core::controller::chassis::WheelLegController -> wheel_leg_controller
+pipe_feedback:
+  ros__parameters:
+    outputs:
+      order:
+      - available
+      - ready
+      - simulation
+      - enabled
+      - quaternion
+      - gyro
+      - command
+      - height
+      - mode
+      - reset
+      - jump
+      - left_hip_joint_angle
+      - left_hip_joint_velocity
+      - left_hip_joint_max_torque
+      - left_knee_joint_angle
+      - left_knee_joint_velocity
+      - left_knee_joint_max_torque
+      - right_hip_joint_angle
+      - right_hip_joint_velocity
+      - right_hip_joint_max_torque
+      - right_knee_joint_angle
+      - right_knee_joint_velocity
+      - right_knee_joint_max_torque
+      - left_wheel_angle
+      - left_wheel_velocity
+      - left_wheel_max_torque
+      - right_wheel_angle
+      - right_wheel_velocity
+      - right_wheel_max_torque
+      available:
+        path: /wheel_leg/feedback_available
+        type: bool
+        initial: true
+      ready:
+        path: /wheel_leg/control_ready
+        type: bool
+        initial: true
+      simulation:
+        path: /wheel_leg/simulation
+        type: bool
+        initial: true
+      enabled:
+        path: /chassis/control_enable
+        type: bool
+        initial: false
+      quaternion:
+        path: /wheel_leg/imu/quaternion
+        type: quaternion_wxyz
+        initial:
+        - 1.0
+        - 0.0
+        - 0.0
+        - 0.0
+      gyro:
+        path: /wheel_leg/imu/angular_velocity
+        type: vector3
+        initial:
+        - 0.0
+        - 0.0
+        - 0.0
+      command:
+        path: /chassis/control_velocity
+        type: direction_vector
+        initial:
+        - 0.0
+        - 0.0
+        - 0.0
+      height:
+        path: /chassis/control_height
+        type: double
+        initial: 0.305
+      mode:
+        path: /chassis/control_mode
+        type: chassis_mode
+        initial: 0
+      reset:
+        path: /chassis/reset_count
+        type: uint64
+        initial: 0
+      jump:
+        path: /chassis/jump/request_count
+        type: uint64
+        initial: 0
+      left_hip_joint_angle:
+        path: /wheel_leg/left_hip_joint/angle
+        type: double
+        initial: 0.0
+      left_hip_joint_velocity:
+        path: /wheel_leg/left_hip_joint/velocity
+        type: double
+        initial: 0.0
+      left_hip_joint_max_torque:
+        path: /wheel_leg/left_hip_joint/max_torque
+        type: double
+        initial: 40.0
+      left_knee_joint_angle:
+        path: /wheel_leg/left_knee_joint/angle
+        type: double
+        initial: 0.0
+      left_knee_joint_velocity:
+        path: /wheel_leg/left_knee_joint/velocity
+        type: double
+        initial: 0.0
+      left_knee_joint_max_torque:
+        path: /wheel_leg/left_knee_joint/max_torque
+        type: double
+        initial: 40.0
+      right_hip_joint_angle:
+        path: /wheel_leg/right_hip_joint/angle
+        type: double
+        initial: 0.0
+      right_hip_joint_velocity:
+        path: /wheel_leg/right_hip_joint/velocity
+        type: double
+        initial: 0.0
+      right_hip_joint_max_torque:
+        path: /wheel_leg/right_hip_joint/max_torque
+        type: double
+        initial: 40.0
+      right_knee_joint_angle:
+        path: /wheel_leg/right_knee_joint/angle
+        type: double
+        initial: 0.0
+      right_knee_joint_velocity:
+        path: /wheel_leg/right_knee_joint/velocity
+        type: double
+        initial: 0.0
+      right_knee_joint_max_torque:
+        path: /wheel_leg/right_knee_joint/max_torque
+        type: double
+        initial: 40.0
+      left_wheel_angle:
+        path: /wheel_leg/left_wheel/angle
+        type: double
+        initial: 0.0
+      left_wheel_velocity:
+        path: /wheel_leg/left_wheel/velocity
+        type: double
+        initial: 0.0
+      left_wheel_max_torque:
+        path: /wheel_leg/left_wheel/max_torque
+        type: double
+        initial: 4.5
+      right_wheel_angle:
+        path: /wheel_leg/right_wheel/angle
+        type: double
+        initial: 0.0
+      right_wheel_velocity:
+        path: /wheel_leg/right_wheel/velocity
+        type: double
+        initial: 0.0
+      right_wheel_max_torque:
+        path: /wheel_leg/right_wheel/max_torque
+        type: double
+        initial: 4.5
+    inputs:
+    - /wheel_leg/left_hip_joint/control_torque
+    - /wheel_leg/left_knee_joint/control_torque
+    - /wheel_leg/right_hip_joint/control_torque
+    - /wheel_leg/right_knee_joint/control_torque
+    - /wheel_leg/left_wheel/control_torque
+    - /wheel_leg/right_wheel/control_torque
+    - /wheel_leg/rl/state
+    - /wheel_leg/rl/action_seq
+    - /wheel_leg/rl/input/enable
+    - /wheel_leg/rl/valid
+    - /wheel_leg/rl/healthy
+    - /predefined/update_count
+rl_bridge:
+  ros__parameters:
+    rl_base: /wheel_leg/rl
+    rl_model_path: models/wheel_leg/jump_policy.onnx
+    policy_rate: 50.0
+    history_length: 1
+    max_action_age: 0.06
+    enable_interface: /wheel_leg/rl/input/enable
+    reset_interface: /chassis/reset_count
+    expected_metadata:
+      wheelbipe_deployment_contract_sha256: pending-accepted-jump-export
+      pilot: 'false'
+      policy_hz: '50'
+      rmcs_obs_normalization: none
+    observations:
+      order:
+      - command
+      - height
+      - gyro
+      - gravity
+      - position
+      - velocity
+      - previous_action
+      - auxiliary
+      command:
+        source: /wheel_leg/rl/features/command
+        type: array
+        size: 3
+        precision: float32
+        clip:
+        - -100.0
+        - 100.0
+      height:
+        source: /wheel_leg/rl/features/height
+        precision: float32
+        source_clip:
+        - 0.0
+        - 1.0
+        scale: 5.0
+      gyro:
+        source: /wheel_leg/rl/features/gyro
+        type: array
+        size: 3
+        precision: float32
+        source_clip:
+        - -100.0
+        - 100.0
+        scale: 0.5
+      gravity:
+        source: /wheel_leg/rl/features/gravity
+        type: array
+        size: 3
+        precision: float32
+        clip:
+        - -100.0
+        - 100.0
+      position:
+        source: /wheel_leg/rl/features/position
+        type: array
+        size: 6
+        select:
+        - 0
+        - 2
+        - 1
+        - 3
+        - 4
+        - 5
+        precision: float32
+        clip:
+        - -100.0
+        - 100.0
+      velocity:
+        source: /wheel_leg/rl/features/velocity
+        type: array
+        size: 6
+        select:
+        - 0
+        - 2
+        - 1
+        - 3
+        - 4
+        - 5
+        precision: float32
+        source_clip:
+        - -200.0
+        - 200.0
+        scale: 0.1
+      previous_action:
+        source: /wheel_leg/rl/features/previous_action
+        type: array
+        size: 6
+        select:
+        - 0
+        - 2
+        - 1
+        - 3
+        - 4
+        - 5
+        precision: float32
+        clip:
+        - -100.0
+        - 100.0
+      auxiliary:
+        source: /wheel_leg/rl/features/auxiliary
+        type: array
+        size: 7
+    actions:
+      order:
+      - left_hip
+      - right_hip
+      - left_knee
+      - right_knee
+      - left_wheel
+      - right_wheel
+      left_hip:
+        output: /wheel_leg/rl/raw/left_hip_joint
+        scale: 0.5
+      right_hip:
+        output: /wheel_leg/rl/raw/right_hip_joint
+        scale: 0.5
+      left_knee:
+        output: /wheel_leg/rl/raw/left_knee_joint
+        scale: 0.5
+      right_knee:
+        output: /wheel_leg/rl/raw/right_knee_joint
+        scale: 0.5
+      left_wheel:
+        output: /wheel_leg/rl/raw/left_wheel
+        scale: 10.0
+        clip:
+        - -90.0
+        - 90.0
+      right_wheel:
+        output: /wheel_leg/rl/raw/right_wheel
+        scale: 10.0
+        clip:
+        - -90.0
+        - 90.0
+wheel_leg_controller:
+  ros__parameters:
+    jump_apex: 0.46
