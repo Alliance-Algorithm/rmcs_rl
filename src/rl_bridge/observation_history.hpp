@@ -26,6 +26,8 @@ public:
         return values_;
     }
 
+    std::span<const double> values() const { return values_; }
+
     void reset() {
         initialized_ = false;
         std::ranges::fill(values_, 0.0);

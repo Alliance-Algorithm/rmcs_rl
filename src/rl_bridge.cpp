@@ -7,6 +7,7 @@
 #include <functional>
 #include <map>
 #include <memory>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -18,6 +19,7 @@
 #include <rmcs_utility/rclcpp/node_mixin.hpp>
 
 #include "policy/policy_worker.hpp"
+#include "rl_bridge/action_delay.hpp"
 #include "rl_bridge/config.hpp"
 #include "rl_bridge/observation_builder.hpp"
 #include "rl_bridge/observation_history.hpp"
@@ -40,6 +42,7 @@ public:
               load_expected_metadata(*this)) {
         node::param("rl_base", rl_base_);
         node::param("policy_rate", policy_rate_);
+        history_rate_ = node::param_or("history_rate", policy_rate_);
         node::param("max_action_age", max_action_age_);
         std::string enable_interface, reset_interface;
         node::param("enable_interface", enable_interface);
@@ -50,6 +53,9 @@ public:
         register_input(enable_interface, enable_);
         register_input(reset_interface, reset_count_);
         action_publisher_->register_input(reset_interface, publisher_reset_count_);
+        if (has_parameter("flat_hold_interface"))
+            action_publisher_->register_input(
+                get_parameter("flat_hold_interface").as_string(), flat_hold_);
 
         action_publisher_->register_output(rl_base_ + "/valid", valid_, false);
         action_publisher_->register_output(rl_base_ + "/healthy", healthy_, true);
@@ -62,6 +68,7 @@ public:
 
         frame_.resize(observation_.frame_size());
         previous_action_.resize(actions_.size());
+        normalized_.resize(actions_.size());
         action_.action.resize(actions_.size());
         result_buffer_.action.resize(actions_.size());
         node::info(
@@ -74,8 +81,16 @@ public:
     }
 
     void before_updating() override {
-        if (!(policy_rate_ > 0.) || policy_rate_ > *update_rate_)
-            throw std::invalid_argument("policy_rate must be in (0, update_rate]");
+        const double update_rate = *update_rate_;
+        if (!(update_rate > 0.) || !std::isfinite(update_rate) || !(history_rate_ > 0.)
+            || !(policy_rate_ >= history_rate_) || std::fmod(update_rate, policy_rate_) != 0.
+            || std::fmod(policy_rate_, history_rate_) != 0.)
+            throw std::invalid_argument(
+                "update_rate, policy_rate and history_rate must divide evenly");
+        policy_divisor_ = static_cast<std::size_t>(std::lround(update_rate / policy_rate_));
+        history_divisor_ = static_cast<std::size_t>(std::lround(update_rate / history_rate_));
+        action_delay_ =
+            ActionDelay(actions_.size(), history_length() + history_divisor_ / policy_divisor_ + 4);
     }
 
     void update() override {
@@ -84,8 +99,7 @@ public:
             last_enable_ = *enable_;
             reset();
         }
-        const auto divisor = static_cast<std::size_t>(std::lround(*update_rate_ / policy_rate_));
-        if (*enable_ && *update_count_ % divisor == 0)
+        if (*enable_ && *update_count_ % policy_divisor_ == 0)
             submit_observation();
     }
 
@@ -101,13 +115,22 @@ private:
     void publish_actions() {
         // The partner handles reset before any action consumer executes.
         update_reset_count(*publisher_reset_count_);
+        const bool hold = flat_hold_.ready() && *flat_hold_;
+        if (hold != last_hold_) {
+            last_hold_ = hold;
+            reset();
+        }
         receive_result();
         const bool was_valid = *valid_;
         const bool valid = action_valid();
         if (valid) {
+            if (hold)
+                std::ranges::fill(action_.action, 0.);
+            if (action_.sequence != *action_sequence_) {
+                actions_.normalize(action_.action, normalized_);
+                action_delay_.store(action_.sequence, normalized_);
+            }
             actions_.publish(action_.action);
-            if (action_.sequence != *action_sequence_)
-                actions_.normalize(action_.action, previous_action_);
         } else {
             actions_.publish_invalid();
         }
@@ -119,11 +142,19 @@ private:
     }
 
     void submit_observation() {
+        const auto tick = *update_count_;
+        const auto delayed = action_delay_.select(tick - std::min(tick, history_divisor_));
+        std::ranges::copy(delayed, previous_action_.begin());
         if (!observation_.build(previous_action_, frame_)) {
             reset();
             return;
         }
-        worker_.submit(history_.append(frame_), ++observation_sequence_, generation_);
+        if (!last_history_tick_ || tick - *last_history_tick_ >= history_divisor_) {
+            history_.append(frame_);
+            last_history_tick_ = tick;
+        }
+        action_delay_.mark_submission(++observation_sequence_, tick);
+        worker_.submit(history_.values(), observation_sequence_, generation_);
     }
 
     void receive_result() {
@@ -166,7 +197,8 @@ private:
         action_.success = false;
         action_.error.clear();
         std::ranges::fill(action_.action, 0.);
-        std::ranges::fill(previous_action_, 0.);
+        action_delay_.reset();
+        last_history_tick_.reset();
         std::ranges::fill(frame_, 0.);
         history_.reset();
         *valid_ = false;
@@ -191,10 +223,12 @@ private:
         get_component_name() + "_actions", [this] { publish_actions(); })};
 
     std::string rl_base_;
-    double policy_rate_, max_action_age_;
+    double policy_rate_, history_rate_, max_action_age_;
+    std::size_t policy_divisor_ = 0, history_divisor_ = 0;
+    std::optional<std::size_t> last_history_tick_;
     InputInterface<std::size_t> update_count_;
     InputInterface<double> update_rate_;
-    InputInterface<bool> enable_;
+    InputInterface<bool> enable_, flat_hold_;
     InputInterface<std::size_t> reset_count_, publisher_reset_count_;
     OutputInterface<bool> valid_, healthy_;
     OutputInterface<std::size_t> action_sequence_;
@@ -204,13 +238,14 @@ private:
     PolicyActions actions_;
     ObservationBuilder observation_;
     ObservationHistory history_;
+    ActionDelay action_delay_{0, 0};
     PolicyWorker worker_;
 
-    std::vector<double> frame_, previous_action_;
+    std::vector<double> frame_, previous_action_, normalized_;
     PolicyWorker::Result action_, result_buffer_;
     std::uint64_t generation_ = 0, observation_sequence_ = 0;
     std::size_t last_reset_count_ = 0;
-    bool last_enable_ = false, action_ready_ = false;
+    bool last_enable_ = false, action_ready_ = false, last_hold_ = false;
 };
 
 } // namespace rmcs_rl
