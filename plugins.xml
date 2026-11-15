@@ -1,4 +1,5 @@
 <library path="rmcs_rl">
   <class type="rmcs_rl::RlBridge" base_class_type="rmcs_executor::Component" />
   <class type="rmcs_rl::StateMirror" base_class_type="rmcs_executor::Component" />
+  <class type="rmcs_rl::PipeFeedback" base_class_type="rmcs_executor::Component" />
 </library>

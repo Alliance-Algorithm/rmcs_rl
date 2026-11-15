@@ -18,13 +18,14 @@ PolicyWorker::PolicyWorker(
 }
 
 void PolicyWorker::submit(
-    std::span<const double> observation, std::uint64_t sequence, std::uint64_t generation) {
+    std::span<const double> observation, std::uint64_t sequence, std::uint64_t generation,
+    Clock::time_point submitted_at) {
     {
         const std::lock_guard lock{mutex_};
         std::ranges::copy(observation, pending_observation_.begin());
         pending_.sequence = sequence;
         pending_.generation = generation;
-        pending_.submitted_at = Clock::now();
+        pending_.submitted_at = submitted_at;
         has_pending_ = true;
     }
     ready_.notify_one();
