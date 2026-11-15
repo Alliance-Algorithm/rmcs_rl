@@ -108,7 +108,8 @@ rl_bridge:
 ## 保留的工具
 
 - `tool/simulation/wheel_leg_policy_host.cpp`、`tool/simulation/wheel_leg_latency_bench.cpp`：删除前需逐项确认；时延基准记录提交与首次取用时刻。
-- `tool/export_wheel_leg_training_pair.py`、`tool/prepare_wheel_leg_model.py`、`tool/install_rl_deps.sh`、`docs/troubleshooting.md`：同上，属于旧部署流程，没有迁移为新跳跃模型的正式导出；新模型与数据头由训练仓库按所选合同生成。
+- `tool/check_policy.py` 检查部署 YAML 与 ONNX；模型与 `jump_policy.hpp` 由训练仓库的 `scripts/export_wheelbipe_port_onnx.py` 和 `scripts/generate_jump_policy_header.py` 按同一份合同生成。旧 export/prepare 工具已由这套流程取代。
+- `tool/install_rl_deps.sh` 保留；当前桥的中文排障说明见 `docs/troubleshooting.md`。
 - `models/` 与 `model_receipts/` 全部保留，包括 16001 保底模型；保留资产不等于新跳跃控制器选用它。
 - 旧 v1 接收端 `tool/visualization/wheel_leg_telemetry.py` 保留给旧客户端；新显示端使用 `tool/mirror/state_mirror_client.py` 与各自的车型适配层。
 
