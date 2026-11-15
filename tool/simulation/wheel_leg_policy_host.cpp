@@ -75,12 +75,13 @@ public:
         register_output("/predefined/update_count", tick_, std::size_t{0});
         register_output("/predefined/timestamp", timestamp_, std::chrono::steady_clock::now());
         register_output("/wheel_leg/feedback_available", available_, true);
-        register_output("/wheel_leg/dm_control_ready", ready_, true);
+        register_output("/wheel_leg/control_ready", ready_, true);
         register_output("/wheel_leg/simulation", simulation_, true);
         register_output("/wheel_leg/imu/quaternion", orientation_, Eigen::Quaterniond::Identity());
         register_output("/wheel_leg/imu/angular_velocity", gyro_, Eigen::Vector3d::Zero());
         register_output("/chassis/control_enable", enabled_, false);
         register_output("/chassis/reset_count", reset_, std::size_t{0});
+        register_output("/chassis/jump/request_count", jump_request_, std::size_t{0});
         register_output("/chassis/control_mode", mode_, rmcs_msgs::ChassisMode::AUTO);
         register_output("/chassis/control_height", height_, .305);
         register_output("/chassis/control_velocity", command_);
@@ -108,6 +109,7 @@ public:
         *height_ = value.at("height").get<double>();
         *enabled_ = value.at("enabled").get<bool>();
         *reset_ = value.at("reset_count").get<std::size_t>();
+        *jump_request_ = value.value("jump_request_count", std::size_t{0});
         *mode_ = static_cast<rmcs_msgs::ChassisMode>(value.at("mode").get<int>());
     }
     void update() override {
@@ -120,7 +122,7 @@ public:
 
 private:
     OutputInterface<double> rate_, height_;
-    OutputInterface<std::size_t> tick_, reset_;
+    OutputInterface<std::size_t> tick_, reset_, jump_request_;
     OutputInterface<std::chrono::steady_clock::time_point> timestamp_;
     OutputInterface<bool> available_, ready_, simulation_, enabled_;
     OutputInterface<Eigen::Quaterniond> orientation_;
@@ -148,7 +150,7 @@ int main(int argc, char** argv) {
         auto estimator = load(
             "wheel_leg_state_estimator", "rmcs_core::controller::chassis::WheelLegStateEstimator");
         auto controller =
-            load("wheel_leg_rl_controller", "rmcs_core::controller::chassis::WheelLegRlController");
+            load("wheel_leg_controller", "rmcs_core::controller::chassis::WheelLegController");
         auto observation =
             load("wheel_leg_observation", "rmcs_core::controller::chassis::WheelLegObservation");
         auto bridge = load("rl_bridge", "rmcs_rl::RlBridge");
@@ -182,8 +184,9 @@ int main(int argc, char** argv) {
                     components,
                     std::string{"/wheel_leg/"} + SimulationFeedback::names[i] + "/control_torque");
             std::cout
-                << nlohmann::json{{"effort_api", effort}, {"state", Executor::read<int>(components, "/wheel_leg/rl/state")}, {"phase", Executor::read<int>(components, "/wheel_leg/recovery/phase")}, {"fault", Executor::read<int>(components, "/wheel_leg/recovery/fault")}, {"fault_latched", Executor::read<bool>(components, "/wheel_leg/rl/fault_latched")}, {"action_seq", Executor::read<std::size_t>(components, "/wheel_leg/rl/action_seq")}, {"applied_action", Executor::read<std::array<double, 6>>(components, "/wheel_leg/rl/applied_action")}, {"enable", Executor::read<bool>(components, "/wheel_leg/enable_request")}}
-                       .dump()
+                << nlohmann::
+                       json{{"effort_api", effort}, {"state", Executor::read<int>(components, "/wheel_leg/rl/state")}, {"action_seq", Executor::read<std::size_t>(components, "/wheel_leg/rl/action_seq")}, {"applied_action", Executor::read<std::array<double, 6>>(components, "/wheel_leg/rl/applied_action")}, {"enable", Executor::read<bool>(components, "/wheel_leg/rl/input/enable")}, {"policy_valid", Executor::read<bool>(components, "/wheel_leg/rl/valid")}, {"healthy", Executor::read<bool>(components, "/wheel_leg/rl/healthy")}}
+                           .dump()
                 << std::endl;
         }
         rclcpp::shutdown();

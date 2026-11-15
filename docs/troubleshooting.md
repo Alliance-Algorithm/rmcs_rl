@@ -1,3 +1,8 @@
+> This document preserves troubleshooting notes for the earlier control contract. For the
+> current bridge parameters and interfaces, use [README](../README.md); for StateMirror v2,
+> use [State mirror](state_mirror.md). The retained export/prepare tools target the earlier
+> contract until the selected jump export workflow replaces them.
+
 # 故障排查
 
 策略链路出问题时，先看两个接口，再按日志里的 `valid=0: <reason>` 定位。
@@ -59,7 +64,7 @@ worker 失败后是**闭锁**，不会自动重试：只有 `reset_interface` �
 
 ### disabled by enable interface
 
-`enable_interface` 读到 `false`。没有组件产出该接口时退回 `enable_default`（默认 `false`），所以“接口没接上”和“被显式关掉”表现一样。轮腿车型上该接口由 `WheelLegRlController` 产出，不是遥控输入直接给的。
+`enable_interface` 读到 `false`。没有组件产出该接口时退回 `enable_default`（默认 `false`），所以“接口没接上”和“被显式关掉”表现一样。轮腿车型上该接口由 `WheelLegController` 产出，不是遥控输入直接给的。
 
 ### no inference result available
 
