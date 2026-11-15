@@ -40,26 +40,25 @@ endif()
 
 ament_auto_add_library(${PROJECT_NAME} SHARED
     src/rl_bridge.cpp
+    src/simulation/pipe_feedback.cpp
     src/mirror/state_mirror.cpp
     src/policy/policy_model.cpp
     src/policy/policy_worker.cpp
 )
 target_include_directories(${PROJECT_NAME} PRIVATE src ${ONNXRUNTIME_ROOT_DIR}/include)
-target_link_libraries(${PROJECT_NAME} ${ONNXRUNTIME_ROOT_DIR}/lib/libonnxruntime.so)
+target_link_libraries(${PROJECT_NAME} ${ONNXRUNTIME_ROOT_DIR}/lib/libonnxruntime.so nlohmann_json::nlohmann_json)
 set_target_properties(${PROJECT_NAME} PROPERTIES INSTALL_RPATH "$ORIGIN")
 install(DIRECTORY ${ONNXRUNTIME_ROOT_DIR}/lib/ DESTINATION lib FILES_MATCHING PATTERN "*.so*")
 
 pluginlib_export_plugin_description_file(rmcs_executor plugins.xml)
 
-ament_auto_add_executable(wheel_leg_policy_host tool/simulation/wheel_leg_policy_host.cpp)
-target_link_libraries(wheel_leg_policy_host nlohmann_json::nlohmann_json)
 ament_auto_add_executable(wheel_leg_latency_bench tool/simulation/wheel_leg_latency_bench.cpp)
 target_include_directories(wheel_leg_latency_bench PRIVATE src ${ONNXRUNTIME_ROOT_DIR}/include)
 target_link_libraries(wheel_leg_latency_bench ${PROJECT_NAME})
 
 install(FILES tool/check_policy.py DESTINATION share/${PROJECT_NAME}/tool)
 
-install(DIRECTORY models model_receipts DESTINATION share/${PROJECT_NAME})
+install(DIRECTORY config models model_receipts DESTINATION share/${PROJECT_NAME})
 install(DIRECTORY tool/mirror tool/visualization DESTINATION share/${PROJECT_NAME}/tool FILES_MATCHING PATTERN "*.py")
 
 ament_auto_package()

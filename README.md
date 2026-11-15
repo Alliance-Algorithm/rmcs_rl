@@ -55,6 +55,7 @@ YAML 浮点参数写成浮点字面量，如 `1.0`。元数据字符串保留引
 |---|---|---|
 | 输入 | `/predefined/update_count` | `std::size_t`，执行器 tick |
 | 输入 | `/predefined/update_rate` | `double`，Hz |
+| 输入 | `/predefined/timestamp` | `std::chrono::steady_clock::time_point`，观测提交与动作年龄的执行器时间 |
 | 输入 | 配置的 `enable_interface` | `bool`，必选 |
 | 输入 | 配置的 `reset_interface` | `std::size_t`，主组件和 partner 均读取 |
 | 输入 | 配置的观测源 | 见观测类型表 |
@@ -66,7 +67,7 @@ YAML 浮点参数写成浮点字面量，如 `1.0`。元数据字符串保留引
 | 输出 | `<rl_base>/policy_rate` | `double`，Hz |
 | 输出 | `<rl_base>/model_metadata` | `std::map<std::string, std::string>`，已加载模型的全部自定义元数据，启动时写入一次；控制器可在 `before_updating()` 中核对编译期常量 |
 
-动作 partner 只依赖 reset 计数，先于动作消费者执行。bridge 主组件依赖观测源，位于观测生产者之后。使能变化清空历史与动作；reset 计数变化还会清除推理异常闭锁。旧会话的推理结果不会跨 reset 发布。`previous_action` 使用缩放/裁剪后再除以 scale 的值，`/raw` 始终保留网络输出。
+动作 partner 依赖 reset 计数与配置的 flat hold，先于动作消费者执行。bridge 主组件依赖观测源，位于观测生产者之后。使能变化清空历史与动作；reset 计数变化还会清除推理异常闭锁。旧会话的推理结果不会跨 reset 发布。`previous_action` 使用缩放/裁剪后再除以 scale 的值，`/raw` 是缩放前的动作；有效的 flat hold 期间执行值与 `/raw` 均为 0。
 
 ## YAML 示例
 
@@ -107,7 +108,8 @@ rl_bridge:
 
 ## 保留的工具
 
-- `tool/simulation/wheel_leg_policy_host.cpp`、`tool/simulation/wheel_leg_latency_bench.cpp`：删除前需逐项确认；时延基准记录提交与首次取用时刻。
+- `tool/simulation/wheel_leg_latency_bench.cpp` 保留，用于记录提交与首次取用时刻。
+- `rmcs_rl::PipeFeedback` 由正常执行器加载，取代旧 policy host；通用协议见 [管道反馈](docs/pipe_feedback.md)，轮腿示例为 `config/simulation/wheel-leg-pipe.yaml`。
 - `tool/check_policy.py` 检查部署 YAML 与 ONNX；模型与 `jump_policy.hpp` 由训练仓库的 `scripts/export_wheelbipe_port_onnx.py` 和 `scripts/generate_jump_policy_header.py` 按同一份合同生成。旧 export/prepare 工具已由这套流程取代。
 - `tool/install_rl_deps.sh` 保留；当前桥的中文排障说明见 `docs/troubleshooting.md`。
 - `models/` 与 `model_receipts/` 全部保留，包括 16001 保底模型；保留资产不等于新跳跃控制器选用它。
@@ -133,3 +135,5 @@ and 256 CPU inference samples. It requires pyyaml, onnx, onnxruntime and numpy, 
 `check_policy.py` and `ObservationBuilder` use the same frame-width rules; changes to either must
 be reflected in the other. Relative model paths resolve against the package directory.
 Receipts identify artifacts with repository-relative names and SHA-256.
+
+动作提交和有效期使用 `/predefined/timestamp`；执行器须在调用组件 `before_updating()` 之前发布有效的 `/predefined/update_rate`。管道仿真使用 `clock: stepped`，普通车辆使用缺省的 `realtime`。

@@ -40,7 +40,7 @@ int main(int argc, char** argv) {
         while (Clock::now() - start < std::chrono::duration<double>{seconds}) {
             const auto now = Clock::now();
             if (now >= next_submit) {
-                worker.submit(observation, ++sequence, 1);
+                worker.submit(observation, ++sequence, 1, rmcs_rl::PolicyWorker::Clock::now());
                 next_submit += std::chrono::microseconds{static_cast<long>(1e6 / hz)};
             }
             if (worker.try_take(result)) {

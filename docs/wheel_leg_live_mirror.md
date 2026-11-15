@@ -130,4 +130,4 @@ RMCS `state_valid=false` 或汇总 `feedback_fresh=false` 时，镜像继续使�
 
 ## 与本机 PhysX 双车对比
 
-本仓库只提供遥测和本地策略宿主 `tool/simulation/wheel_leg_policy_host.cpp`，它通过 stdin/stdout 接收本机物理车反馈，加载本配置绑定的 `WheelLegStateEstimator`、`WheelLegController`、`WheelLegObservation` 和 `RlBridge`。它不加载 `rmcs_executor` 的硬件列表、不创建 CAN、不向实车输出控制。Isaac GUI 入口和 `Shift+R` 物理归位位于相邻 `isaac_wheeled_rl_train` 仓库。
+本仓库提供遥测与通用 `rmcs_rl::PipeFeedback` 插件。正常执行器用 `config/simulation/wheel-leg-pipe.yaml` 加载反馈、`WheelLegStateEstimator`、`WheelLegController`、`WheelLegObservation` 和 `RlBridge`，通过 stdin/stdout 按接口路径同步本机物理反馈。协议见 [管道反馈](pipe_feedback.md)，车型字段适配与 PhysX 后端位于训练仓库。该配置不加载实车硬件。
