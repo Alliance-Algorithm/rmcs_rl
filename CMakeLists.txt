@@ -57,6 +57,8 @@ ament_auto_add_executable(wheel_leg_latency_bench tool/simulation/wheel_leg_late
 target_include_directories(wheel_leg_latency_bench PRIVATE src ${ONNXRUNTIME_ROOT_DIR}/include)
 target_link_libraries(wheel_leg_latency_bench ${PROJECT_NAME})
 
+install(FILES tool/check_policy.py DESTINATION share/${PROJECT_NAME}/tool)
+
 install(DIRECTORY models model_receipts DESTINATION share/${PROJECT_NAME})
 install(DIRECTORY tool/mirror tool/visualization DESTINATION share/${PROJECT_NAME}/tool FILES_MATCHING PATTERN "*.py")
 

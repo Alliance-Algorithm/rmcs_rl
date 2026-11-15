@@ -16,6 +16,8 @@ ONNX Runtime 1.20.0 由 CMake 按固定 SHA-256 下载。模型输入支持 `[N]
 |---|---|---|
 | `rl_base` | 是 | 状态输出前缀 |
 | `rl_model_path` | 是 | 绝对路径或相对 `rmcs_rl` share 目录的路径 |
+| `history_rate` | Optional; defaults to `policy_rate`. History samples advance at this rate. |
+| `flat_hold_interface` | Optional required bool input when configured; valid actions and feedback become zero while held. |
 | `policy_rate` | 是 | 策略频率，Hz；必须整除执行器频率 |
 | `history_length` | 是 | 历史帧数 |
 | `max_action_age` | 是 | 从提交观测算起的动作有效时长，秒 |
@@ -113,3 +115,20 @@ rl_bridge:
 ## 其他车型升级
 
 其他车型分支升级子模块时，需要把 `<rl_base>/valid` 与 `/healthy` 的消费者从 `InputInterface<double>` 改为 `InputInterface<bool>`。动作只保留 value 与 `/raw` 两个输出，状态输出见上方接口表。
+
+The executor, policy and history rates must divide evenly: update_rate % policy_rate = 0,
+policy_rate % history_rate = 0, with 0 < history_rate <= policy_rate <= update_rate.
+Inference runs on every policy tick. History retains its prior stack until a full history period
+has elapsed. The previous-action feature selects the newest accepted action whose source
+observation was submitted at least one history period ago (zero after reset). Flat hold publishes
+and feeds back zero; transitions reset the session without clearing a worker failure latch.
+
+## Offline policy check
+
+Run `python3 tool/check_policy.py --config <bringup.yaml> [--component rl_bridge]
+[--model <candidate.onnx>] [--receipt <new.json>]` before deployment. It validates rate divisibility,
+observation widths and selection, float32 I/O shapes, exact metadata pins, normalization/clipping,
+and 256 CPU inference samples. It requires pyyaml, onnx, onnxruntime and numpy, with no ROS dependency.
+`check_policy.py` and `ObservationBuilder` use the same frame-width rules; changes to either must
+be reflected in the other. Relative model paths resolve against the package directory.
+Receipts identify artifacts with repository-relative names and SHA-256.
