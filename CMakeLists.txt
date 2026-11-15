@@ -11,6 +11,7 @@ endif()
 
 find_package(ament_cmake_auto REQUIRED)
 ament_auto_find_build_dependencies()
+find_package(nlohmann_json REQUIRED)
 
 set(ONNXRUNTIME_VERSION 1.20.0)
 if(NOT DEFINED ONNXRUNTIME_PLATFORM)
@@ -38,32 +39,27 @@ if(NOT EXISTS ${ONNXRUNTIME_ROOT_DIR}/include/onnxruntime_cxx_api.h)
 endif()
 
 ament_auto_add_library(${PROJECT_NAME} SHARED
-    src/policy/onnx_runtime.cpp
+    src/rl_bridge.cpp
+    src/mirror/state_mirror.cpp
     src/policy/policy_model.cpp
     src/policy/policy_worker.cpp
-    src/rl_bridge.cpp
-    src/rl_bridge/config.cpp
-    src/visualization/wheel_leg_mirror.cpp
 )
-target_include_directories(${PROJECT_NAME}
-    PUBLIC $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/src>
-    PRIVATE ${ONNXRUNTIME_ROOT_DIR}/include
-)
+target_include_directories(${PROJECT_NAME} PRIVATE src ${ONNXRUNTIME_ROOT_DIR}/include)
 target_link_libraries(${PROJECT_NAME} ${ONNXRUNTIME_ROOT_DIR}/lib/libonnxruntime.so)
 set_target_properties(${PROJECT_NAME} PROPERTIES INSTALL_RPATH "$ORIGIN")
 install(DIRECTORY ${ONNXRUNTIME_ROOT_DIR}/lib/ DESTINATION lib FILES_MATCHING PATTERN "*.so*")
 
 pluginlib_export_plugin_description_file(rmcs_executor plugins.xml)
 
-# Host-only tools; neither creates hardware nor sends control output.
 ament_auto_add_executable(wheel_leg_policy_host tool/simulation/wheel_leg_policy_host.cpp)
 target_link_libraries(wheel_leg_policy_host nlohmann_json::nlohmann_json)
 ament_auto_add_executable(wheel_leg_latency_bench tool/simulation/wheel_leg_latency_bench.cpp)
+target_include_directories(wheel_leg_latency_bench PRIVATE src ${ONNXRUNTIME_ROOT_DIR}/include)
 target_link_libraries(wheel_leg_latency_bench ${PROJECT_NAME})
 
-install(DIRECTORY models DESTINATION share/${PROJECT_NAME})
-install(DIRECTORY model_receipts DESTINATION share/${PROJECT_NAME})
-install(DIRECTORY tool/visualization DESTINATION share/${PROJECT_NAME}/tool
-    FILES_MATCHING PATTERN "*.py")
+install(FILES tool/check_policy.py DESTINATION share/${PROJECT_NAME}/tool)
+
+install(DIRECTORY models model_receipts DESTINATION share/${PROJECT_NAME})
+install(DIRECTORY tool/mirror tool/visualization DESTINATION share/${PROJECT_NAME}/tool FILES_MATCHING PATTERN "*.py")
 
 ament_auto_package()

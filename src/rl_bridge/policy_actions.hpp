@@ -5,6 +5,7 @@
 #include <limits>
 #include <memory>
 #include <span>
+#include <utility>
 #include <vector>
 
 #include <rmcs_executor/component.hpp>
@@ -15,92 +16,49 @@ namespace rmcs_rl {
 
 class PolicyActions {
 public:
-    PolicyActions(
-        rmcs_executor::Component& component, const std::vector<ActionTerm>& terms,
-        InvalidAction invalid_action)
-        : invalid_action_(invalid_action) {
-        constexpr double infinity = std::numeric_limits<double>::infinity();
-        for (const auto& term : terms) {
-            auto& channel = *channels_.emplace_back(std::make_unique<Channel>(term));
-            component.register_output(term.output, channel.value, 0.0);
-            component.register_output(term.output + "/raw", channel.raw, 0.0);
-            component.register_output(term.output + "/scale", channel.scale, term.scale);
-            component.register_output(term.output + "/offset", channel.offset, term.offset);
-            component.register_output(
-                term.output + "/clip_min", channel.clip_min,
-                term.clip ? term.clip->lower : -infinity);
-            component.register_output(
-                term.output + "/clip_max", channel.clip_max,
-                term.clip ? term.clip->upper : infinity);
+    PolicyActions(rmcs_executor::Component& component, std::vector<ActionTerm> terms) {
+        for (auto& term : terms) {
+            auto& channel = *channels_.emplace_back(std::make_unique<Channel>(std::move(term)));
+            component.register_output(channel.term.output, channel.value, kNaN);
+            component.register_output(channel.term.output + "/raw", channel.raw, kNaN);
         }
     }
 
-    PolicyActions(const PolicyActions&) = delete;
-    PolicyActions& operator=(const PolicyActions&) = delete;
-    PolicyActions(PolicyActions&&) = delete;
-    PolicyActions& operator=(PolicyActions&&) = delete;
-
-    ~PolicyActions() = default;
+    std::size_t size() const { return channels_.size(); }
 
     void publish(std::span<const double> raw) {
         for (std::size_t i = 0; i < channels_.size(); ++i) {
-            auto& channel = *channels_[i];
-            channel.written = map(channel.term, raw[i]);
-            *channel.value = channel.written;
-            *channel.raw = raw[i];
+            *channels_[i]->value = map(channels_[i]->term, raw[i]);
+            *channels_[i]->raw = raw[i];
         }
     }
 
     void publish_invalid() {
-        for (const auto& channel : channels_) {
-            *channel->value = invalid_value(*channel);
-            *channel->raw = nan_;
-        }
+        for (auto& channel : channels_)
+            *channel->value = *channel->raw = kNaN;
     }
 
-    // Converts mapped actions back to normalized policy units for previous_action terms.
     void normalize(std::span<const double> raw, std::span<double> normalized) const {
         for (std::size_t i = 0; i < channels_.size(); ++i) {
             const auto& term = channels_[i]->term;
-            normalized[i] =
-                term.scale == 0.0 ? 0.0 : (map(term, raw[i]) - term.offset) / term.scale;
+            normalized[i] = term.scale == 0. ? 0. : map(term, raw[i]) / term.scale;
         }
-    }
-
-    void reset() {
-        for (const auto& channel : channels_)
-            channel->written = 0.0;
     }
 
 private:
     struct Channel {
-        explicit Channel(const ActionTerm& term)
-            : term(term) {}
-
+        explicit Channel(ActionTerm term)
+            : term(std::move(term)) {}
         ActionTerm term;
-        double written = 0.0;
-
         rmcs_executor::Component::OutputInterface<double> value, raw;
-        rmcs_executor::Component::OutputInterface<double> scale, offset, clip_min, clip_max;
     };
 
     static double map(const ActionTerm& term, double raw) {
-        const double value = raw * term.scale + term.offset;
+        const double value = raw * term.scale;
         return term.clip ? std::clamp(value, term.clip->lower, term.clip->upper) : value;
     }
 
-    double invalid_value(const Channel& channel) const {
-        switch (invalid_action_) {
-        case InvalidAction::kNaN: return nan_;
-        case InvalidAction::kZero: return 0.0;
-        case InvalidAction::kHold: return channel.written;
-        }
-        return nan_;
-    }
-
-    static constexpr double nan_ = std::numeric_limits<double>::quiet_NaN();
-
-    InvalidAction invalid_action_;
+    static constexpr double kNaN = std::numeric_limits<double>::quiet_NaN();
     std::vector<std::unique_ptr<Channel>> channels_;
 };
 

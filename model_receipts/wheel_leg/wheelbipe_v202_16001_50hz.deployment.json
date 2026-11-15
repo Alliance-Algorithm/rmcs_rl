@@ -1,7 +1,7 @@
 {
   "schema": "rmcs-wheel-leg-snapshot-export-v1",
   "profile": "wheelbipe",
-  "checkpoint": "/home/noir/Documents/workspace/isaac_wheeled_rl_train/.codex/artifacts/model/wheelbipe_v202_u16001_50hz_20261104/model_16000.pt",
+  "checkpoint": "isaac_wheeled_rl_train:.codex/artifacts/model/wheelbipe_v202_u16001_50hz_20261104/model_16000.pt",
   "checkpoint_sha256": "17a1607bdf38536aef0504f05b8910c3fbcdf2d136502f01e4ecc9673b1bc280",
   "completed_updates": 16001,
   "training_budget": 20000,
@@ -29,5 +29,5 @@
   "behavior_qualified": false,
   "hardware_tested": false,
   "live_training_modified": false,
-  "source_selection_contract": "/home/noir/Documents/workspace/isaac_wheeled_rl_train/.codex/artifacts/model/wheelbipe_v202_u16001_50hz_20261104/selection.json"
+  "source_selection_contract": "isaac_wheeled_rl_train:.codex/artifacts/model/wheelbipe_v202_u16001_50hz_20261104/selection.json"
 }

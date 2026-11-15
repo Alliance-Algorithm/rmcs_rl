@@ -1,7 +1,7 @@
 {
   "schema": "rmcs-wheel-leg-snapshot-export-v1",
   "profile": "wheelbipe",
-  "checkpoint": "kaiser:/home/kaiser/workspace/wheelbipe-v202-port/runs/full_flat_1024_20000_200hz_balanced_seed119_011/attempts/0001-03d234624906/train/model_8500.pt",
+  "checkpoint": "wheelbipe-v202-port:runs/full_flat_1024_20000_200hz_balanced_seed119_011/attempts/0001-03d234624906/train/model_8500.pt",
   "checkpoint_sha256": "fb36b4a9e5bd7f85f7bc3b4e28532b77edb7516fa1c46ed029a2a4d72fdd4a3f",
   "completed_updates": 8501,
   "training_budget": 20000,
