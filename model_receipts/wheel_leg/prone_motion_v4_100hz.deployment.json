@@ -1,7 +1,7 @@
 {
   "schema": "rmcs-wheel-leg-snapshot-export-v1",
   "profile": "prone",
-  "checkpoint": "/home/noir/Documents/workspace/isaac_wheeled_rl_train/runs/prone_motion/v4_standard_getup_standing_bridge_seed107_env256_20261103/model_00500.pt",
+  "checkpoint": "isaac_wheeled_rl_train:runs/prone_motion/v4_standard_getup_standing_bridge_seed107_env256_20261103/model_00500.pt",
   "checkpoint_sha256": "cb206f332599e1885166accc42f5bd2675acee946a3644602a6ee28291c09c76",
   "completed_updates": 500,
   "training_budget": 10000,
