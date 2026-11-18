@@ -51,6 +51,8 @@ public:
             };
             if (type == "double")
                 add(initial.as_double());
+            else if (type == "array")
+                add(initial.as_double_array());
             else if (type == "bool")
                 add(initial.as_bool());
             else if (type == "int") {
@@ -121,6 +123,8 @@ public:
                 bind.template operator()<Eigen::Quaterniond>();
             else if (type == typeid(rmcs_msgs::ChassisMode))
                 bind.template operator()<rmcs_msgs::ChassisMode>();
+            else if (type == typeid(std::vector<double>))
+                bind.template operator()<std::vector<double>>();
             else
                 throw std::invalid_argument("Unsupported PipeFeedback input type: " + path);
         }
@@ -182,6 +186,7 @@ private:
         std::unique_ptr<Interface<int>>, std::unique_ptr<Interface<std::uint64_t>>,
         std::unique_ptr<Interface<Eigen::Vector3d>>, std::unique_ptr<Interface<DirectionVector>>,
         std::unique_ptr<Interface<Eigen::Quaterniond>>,
+        std::unique_ptr<Interface<std::vector<double>>>,
         std::unique_ptr<Interface<rmcs_msgs::ChassisMode>>>;
 
     template <class T>

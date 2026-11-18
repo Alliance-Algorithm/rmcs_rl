@@ -53,6 +53,17 @@ public:
         register_input("/predefined/update_rate", update_rate_);
         register_input(enable_interface, enable_);
         register_input(reset_interface, reset_count_);
+        const auto frame_interface =
+            node::param_or("observation_frame_sequence_interface", std::string{});
+        if (!frame_interface.empty())
+            register_input(frame_interface, frame_sequence_);
+        const auto epoch_interface = node::param_or("observation_epoch_interface", std::string{});
+        if (!epoch_interface.empty()) {
+            if (frame_interface.empty())
+                throw std::invalid_argument("Observation epoch requires frame sequence");
+            register_input(epoch_interface, observation_epoch_);
+        }
+        observation_.validate_scales(worker_.metadata());
         action_publisher_->register_input(reset_interface, publisher_reset_count_);
         if (has_parameter("flat_hold_interface"))
             action_publisher_->register_input(
@@ -68,6 +79,10 @@ public:
             rl_base_ + "/model_metadata", model_metadata_, worker_.metadata());
 
         frame_.resize(observation_.frame_size());
+        register_output(
+            rl_base_ + "/observation", observation_values_,
+            std::vector<double>(history_length() * observation_.frame_size()));
+        register_output(rl_base_ + "/observation_sequence", submitted_sequence_, std::size_t{0});
         previous_action_.resize(actions_.size());
         normalized_.resize(actions_.size());
         action_.action.resize(actions_.size());
@@ -100,7 +115,24 @@ public:
             last_enable_ = *enable_;
             reset();
         }
-        if (*enable_ && *update_count_ % policy_divisor_ == 0)
+        if (!*enable_)
+            return;
+        if (observation_epoch_.ready() && *observation_epoch_ != last_observation_epoch_) {
+            last_observation_epoch_ = *observation_epoch_;
+            reset();
+        }
+        if (frame_sequence_.ready()) {
+            const auto sequence = *frame_sequence_;
+            if (sequence == 0) {
+                if (last_frame_sequence_ != 0)
+                    reset();
+                return;
+            }
+            if (sequence == last_frame_sequence_)
+                return;
+            last_frame_sequence_ = sequence;
+            submit_observation();
+        } else if (*update_count_ % policy_divisor_ == 0)
             submit_observation();
     }
 
@@ -139,7 +171,7 @@ private:
         *healthy_ = worker_.healthy();
         *action_sequence_ = action_.sequence;
         if (was_valid && !valid)
-            reset();
+            invalidate_session();
     }
 
     void submit_observation() {
@@ -147,14 +179,17 @@ private:
         const auto delayed = action_delay_.select(tick - std::min(tick, history_divisor_));
         std::ranges::copy(delayed, previous_action_.begin());
         if (!observation_.build(previous_action_, frame_)) {
-            reset();
+            invalidate_session();
             return;
         }
-        if (!last_history_tick_ || tick - *last_history_tick_ >= history_divisor_) {
+        if (policy_divisor_ == history_divisor_ || !last_history_tick_
+            || tick - *last_history_tick_ >= history_divisor_) {
             history_.append(frame_);
             last_history_tick_ = tick;
         }
         action_delay_.mark_submission(++observation_sequence_, tick);
+        std::ranges::copy(history_.values(), observation_values_->begin());
+        *submitted_sequence_ = observation_sequence_;
         worker_.submit(history_.values(), observation_sequence_, generation_, *timestamp_);
     }
 
@@ -190,6 +225,11 @@ private:
     }
 
     void reset() {
+        last_frame_sequence_ = 0;
+        invalidate_session();
+    }
+
+    void invalidate_session() {
         ++generation_;
         action_ready_ = false;
         action_.sequence = action_.generation = 0;
@@ -201,6 +241,8 @@ private:
         last_history_tick_.reset();
         std::ranges::fill(frame_, 0.);
         history_.reset();
+        std::ranges::fill(*observation_values_, 0.);
+        *submitted_sequence_ = 0;
         *valid_ = false;
         *action_sequence_ = 0;
     }
@@ -227,6 +269,7 @@ private:
     std::size_t policy_divisor_ = 0, history_divisor_ = 0;
     std::optional<std::size_t> last_history_tick_;
     InputInterface<std::size_t> update_count_;
+    InputInterface<std::size_t> frame_sequence_, observation_epoch_;
     InputInterface<PolicyWorker::Clock::time_point> timestamp_;
     InputInterface<double> update_rate_;
     InputInterface<bool> enable_, flat_hold_;
@@ -235,6 +278,8 @@ private:
     OutputInterface<std::size_t> action_sequence_;
     OutputInterface<double> policy_rate_output_;
     OutputInterface<std::map<std::string, std::string>> model_metadata_;
+    OutputInterface<std::vector<double>> observation_values_;
+    OutputInterface<std::size_t> submitted_sequence_;
 
     PolicyActions actions_;
     ObservationBuilder observation_;
@@ -245,7 +290,7 @@ private:
     std::vector<double> frame_, previous_action_, normalized_;
     PolicyWorker::Result action_, result_buffer_;
     std::uint64_t generation_ = 0, observation_sequence_ = 0;
-    std::size_t last_reset_count_ = 0;
+    std::size_t last_reset_count_ = 0, last_frame_sequence_ = 0, last_observation_epoch_ = 0;
     bool last_enable_ = false, action_ready_ = false, last_hold_ = false;
 };
 

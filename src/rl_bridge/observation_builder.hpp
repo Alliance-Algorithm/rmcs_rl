@@ -6,6 +6,9 @@
 #include <map>
 #include <memory>
 #include <span>
+#include <sstream>
+#include <stdexcept>
+#include <string>
 #include <type_traits>
 #include <utility>
 #include <variant>
@@ -42,6 +45,27 @@ public:
     }
 
     std::size_t frame_size() const { return frame_size_; }
+
+    void validate_scales(const std::map<std::string, std::string>& metadata) const {
+        const auto found = metadata.find("rmcs_observation_scales");
+        if (found == metadata.end())
+            return;
+        if (found->second.empty() || found->second.back() == ',')
+            throw std::invalid_argument("Malformed model observation scales");
+        std::istringstream stream{found->second};
+        std::string token;
+        for (const auto& term : terms_)
+            for (std::size_t i = 0; i < term.size; ++i) {
+                if (!std::getline(stream, token, ','))
+                    throw std::invalid_argument("Model observation scale width mismatch");
+                std::size_t consumed = 0;
+                const double value = std::stod(token, &consumed);
+                if (consumed != token.size() || !std::isfinite(value) || value != term.scale)
+                    throw std::invalid_argument("Model observation scale mismatch: " + term.name);
+            }
+        if (std::getline(stream, token, ','))
+            throw std::invalid_argument("Model observation scale width mismatch");
+    }
 
     void bind(Component& component, const Component::OutputInfoMap& output_map) {
         std::map<std::string, Input*> registered;

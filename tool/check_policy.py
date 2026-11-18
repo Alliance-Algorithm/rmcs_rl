@@ -83,6 +83,15 @@ def check_metadata(model, block):
     import numpy as np
     metadata = {entry.key: entry.value for entry in model.metadata_props}
     errors = []
+    if 'rmcs_observation_scales' in metadata:
+        try:
+            expected_scales = [float(v) for v in metadata['rmcs_observation_scales'].split(',')]
+            configured = [float(block['observations'][term['name']].get('scale', 1.))
+                          for term in frame_layout(block) for _ in range(term['size'])]
+            if expected_scales != configured or not all(math.isfinite(v) for v in expected_scales):
+                errors.append('model observation scales do not match YAML preprocessing')
+        except (ValueError, TypeError):
+            errors.append('invalid rmcs_observation_scales metadata')
     for key, expected in block.get('expected_metadata', {}).items():
         if not isinstance(expected, str) or metadata.get(key) != expected:
             errors.append(f'model metadata mismatch: {key}')

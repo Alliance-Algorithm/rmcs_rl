@@ -20,7 +20,7 @@ compile_commands.json
 .mimo/
 .dsh/
 CLAUDE.md
-AGENT.md
+AGENTS.md
 
 # Python and local mirror recordings
 __pycache__/
