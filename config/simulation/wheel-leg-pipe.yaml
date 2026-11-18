@@ -208,9 +208,6 @@ rl_bridge:
     rl_model_path: models/wheel_leg/V10_jump_apex_scaling.onnx
     policy_rate: 50.0
     history_length: 5
-    rl_feature_size: 35
-    rl_obs_size: 175
-    rl_action_size: 6
     max_action_age: 0.06
     enable_interface: /wheel_leg/rl/input/enable
     reset_interface: /chassis/reset_count
@@ -376,7 +373,6 @@ rl_bridge:
         - 90.0
 wheel_leg_controller:
   ros__parameters:
-    policy_profile: v10
     moving_jump_vx_max: 1.0
     jump_vx_rate: 2.0
     jump_request_duration: 3.7
