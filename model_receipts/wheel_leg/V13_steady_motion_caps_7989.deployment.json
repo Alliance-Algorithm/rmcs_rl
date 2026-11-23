@@ -1,0 +1,191 @@
+{
+  "schema": "rmcs-policy-deployment-v2",
+  "model": "models/wheel_leg/V13_steady_motion_caps_7989.onnx",
+  "onnx_sha256": "48ec55ca17e503b511d47bd9fe29f3c6f12c98d0aa4b85b671bea4a7446c22fc",
+  "actor_graph_sha256": "a0ae0c9325775ef7259a9c81e02af4cb1f6a6a5bfb49c9ec758c3bde48b8104b",
+  "metadata": {
+    "wheelbipe_deployment_contract_sha256": "510121c8441c5ae99fbd52b47fd5a03181e82b2f9c121f04f9d06d975347ce09",
+    "rmcs_observation_contract_sha256": "9e39952a99870a590834c4e7d810d96c25a8bc5d13eb417e93dd836b680330ee",
+    "leg_target_model_spec_sha256": "67f824bc29b05647e381f8584528d686955c2cfd99fd783ba40f382279bf2284",
+    "rmcs_observation_version": "wheelbipe-v202-foundation-jump-v13-rmcs-oldest-first-adapter",
+    "rmcs_checkpoint_sha256": "14bcdfc7f621259ba2e2e44ae82b1d4f9d3adbf2d221e10dea467ec81220d922",
+    "rmcs_obs_normalization": "none",
+    "policy_hz": "50",
+    "pilot": "true",
+    "rmcs_history_order": "oldest_first",
+    "training_history_order": "newest_first",
+    "rmcs_observation_scales": "1,1,1,5,0.5,0.5,0.5,1,1,1,1,1,1,1,1,1,0.1,0.1,0.1,0.1,0.1,0.1,1,1,1,1,1,1,1,1,1,1,1,5,1"
+  },
+  "deployment_contract": {
+    "schema": "wheelbipe-jump-v4-deployment-v2",
+    "training_source_commit": "1d0229aaaac0220229ed3bf5ccecc198ad1f8cbf",
+    "training_profile": "foundation-jump-v13",
+    "source_files_sha256": {
+      "model/wheel_leg_v2.0.2/friction_v1/isaac/gas_spring_model.json": "13db9ada6fa0e111a51406fc950ca0b970d1fd3de0d9ceeac07b22053a952aa6",
+      "model/wheel_leg_v2.0.2/friction_v1/isaac/model_spec.json": "67f824bc29b05647e381f8584528d686955c2cfd99fd783ba40f382279bf2284",
+      "model/wheel_leg_v2.0.2/friction_v1/isaac/manifest.json": "6f6c8ec5b4ec6b4345670a272a1e162111b369013a8f07dd1ed17254a5edb9b2",
+      "contracts/wheelbipe_real2sim_v11.json": "4df46e791b99353c09a841224b0b1a86fa5bbcde5063aa830dd0e9cb77047343",
+      "contracts/wheelbipe_real2sim_v3p2_20261112.json": "23a520ffdad15ab865d8eaa1efe8df2454268436bcfc622d52a1018f83a8276d",
+      "model/wheelbipe_port_v202/wheel_response_v210.json": "b78af2f0ada2a4a3f17571df9427713bed1079d7b25a41ea5e4d72e35690cf84",
+      "contracts/wheelbipe_foundation_jump_v13.json": "636780cc44c5b95e88c98edee6c71f17dd2c844d101ab611d05144b979dda4d5"
+    },
+    "model_spec_sha256": "67f824bc29b05647e381f8584528d686955c2cfd99fd783ba40f382279bf2284",
+    "gas_model_sha256": "13db9ada6fa0e111a51406fc950ca0b970d1fd3de0d9ceeac07b22053a952aa6",
+    "policy_hz": 50,
+    "feedback_pd_hz": 200,
+    "control": {
+      "leg_kp_nm_per_rad": 80.0,
+      "leg_kd_nm_s_per_rad": 1.5,
+      "virtual_pair_overtravel_rad": 0.2,
+      "tuck_spring_compensation": {
+        "mode": "model",
+        "gain": 0.75,
+        "cap_nm": 16.0,
+        "error_on_rad": 0.02,
+        "error_full_rad": 0.1,
+        "inward_pd_full_nm": 2.0
+      },
+      "virtual_pair_overtravel_scope": "jump-request"
+    },
+    "request": {
+      "standing_height_m": 0.305,
+      "crouch_height_m": 0.25,
+      "release_height_m": 0.39,
+      "crouch_seconds": 0.35,
+      "apex_range_m": [
+        0.42,
+        0.54
+      ],
+      "nominal_request_delay_s": 0.8,
+      "outcome_seconds": 4.5,
+      "moving_vx_max_m_s": 1.0,
+      "forward_command": "live, bounded by moving_vx_max_m_s",
+      "forward_rate_limit_m_s2": 2.0
+    },
+    "nominal_position": [
+      -0.42,
+      0.13722330866417465,
+      0.42,
+      -0.13721605817245947,
+      0.0,
+      0.0
+    ],
+    "winding_bounds_rad": [
+      [
+        -0.1408932677945942,
+        1.4282761689185115
+      ],
+      [
+        -0.14084732125908495,
+        1.4283102010168576
+      ]
+    ],
+    "real_state_soft_limits_rad": [
+      -0.14084732125908495,
+      1.4282761689185115
+    ],
+    "real_state_margin_rad": 0.03,
+    "leg_torque_cap_nm": 40.0,
+    "wheel_torque_cap_nm": 4.5,
+    "observation_version": "wheelbipe-v202-foundation-jump-v13-rmcs-oldest-first-adapter",
+    "observation": {
+      "size": 175,
+      "action_size": 6,
+      "normalization": "none",
+      "joint_select": [
+        0,
+        2,
+        1,
+        3,
+        4,
+        5
+      ],
+      "order": [
+        "command",
+        "height",
+        "gyro",
+        "gravity",
+        "position",
+        "velocity",
+        "previous_action",
+        "auxiliary"
+      ],
+      "jump_context": "ordinary=[1,0,0,0,0,0,0]; request=[0,0,0,0,1,apex,elapsed_s]",
+      "command_inputs": "external request and elapsed time only; no contact or measured apex",
+      "history_frames": 5,
+      "frame_size": 35,
+      "history_order": "oldest_first",
+      "training_history_order": "newest_first",
+      "history_adapter": "ONNX reverses five frames before actor",
+      "frame_period_s": 0.02,
+      "reset_fill": "repeat first sensor frame",
+      "scales": [
+        1.0,
+        1.0,
+        1.0,
+        5.0,
+        0.5,
+        0.5,
+        0.5,
+        1.0,
+        1.0,
+        1.0,
+        1.0,
+        1.0,
+        1.0,
+        1.0,
+        1.0,
+        1.0,
+        0.1,
+        0.1,
+        0.1,
+        0.1,
+        0.1,
+        0.1,
+        1.0,
+        1.0,
+        1.0,
+        1.0,
+        1.0,
+        1.0,
+        1.0,
+        1.0,
+        1.0,
+        1.0,
+        1.0,
+        5.0,
+        1.0
+      ],
+      "scale_scope": "each 35D sensor frame before history stacking; exactly once"
+    },
+    "landing_buffer": {
+      "seconds": 0.3,
+      "scope": "training reward only; actor controls deployment landing"
+    },
+    "behavior_qualified": false,
+    "hardware_tested": false,
+    "command": {
+      "forward_limit_m_s": 2.7,
+      "yaw_limit_rad_s": 10.471975511965978,
+      "height_min_m": 0.23,
+      "height_max_m": 0.42,
+      "height_rate_m_s": 0.6666666666666666
+    },
+    "checkpoint_sha256": "14bcdfc7f621259ba2e2e44ae82b1d4f9d3adbf2d221e10dea467ec81220d922",
+    "completed_updates": 7989,
+    "pilot": true,
+    "observation_contract_sha256": "9e39952a99870a590834c4e7d810d96c25a8bc5d13eb417e93dd836b680330ee",
+    "parent_deployment_contract_sha256": "34f2eb33aa016729c7cca7dfae563a477a9a8781a3c445c61b072bf0a8c2adae",
+    "native_training_physics_hz": 400,
+    "target_updates": 20000,
+    "checkpoint_status": "stopped_early_durable",
+    "pilot_bringup": {
+      "robot": "wheel-leg-infantry-v13",
+      "manual_vx_max_m_s": 1.0
+    },
+    "training_source_snapshot_sha256": "d1153b6775b0644450b8c86873f544792a69db0f8309177464eade890e85e0ca",
+    "deployment_contract_sha256": "510121c8441c5ae99fbd52b47fd5a03181e82b2f9c121f04f9d06d975347ce09"
+  },
+  "behavior_qualified": false,
+  "hardware_tested": false
+}
