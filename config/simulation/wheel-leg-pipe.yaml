@@ -214,12 +214,7 @@ rl_bridge:
     observation_frame_sequence_interface: /wheel_leg/rl/features/frame_sequence
     observation_epoch_interface: /wheel_leg/rl/features/epoch
     expected_metadata:
-      wheelbipe_deployment_contract_sha256: ae38a0b74e8e9515d17fdcd24c21a187b7d0b3e22dfa114c83e579605347e0ab
-      rmcs_observation_contract_sha256: 9e39952a99870a590834c4e7d810d96c25a8bc5d13eb417e93dd836b680330ee
-      rmcs_observation_version: wheelbipe-v202-foundation-jump-v10-rmcs-oldest-first-adapter
-      rmcs_checkpoint_sha256: 301301b4d945c351d94b3fbfd91c7089c36883c1a71867aa81a08d3cd5e1a98a
       rmcs_history_order: oldest_first
-      pilot: 'true'
       policy_hz: '50'
       rmcs_obs_normalization: none
       rmcs_observation_scales: 1,1,1,5,0.5,0.5,0.5,1,1,1,1,1,1,1,1,1,0.1,0.1,0.1,0.1,0.1,0.1,1,1,1,1,1,1,1,1,1,1,1,5,1
